@@ -1,0 +1,203 @@
+# v2.4 default configuration
+# Goal: 1-site 3-sector SLS beam-management prototype with RF architecture
+#       resolution, automatic MU-order binding, selectable Sionna TR 38.901
+#       channel backend, and Sionna SYS-style ILLA/TBLER abstraction.
+
+scenario:
+  name: urban_macro_v2_4_one_site_three_sector
+  carrier_frequency_ghz: 30.0
+  channel_model: sionna_tr38901_uma    # sionna_tr38901_uma / sionna_tr38901_umi / sionna_tr38901_rma / numpy_geometric_uma
+  min_ue_distance_m: 35.0
+  max_ue_distance_m: 250.0
+  enable_pathloss: true
+  enable_shadow_fading: true
+  o2i_model: low
+  # Used by numpy fallback only
+  num_clusters: 8
+  delay_spread_ns: 100.0
+  shadow_fading_std_db: 4.0
+  pathloss_exponent: 3.0
+
+topology:
+  layout: one_site_three_sector
+  num_sites: 1
+  sectors_per_site: 3
+  sector_azimuths_deg: [30.0, 150.0, 270.0]
+  sector_width_deg: 120.0
+  isd_m: 500.0
+  bs_height_m: 25.0
+
+system:
+  bandwidth_mhz: 20.0
+  subcarrier_spacing_khz: 120.0
+  tx_power_dbm: 33.0
+  num_drops: 10
+  num_tti_per_drop: 50
+  random_seed: 20260610
+  target_bler: 0.1
+
+pdsch:
+  num_prbs: 132
+  num_symbols: 12
+  dmrs_overhead_re_per_prb: 18
+  num_layers_per_ue: 1
+  slot_duration_ms: 0.125
+
+noise:
+  thermal_noise_density_dbm_per_hz: -174.0
+  ue_noise_figure_db: 7.0
+
+ue_drop:
+  num_ut_per_sector: 10
+  distribution: uniform_in_sector
+  speed_kmh: 3.0
+
+trp:
+  # One TRP per sector by default. RF architecture below determines how many
+  # independent analog TX units/beams this TRP can transmit simultaneously.
+  num_trps_per_sector: 1
+  # Backward-compatible alias; keep equal to num_trps_per_sector unless you know
+  # an older script reads this field.
+  num_panels_per_sector: 1
+  # Boresight offsets for physical array panels. Default TRP has Mg*Ng*Mp*Np=2
+  # vertical panels; both use the sector boresight here.
+  panel_azimuth_offsets_deg: [0.0, 0.0]
+  # per_tx_unit_equal: total sector/TRP power is divided over all resolved TX units.
+  panel_power_mode: per_tx_unit_equal
+
+rf_architecture:
+  # Case 1: sub-connected / panel-polarization connected.
+  # Each TXRU controls one physical-panel/polarization subarray.
+  # Case 2: fully_connected. Each TXRU connects to the whole TRP array and can
+  # form one full-array hybrid beam.
+  txru_connectivity: panel_polarization_subarray   # panel_polarization_subarray / fully_connected
+  # true: two polarizations of the same panel may use different DFT beams;
+  # false: two polarizations on one panel share the same spatial beam.
+  allow_independent_polarization_beams: true
+  num_txru: 4
+  max_parallel_beams_per_trp: auto
+
+tx_array:
+  # Requested TRP antenna: 4 TXRUs, 1024 AEs
+  # (M, N, P, Mg, Ng; Mp, Np) = (16, 16, 2, 2, 1; 1, 1)
+  # (dH, dV) = (0.5, 0.5)
+  model: tr38901_panel
+  num_txru: 4
+  num_ae: 1024
+  M: 16
+  N: 16
+  P: 2
+  Mg: 2
+  Ng: 1
+  Mp: 1
+  Np: 1
+  dH: 0.5
+  dV: 0.5
+  # Legacy/manual beam-scope field. v2.4 resolves the effective scope from
+  # rf_architecture. With the default RF architecture, the effective scope is
+  # panel_polarization_subarray.
+  beam_scope: per_panel
+  # Candidate DFT beam grid. num_beams_h*num_beams_v is the scanned subset.
+  # In default sub-connected mode these counts apply to each panel-polarization
+  # TXRU; in fully_connected mode they apply to the whole TRP array per TXRU.
+  sampling_mode: uniform
+  num_beams_h: 4
+  num_beams_v: 4
+  max_beams: 16
+  vertical_beam_mode: scan
+  fixed_v_index: null
+
+ue_array:
+  model: tr38901_panel
+  num_rxru: 4
+  num_ae: 16
+  M: 4
+  N: 4
+  P: 1
+  Mg: 1
+  Ng: 1
+  Mp: 1
+  Np: 1
+  dH: 0.5
+  dV: 0.5
+  beam_scope: joint
+  sampling_mode: uniform
+  num_beams_h: 4
+  num_beams_v: 4
+  max_beams: 16
+  vertical_beam_mode: scan
+  fixed_v_index: null
+
+beam:
+  tx_codebook: dft_2d
+  rx_codebook: dft_2d
+  one_beam_per_panel: true
+
+measurement:
+  num_freq_points: 24
+  compute_full_gamma: true
+  frequency_average: linear_power
+
+feedback:
+  schemes: [full_gamma, baseline, topk_conflict_id, threshold_conflict_set]
+  cqi_mode: illa_target_bler
+  service_beam_top_k1: 2
+  oracle_service_beam_top_k: 4
+  conflict_top_k2: 3
+  conflict_sinr_threshold_db: 0.0
+
+scheduler:
+  domain_mode: single_site_three_sector_independent
+  objective: sum_rate
+  # auto binds MU order to RF architecture. With default case-1 RF, 4 TXRUs and
+  # independent polarization beams, resolved max_mu_order = 4.
+  max_mu_order: auto
+  cap_mu_order_by_rf: true
+  algorithm: greedy       # greedy is the recommended default; exhaustive is for tiny debug cases only.
+  use_panel_constraint: true
+  conflict_penalty_lambda: 0.35
+  unknown_interference_policy: zero
+  pf_tbar_init_mbps: 1.0
+
+link_abstraction:
+  mode: sionna_sys_precomputed_bler
+  mcs_table_index: 1
+  mcs_category: 1   # Sionna SYS category 1 = downlink PDSCH; category 0 = PUSCH.
+  sinr_mapping: eesm
+  eesm_beta_db: 5.0
+  olla_enabled: true
+  olla_step_db: 0.1
+  harq_enabled: true
+  # Fallback table parameters, used only if Sionna SYS is unavailable and fallback is enabled.
+  bler_curve_slope: 1.1
+  fallback_snr_min_db: -8.0
+  fallback_snr_max_db: 35.0
+  fallback_snr_step_db: 0.05
+
+coverage_heatmap:
+  enabled: true
+  backend: configured_channel_sampling
+  grid_size: 40
+  max_distance_m: 300.0
+  chunk_size: 128
+  fixed_vertical_beam_cdf:
+    enabled: true
+    candidate_v_indices: all
+    horizontal_num_beams: 4
+    selection_metric: mean_dbm
+
+progress:
+  enabled: true
+
+sionna:
+  enable_import_probe: true
+  prefer_sionna_sys_phy_abstraction: true
+  fallback_to_numpy_if_unavailable: true
+  device: null
+  precision: null
+  bs_polarization: dual
+  bs_polarization_type: cross
+  bs_antenna_pattern: '38.901'
+  ut_polarization: single
+  ut_polarization_type: V
+  ut_antenna_pattern: omni

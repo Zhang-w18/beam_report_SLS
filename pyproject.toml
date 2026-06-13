@@ -1,0 +1,13 @@
+[project]
+name = "sionna-sls-beam-mgmt-v2-4"
+version = "0.2.4"
+description = "Phase-1 beam-domain SLS prototype for UE beam-interference feedback and MU-MIMO scheduling studies"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.23",
+  "pyyaml>=6.0",
+  "matplotlib>=3.5",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
