@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from itertools import combinations, product
-from typing import Dict, Iterable, List, Sequence, Tuple
+from dataclasses import dataclass, field
+from itertools import combinations
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 
@@ -10,6 +10,31 @@ from .codebook import BeamId
 from .feedback import UEReport
 from .mcs import rate_mbps_from_mcs, select_mcs_from_sinr_lin
 from .utils import lin_to_db
+
+
+GLOBAL_DOMAIN_MODES = {"global", "network", "global_joint", "network_joint"}
+SITE_DOMAIN_MODES = {
+    "site",
+    "site_joint",
+    "site_domain",
+    "per_site",
+    "per_site_joint",
+    "per_site_three_sector_joint",
+    "single_site_three_sector_independent",
+}
+
+
+def normalize_domain_mode(mode: str | None) -> str:
+    raw = str(mode or "global").lower()
+    if raw in GLOBAL_DOMAIN_MODES:
+        return "global"
+    if raw in SITE_DOMAIN_MODES:
+        return "per_site_joint"
+    raise ValueError(f"Unknown scheduler.domain_mode={mode}")
+
+
+def is_site_domain_mode(mode: str | None) -> bool:
+    return normalize_domain_mode(mode) == "per_site_joint"
 
 
 @dataclass
@@ -36,12 +61,14 @@ class ScheduleResult:
     scheme: str
     objective_value: float
     links: List[ScheduledLink]
+    metadata: Dict = field(default_factory=dict)
 
     def to_dict(self, beam_ids: Sequence[BeamId]) -> Dict:
         return {
             "scheme": self.scheme,
             "objective_value": self.objective_value,
             "links": [l.to_dict(beam_ids) for l in self.links],
+            "metadata": self.metadata,
         }
 
 
@@ -50,12 +77,75 @@ def schedule(reports: List[UEReport],
              cfg: Dict,
              tbar_mbps: Dict[int, float] | None = None,
              link_adapter=None) -> ScheduleResult:
+    domain_mode = normalize_domain_mode(cfg["scheduler"].get("domain_mode", "global"))
+    if domain_mode == "per_site_joint":
+        return schedule_per_site_joint(reports, beam_ids, cfg, tbar_mbps, link_adapter)
+    return _schedule_single_domain(reports, beam_ids, cfg, tbar_mbps, link_adapter, domain_id=None)
+
+
+def _schedule_single_domain(reports: List[UEReport],
+                            beam_ids: Sequence[BeamId],
+                            cfg: Dict,
+                            tbar_mbps: Dict[int, float] | None = None,
+                            link_adapter=None,
+                            domain_id: int | None = None) -> ScheduleResult:
     alg = cfg["scheduler"].get("algorithm", "exhaustive")
     if alg == "exhaustive":
-        return exhaustive_schedule(reports, beam_ids, cfg, tbar_mbps, link_adapter)
+        return exhaustive_schedule(reports, beam_ids, cfg, tbar_mbps, link_adapter, domain_id=domain_id)
     if alg == "greedy":
-        return greedy_schedule(reports, beam_ids, cfg, tbar_mbps, link_adapter)
+        return greedy_schedule(reports, beam_ids, cfg, tbar_mbps, link_adapter, domain_id=domain_id)
     raise ValueError(f"Unknown scheduler.algorithm={alg}")
+
+
+def schedule_per_site_joint(reports: List[UEReport],
+                            beam_ids: Sequence[BeamId],
+                            cfg: Dict,
+                            tbar_mbps: Dict[int, float] | None = None,
+                            link_adapter=None) -> ScheduleResult:
+    scheme = reports[0].scheme if reports else "unknown"
+    by_site: Dict[int, List[UEReport]] = {}
+    for r in reports:
+        by_site.setdefault(0 if r.site_id is None else int(r.site_id), []).append(r)
+
+    links: List[ScheduledLink] = []
+    objective = 0.0
+    domains: List[Dict] = []
+    for site_id in sorted(by_site):
+        res = _schedule_single_domain(by_site[site_id], beam_ids, cfg, tbar_mbps, link_adapter, domain_id=site_id)
+        links.extend(res.links)
+        objective += float(res.objective_value)
+        domains.append(res.metadata)
+
+    metadata = {
+        "domain_mode": "per_site_joint",
+        "algorithm": cfg["scheduler"].get("algorithm", "exhaustive"),
+        "num_domains": len(domains),
+        "domains": domains,
+        "aggregate_stats": _aggregate_domain_stats(domains),
+    }
+    return ScheduleResult(scheme=scheme, objective_value=float(objective), links=links, metadata=metadata)
+
+
+def _aggregate_domain_stats(domains: Sequence[Dict]) -> Dict:
+    totals: Dict[str, int | float] = {}
+    additive = {
+        "num_reports_input",
+        "num_reports_with_candidates",
+        "num_reports_after_pruning",
+        "raw_assignment_count",
+        "assignment_count_after_zero_prune",
+        "evaluated_assignment_count",
+        "panel_pruned_count",
+        "bound_pruned_count",
+        "zero_upper_bound_pruned_reports",
+        "num_scheduled",
+    }
+    for d in domains:
+        stats = d.get("stats", d)
+        for k in additive:
+            if k in stats:
+                totals[k] = totals.get(k, 0) + int(stats.get(k, 0))
+    return totals
 
 
 def _rate_kwargs(cfg: Dict) -> Dict:
@@ -153,6 +243,62 @@ def _evaluate_assignments(assignments: Sequence[Tuple[int, int]],
     return float(utility), links
 
 
+def _candidate_upper_bound(rep: UEReport,
+                           beam_index: int,
+                           cfg: Dict,
+                           tbar_mbps: Dict[int, float] | None,
+                           link_adapter=None) -> float:
+    cand = rep.candidate_by_beam(beam_index)
+    if cand is None:
+        return 0.0
+    if link_adapter is not None:
+        r_mbps = float(link_adapter.rate_mbps(int(cand.su_mcs)))
+    else:
+        r_mbps = rate_mbps_from_mcs(int(cand.su_mcs), **_rate_kwargs(cfg))
+    return float(_pf_weight(rep.ue_id, cfg, tbar_mbps) * r_mbps)
+
+
+def _report_upper_bound(rep: UEReport,
+                        cfg: Dict,
+                        tbar_mbps: Dict[int, float] | None,
+                        link_adapter=None) -> float:
+    if not rep.candidates:
+        return 0.0
+    return max(_candidate_upper_bound(rep, c.beam_index, cfg, tbar_mbps, link_adapter)
+               for c in rep.candidates)
+
+
+def _sorted_report_copy(rep: UEReport,
+                        cfg: Dict,
+                        tbar_mbps: Dict[int, float] | None,
+                        link_adapter=None) -> UEReport:
+    cands = sorted(rep.candidates,
+                   key=lambda c: _candidate_upper_bound(rep, c.beam_index, cfg, tbar_mbps, link_adapter),
+                   reverse=True)
+    return UEReport(ue_id=rep.ue_id,
+                    scheme=rep.scheme,
+                    candidates=cands,
+                    site_id=rep.site_id,
+                    serving_cell=rep.serving_cell,
+                    full_gamma=rep.full_gamma,
+                    full_service_power_w=rep.full_service_power_w,
+                    full_noise_power_w=rep.full_noise_power_w)
+
+
+def _count_candidate_assignments(reports: Sequence[UEReport], max_q: int) -> int:
+    n = len(reports)
+    qmax = min(int(max_q), n)
+    total = 0
+    counts = [len(r.candidates) for r in reports]
+    for q in range(1, qmax + 1):
+        for subset in combinations(range(n), q):
+            prod = 1
+            for i in subset:
+                prod *= int(counts[i])
+            total += prod
+    return int(total)
+
+
 def _effective_max_mu_order(cfg: Dict) -> int:
     resolved = cfg.get("_resolved", {}).get("max_mu_order", None)
     if resolved is not None:
@@ -167,38 +313,136 @@ def exhaustive_schedule(reports: List[UEReport],
                         beam_ids: Sequence[BeamId],
                         cfg: Dict,
                         tbar_mbps: Dict[int, float] | None = None,
-                        link_adapter=None) -> ScheduleResult:
+                        link_adapter=None,
+                        domain_id: int | None = None) -> ScheduleResult:
     max_q = _effective_max_mu_order(cfg)
+    num_reports_input = len(reports)
     reports = [r for r in reports if r.candidates]
+    num_reports_with_candidates = len(reports)
     best_val = 0.0
     best_links: List[ScheduledLink] = []
     scheme = reports[0].scheme if reports else "unknown"
+    pruning_cfg = cfg["scheduler"].get("exhaustive_pruning", {}) or {}
+    sort_by_bound = bool(pruning_cfg.get("sort_by_upper_bound", True))
+    zero_prune = bool(pruning_cfg.get("zero_upper_bound", True))
+    branch_and_bound = bool(pruning_cfg.get("branch_and_bound", pruning_cfg.get("enabled", True)))
+    use_panel_constraint = bool(cfg["scheduler"].get("use_panel_constraint", True))
 
-    for q in range(1, min(max_q, len(reports)) + 1):
-        for subset in combinations(reports, q):
-            cand_lists = [[c.beam_index for c in r.candidates] for r in subset]
-            for beams in product(*cand_lists):
-                assignments = [(subset[i].ue_id, int(beams[i])) for i in range(q)]
-                if not _panel_constraint_ok(assignments, reports, beam_ids, cfg):
+    raw_assignment_count = _count_candidate_assignments(reports, max_q)
+    if sort_by_bound:
+        reports = [_sorted_report_copy(r, cfg, tbar_mbps, link_adapter) for r in reports]
+
+    report_bounds = [_report_upper_bound(r, cfg, tbar_mbps, link_adapter) for r in reports]
+    zero_pruned = 0
+    if zero_prune:
+        kept: List[UEReport] = []
+        kept_bounds: List[float] = []
+        for r, ub in zip(reports, report_bounds):
+            if ub > 0.0:
+                kept.append(r)
+                kept_bounds.append(float(ub))
+            else:
+                zero_pruned += 1
+        reports = kept
+        report_bounds = kept_bounds
+
+    if sort_by_bound:
+        order = np.argsort(np.asarray(report_bounds, dtype=float))[::-1]
+        reports = [reports[int(i)] for i in order]
+        report_bounds = [float(report_bounds[int(i)]) for i in order]
+
+    assignment_count_after_zero = _count_candidate_assignments(reports, max_q)
+    stats = {
+        "algorithm": "exhaustive",
+        "domain_id": None if domain_id is None else int(domain_id),
+        "num_reports_input": int(num_reports_input),
+        "num_reports_with_candidates": int(num_reports_with_candidates),
+        "num_reports_after_pruning": int(len(reports)),
+        "max_mu_order": int(max_q),
+        "raw_assignment_count": int(raw_assignment_count),
+        "assignment_count_after_zero_prune": int(assignment_count_after_zero),
+        "evaluated_assignment_count": 0,
+        "panel_pruned_count": 0,
+        "bound_pruned_count": 0,
+        "zero_upper_bound_pruned_reports": int(zero_pruned),
+        "branch_and_bound_enabled": branch_and_bound,
+        "panel_constraint_enabled": use_panel_constraint,
+        "candidate_ordering": "standalone_rate_desc" if sort_by_bound else "config_order",
+    }
+
+    def remaining_upper_bound(start_index: int, slots: int) -> float:
+        if slots <= 0 or start_index >= len(report_bounds):
+            return 0.0
+        return float(sum(report_bounds[start_index:start_index + int(slots)]))
+
+    def dfs(start_index: int,
+            assignments: List[Tuple[int, int]],
+            used_panel_keys: set,
+            current_val: float,
+            current_links: List[ScheduledLink]) -> None:
+        nonlocal best_val, best_links
+        if assignments and current_val > best_val:
+            best_val = float(current_val)
+            best_links = current_links
+        if len(assignments) >= min(max_q, len(reports)):
+            return
+        slots_left = int(max_q) - len(assignments)
+        if branch_and_bound and current_val + remaining_upper_bound(start_index, slots_left) <= best_val + 1e-12:
+            stats["bound_pruned_count"] += 1
+            return
+        for i in range(start_index, len(reports)):
+            if branch_and_bound:
+                suffix_bound = current_val + report_bounds[i] + remaining_upper_bound(i + 1, slots_left - 1)
+                if suffix_bound <= best_val + 1e-12:
+                    stats["bound_pruned_count"] += 1
                     continue
-                val, links = _evaluate_assignments(assignments, reports, beam_ids, cfg, tbar_mbps, link_adapter)
-                if val > best_val:
-                    best_val = val
-                    best_links = links
-    return ScheduleResult(scheme=scheme, objective_value=float(best_val), links=best_links)
+            r = reports[i]
+            for c in r.candidates:
+                key = beam_ids[c.beam_index].panel_key()
+                if use_panel_constraint and key in used_panel_keys:
+                    stats["panel_pruned_count"] += 1
+                    continue
+                trial = assignments + [(r.ue_id, c.beam_index)]
+                val, links = _evaluate_assignments(trial, reports, beam_ids, cfg, tbar_mbps, link_adapter)
+                stats["evaluated_assignment_count"] += 1
+                if not np.isfinite(val):
+                    continue
+                next_keys = set(used_panel_keys)
+                if use_panel_constraint:
+                    next_keys.add(key)
+                dfs(i + 1, trial, next_keys, float(val), links)
+
+    dfs(0, [], set(), 0.0, [])
+    stats["best_objective_value"] = float(best_val)
+    stats["num_scheduled"] = int(len(best_links))
+    metadata = {"domain_mode": "global" if domain_id is None else "per_site_joint",
+                "domain_id": None if domain_id is None else int(domain_id),
+                "stats": stats}
+    return ScheduleResult(scheme=scheme, objective_value=float(best_val), links=best_links, metadata=metadata)
 
 
 def greedy_schedule(reports: List[UEReport],
                     beam_ids: Sequence[BeamId],
                     cfg: Dict,
                     tbar_mbps: Dict[int, float] | None = None,
-                    link_adapter=None) -> ScheduleResult:
+                    link_adapter=None,
+                    domain_id: int | None = None) -> ScheduleResult:
     max_q = _effective_max_mu_order(cfg)
+    num_reports_input = len(reports)
     reports = [r for r in reports if r.candidates]
     scheme = reports[0].scheme if reports else "unknown"
     current: List[Tuple[int, int]] = []
     current_val = 0.0
     used_ues = set()
+    stats = {
+        "algorithm": "greedy",
+        "domain_id": None if domain_id is None else int(domain_id),
+        "num_reports_input": int(num_reports_input),
+        "num_reports_with_candidates": int(len(reports)),
+        "max_mu_order": int(max_q),
+        "evaluated_assignment_count": 0,
+        "panel_pruned_count": 0,
+    }
 
     while len(current) < max_q:
         best_delta = 0.0
@@ -210,8 +454,10 @@ def greedy_schedule(reports: List[UEReport],
             for c in r.candidates:
                 trial = current + [(r.ue_id, c.beam_index)]
                 if not _panel_constraint_ok(trial, reports, beam_ids, cfg):
+                    stats["panel_pruned_count"] += 1
                     continue
                 val, _ = _evaluate_assignments(trial, reports, beam_ids, cfg, tbar_mbps, link_adapter)
+                stats["evaluated_assignment_count"] += 1
                 delta = val - current_val
                 if delta > best_delta:
                     best_delta = delta
@@ -223,4 +469,9 @@ def greedy_schedule(reports: List[UEReport],
         used_ues.add(best_assignment[0])
         current_val = best_val
     final_val, final_links = _evaluate_assignments(current, reports, beam_ids, cfg, tbar_mbps, link_adapter)
-    return ScheduleResult(scheme=scheme, objective_value=final_val, links=final_links)
+    stats["best_objective_value"] = float(final_val)
+    stats["num_scheduled"] = int(len(final_links))
+    metadata = {"domain_mode": "global" if domain_id is None else "per_site_joint",
+                "domain_id": None if domain_id is None else int(domain_id),
+                "stats": stats}
+    return ScheduleResult(scheme=scheme, objective_value=final_val, links=final_links, metadata=metadata)

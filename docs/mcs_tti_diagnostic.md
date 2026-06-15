@@ -50,10 +50,15 @@
 
 已改为：
 
-```text
-actual_mcs = select_mcs(predicted_sinr_db - olla_offset_db)
-tbler      = BLER_TABLE_LOOKUP(effective_sinr_db, actual_mcs)
-```
+$$
+\mathrm{actual\_mcs}
+= \mathrm{select\_mcs}(\mathrm{predicted\_sinr\_db} - \mathrm{olla\_offset\_db})
+$$
+
+$$
+\mathrm{tbler}
+= \mathrm{BLER\_TABLE\_LOOKUP}(\mathrm{effective\_sinr\_db}, \mathrm{actual\_mcs})
+$$
 
 修改文件：
 
@@ -385,9 +390,9 @@ SNR 插值网格: -5..30 dB, step 0.1 dB
 
 旧 EESM 直接计算：
 
-```python
--beta * log(mean(exp(-sinr / beta)))
-```
+$$
+-\beta \log\left(\mathrm{mean}\left(\exp\left(-\frac{\mathrm{sinr}}{\beta}\right)\right)\right)
+$$
 
 当真实 SINR 很高时，`exp(-sinr / beta)` 可能全部下溢成 0，导致 `log(0)`，最后写出 `effective_sinr_db=inf`。
 

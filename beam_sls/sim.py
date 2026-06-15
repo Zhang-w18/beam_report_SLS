@@ -16,7 +16,7 @@ from .link_adaptation import make_link_adapter
 from .measurement import compute_gamma_measurement
 from .rf import resolve_rf_architecture, resolved_max_mu_order, tx_units_per_sector
 from .plotting import plot_bar, plot_best_beam_heatmap, plot_cdf, plot_heatmap, plot_topology
-from .scheduler import schedule
+from .scheduler import is_site_domain_mode, schedule
 from .topology import make_topology, topology_to_rows
 from .utils import dbm_to_watt, ensure_dir, percentile, thermal_noise_watt, watt_to_dbm, write_csv, write_json
 
@@ -48,6 +48,52 @@ def _panels_per_cell(cfg: Dict[str, Any], tx_cfg: ArrayConfig | None = None, rf_
 def _progress(cfg: Dict[str, Any], msg: str) -> None:
     if bool(cfg.get("progress", {}).get("enabled", True)):
         print(msg, flush=True)
+
+
+def _beam_indices_by_site(beam_ids) -> Dict[int, List[int]]:
+    out: Dict[int, List[int]] = {}
+    for bi, bid in enumerate(beam_ids):
+        out.setdefault(int(bid.trp), []).append(int(bi))
+    return out
+
+
+def _schedule_stat_rows(drop: int, scheme: str, sched) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    meta = getattr(sched, "metadata", {}) or {}
+    domains = meta.get("domains")
+    if domains:
+        for d in domains:
+            stats = dict(d.get("stats", {}))
+            row = {
+                "drop": int(drop),
+                "scheme": scheme,
+                "domain_mode": meta.get("domain_mode", "per_site_joint"),
+                "domain_id": d.get("domain_id", stats.get("domain_id")),
+            }
+            row.update(stats)
+            rows.append(row)
+        agg = dict(meta.get("aggregate_stats", {}))
+        if agg:
+            row = {
+                "drop": int(drop),
+                "scheme": scheme,
+                "domain_mode": meta.get("domain_mode", "per_site_joint"),
+                "domain_id": "all",
+            }
+            row.update(agg)
+            rows.append(row)
+        return rows
+    stats = dict(meta.get("stats", {}))
+    row = {
+        "drop": int(drop),
+        "scheme": scheme,
+        "domain_mode": meta.get("domain_mode", "global"),
+        "domain_id": meta.get("domain_id", stats.get("domain_id")),
+    }
+    row.update(stats)
+    rows.append(row)
+    return rows
+
 
 def _max_beams_from_cfg(array_section: Dict[str, Any], array_cfg: ArrayConfig) -> int | None:
     val = array_section.get("max_beams", None)
@@ -126,8 +172,10 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     sector_rows_all: List[Dict[str, Any]] = []
     beam_rows: List[Dict[str, Any]] = [b.to_dict() for b in beam_ids]
     report_rows: List[Dict[str, Any]] = []
+    scheduler_stat_rows: List[Dict[str, Any]] = []
     tbar_by_scheme: Dict[str, Dict[int, float]] = {}
     channel_backend_rows: List[Dict[str, Any]] = []
+    domain_mode = cfg["scheduler"].get("domain_mode", "global")
 
     schemes = list(cfg["feedback"].get("schemes", ["baseline"]))
     total_ues = int(cfg["ue_drop"]["num_ut_per_sector"]) * max(1, topo0.num_cells)
@@ -155,12 +203,24 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
                                          tx_power_w_per_panel=tx_power_w_per_panel,
                                          noise_power_w=noise_w,
                                          link_adapter=link_adapter)
+        ue_site_ids = {int(ue.ue_id): int(ue.site_id) for ue in topo.ues}
+        ue_serving_cells = {int(ue.ue_id): int(ue.serving_cell) for ue in topo.ues}
+        candidate_beam_indices_by_ue = None
+        if is_site_domain_mode(domain_mode):
+            beams_by_site = _beam_indices_by_site(beam_ids)
+            candidate_beam_indices_by_ue = {
+                int(ue.ue_id): beams_by_site.get(int(ue.site_id), [])
+                for ue in topo.ues
+            }
         reports_by_scheme = make_reports(
             meas, beam_ids, schemes=schemes,
             k1=int(cfg["feedback"].get("service_beam_top_k1", 2)),
             oracle_top_k=int(cfg["feedback"].get("oracle_service_beam_top_k", 4)),
             k2=int(cfg["feedback"].get("conflict_top_k2", 3)),
             threshold_db=float(cfg["feedback"].get("conflict_sinr_threshold_db", 0.0)),
+            ue_site_ids=ue_site_ids,
+            ue_serving_cells=ue_serving_cells,
+            candidate_beam_indices_by_ue=candidate_beam_indices_by_ue,
         )
         site_rows, sector_rows = topology_to_rows(topo)
         for r in site_rows:
@@ -188,6 +248,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
                                   "objective_value": sched.objective_value,
                                   "num_scheduled": len(sched.links),
                                   "schedule_json": json.dumps(sched.to_dict(beam_ids), ensure_ascii=False)})
+            scheduler_stat_rows.extend(_schedule_stat_rows(drop, scheme, sched))
             link_rows, olla_state = run_tti_loop(sched, ch.h_freq, tx_beams, rx_beams, beam_ids, meas,
                                                  tx_power_w_per_panel, cfg, drop, rng, olla_state,
                                                  link_adapter=link_adapter)
@@ -205,6 +266,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             "num_cells": topo.num_cells,
             "num_sites": len(topo.sites),
             "num_beams": len(beam_ids),
+            "scheduler_domain_mode": domain_mode,
             "noise_dbm": float(watt_to_dbm(noise_w)),
             "tx_power_per_tx_unit_dbm": float(watt_to_dbm(tx_power_w_per_panel)),
             "avg_su_snr_db": float(np.mean(meas.su_snr_db)),
@@ -222,6 +284,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     write_csv(out_dir / "metrics" / "sectors.csv", sector_rows_all)
     write_csv(out_dir / "metrics" / "beams.csv", beam_rows)
     write_csv(out_dir / "metrics" / "reports.csv", report_rows)
+    write_csv(out_dir / "metrics" / "scheduler_stats.csv", scheduler_stat_rows)
     write_csv(out_dir / "metrics" / "channel_backend.csv", channel_backend_rows)
 
     summary = summarize_results(link_dict_rows, schemes)

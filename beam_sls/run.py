@@ -19,6 +19,12 @@ def main() -> None:
                         help="Override system.num_tti_per_drop")
     parser.add_argument("--algorithm", type=str, default=None, choices=["exhaustive", "greedy"],
                         help="Override scheduler.algorithm")
+    parser.add_argument("--domain-mode", type=str, default=None,
+                        help="Override scheduler.domain_mode, e.g. per_site_joint or global")
+    parser.add_argument("--layout", type=str, default=None,
+                        help="Override topology.layout, e.g. three_site_triangle or seven_site_hex")
+    parser.add_argument("--num-sites", type=int, default=None,
+                        help="Override topology.num_sites")
     parser.add_argument("--objective", type=str, default=None, choices=["sum_rate", "proportional_fair"],
                         help="Override scheduler.objective")
     parser.add_argument("--skip-heatmap", action="store_true",
@@ -34,6 +40,12 @@ def main() -> None:
         cfg["system"]["num_tti_per_drop"] = args.num_tti
     if args.algorithm is not None:
         cfg["scheduler"]["algorithm"] = args.algorithm
+    if args.domain_mode is not None:
+        cfg["scheduler"]["domain_mode"] = args.domain_mode
+    if args.layout is not None:
+        cfg["topology"]["layout"] = args.layout
+    if args.num_sites is not None:
+        cfg["topology"]["num_sites"] = args.num_sites
     if args.objective is not None:
         cfg["scheduler"]["objective"] = args.objective
     if args.skip_heatmap:

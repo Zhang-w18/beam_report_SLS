@@ -4,11 +4,13 @@ import numpy as np
 
 from beam_sls.codebook import BeamId
 from beam_sls.config import load_config
+from beam_sls.feedback import ServiceCandidate, UEReport, make_reports
 from beam_sls.link import eesm
 from beam_sls.link import run_tti_loop
 from beam_sls.measurement import MeasurementResult
-from beam_sls.scheduler import ScheduledLink, ScheduleResult
+from beam_sls.scheduler import ScheduledLink, ScheduleResult, exhaustive_schedule, schedule
 from beam_sls.sim import run_simulation
+from beam_sls.topology import make_topology
 
 
 def test_smoke(tmp_path: Path):
@@ -75,3 +77,104 @@ def test_transmitted_mcs_uses_predicted_sinr_not_realized_sinr():
     assert rows[0].effective_sinr_db > 50.0
     assert rows[0].mcs_selection_sinr_db == -6.0
     assert rows[0].actual_mcs == 0
+
+
+def test_multi_site_topology_layouts():
+    cfg = load_config(None)
+    cfg["ue_drop"]["num_ut_per_sector"] = 1
+
+    cfg["topology"]["layout"] = "three_site_triangle"
+    cfg["topology"]["num_sites"] = 3
+    topo = make_topology(cfg, np.random.default_rng(1))
+    assert len(topo.sites) == 3
+    assert topo.num_cells == 9
+    assert len(topo.ues) == 9
+    d01 = np.hypot(topo.sites[0].x_m - topo.sites[1].x_m, topo.sites[0].y_m - topo.sites[1].y_m)
+    d12 = np.hypot(topo.sites[1].x_m - topo.sites[2].x_m, topo.sites[1].y_m - topo.sites[2].y_m)
+    d02 = np.hypot(topo.sites[0].x_m - topo.sites[2].x_m, topo.sites[0].y_m - topo.sites[2].y_m)
+    assert np.allclose([d01, d12, d02], [500.0, 500.0, 500.0])
+
+    cfg["topology"]["layout"] = "seven_site_hex"
+    cfg["topology"]["num_sites"] = 7
+    topo = make_topology(cfg, np.random.default_rng(2))
+    assert len(topo.sites) == 7
+    assert topo.num_cells == 21
+    assert len(topo.ues) == 21
+
+
+def test_site_domain_feedback_and_schedule():
+    cfg = load_config(None)
+    cfg["scheduler"]["algorithm"] = "greedy"
+    cfg["scheduler"]["domain_mode"] = "per_site_joint"
+    cfg["_resolved"] = {"max_mu_order": 1}
+    beam_ids = [
+        BeamId(cell=0, trp=0, panel=0, beam=0, global_index=0, tx_unit=0),
+        BeamId(cell=1, trp=0, panel=0, beam=0, global_index=1, tx_unit=1),
+        BeamId(cell=2, trp=1, panel=0, beam=0, global_index=2, tx_unit=2),
+        BeamId(cell=3, trp=1, panel=0, beam=0, global_index=3, tx_unit=3),
+    ]
+    meas = MeasurementResult(
+        service_power_w=np.ones((2, 4)),
+        interference_power_w=np.zeros((2, 4, 4)),
+        gamma=np.ones((2, 4, 4)),
+        noise_power_w=1.0,
+        selected_rx_beam=np.zeros((2, 4), dtype=int),
+        su_mcs=np.asarray([[1, 2, 28, 27], [28, 27, 1, 2]], dtype=int),
+        su_snr_db=np.asarray([[1.0, 2.0, 30.0, 29.0], [30.0, 29.0, 1.0, 2.0]], dtype=float),
+    )
+    reports = make_reports(
+        meas, beam_ids, schemes=["baseline"], k1=1, oracle_top_k=1, k2=1, threshold_db=0.0,
+        ue_site_ids={0: 0, 1: 1},
+        ue_serving_cells={0: 0, 1: 2},
+        candidate_beam_indices_by_ue={0: [0, 1], 1: [2, 3]},
+    )["baseline"]
+
+    assert reports[0].candidates[0].beam_index == 1
+    assert reports[1].candidates[0].beam_index == 3
+    sched = schedule(reports, beam_ids, cfg)
+    assert sched.metadata["domain_mode"] == "per_site_joint"
+    assert len(sched.links) == 2
+    assert {beam_ids[l.beam_index].trp for l in sched.links} == {0, 1}
+
+
+def test_exhaustive_pruning_matches_unpruned_small_case():
+    cfg = load_config(None)
+    cfg["scheduler"]["algorithm"] = "exhaustive"
+    cfg["scheduler"]["domain_mode"] = "global"
+    cfg["scheduler"]["use_panel_constraint"] = True
+    cfg["_resolved"] = {"max_mu_order": 2}
+    beam_ids = [
+        BeamId(cell=0, trp=0, panel=0, beam=0, global_index=0, tx_unit=0),
+        BeamId(cell=0, trp=0, panel=1, beam=0, global_index=1, tx_unit=1),
+        BeamId(cell=1, trp=1, panel=0, beam=0, global_index=2, tx_unit=2),
+        BeamId(cell=1, trp=1, panel=1, beam=0, global_index=3, tx_unit=3),
+    ]
+    reports = [
+        UEReport(0, "baseline", [ServiceCandidate(0, 10.0, 10), ServiceCandidate(1, 9.0, 9)]),
+        UEReport(1, "baseline", [ServiceCandidate(0, 8.0, 8), ServiceCandidate(2, 7.0, 7)]),
+        UEReport(2, "baseline", [ServiceCandidate(2, 12.0, 12), ServiceCandidate(3, 6.0, 6)]),
+        UEReport(3, "baseline", [ServiceCandidate(1, 11.0, 11), ServiceCandidate(3, 5.0, 5)]),
+    ]
+    cfg_pruned = load_config(None)
+    cfg_pruned["scheduler"].update(cfg["scheduler"])
+    cfg_pruned["_resolved"] = {"max_mu_order": 2}
+    cfg_pruned["scheduler"]["exhaustive_pruning"] = {
+        "enabled": True,
+        "sort_by_upper_bound": True,
+        "zero_upper_bound": True,
+        "branch_and_bound": True,
+    }
+    cfg_unpruned = load_config(None)
+    cfg_unpruned["scheduler"].update(cfg["scheduler"])
+    cfg_unpruned["_resolved"] = {"max_mu_order": 2}
+    cfg_unpruned["scheduler"]["exhaustive_pruning"] = {
+        "enabled": False,
+        "sort_by_upper_bound": False,
+        "zero_upper_bound": False,
+        "branch_and_bound": False,
+    }
+
+    pruned = exhaustive_schedule(reports, beam_ids, cfg_pruned)
+    unpruned = exhaustive_schedule(reports, beam_ids, cfg_unpruned)
+    assert np.isclose(pruned.objective_value, unpruned.objective_value)
+    assert pruned.metadata["stats"]["evaluated_assignment_count"] <= unpruned.metadata["stats"]["evaluated_assignment_count"]

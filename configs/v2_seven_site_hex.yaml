@@ -1,0 +1,26 @@
+scenario:
+  name: urban_macro_v2_seven_site_hex
+
+topology:
+  layout: seven_site_hex
+  num_sites: 7
+  sectors_per_site: 3
+  sector_azimuths_deg: [30.0, 150.0, 270.0]
+  sector_width_deg: 120.0
+  isd_m: 500.0
+  bs_height_m: 25.0
+
+scheduler:
+  domain_mode: per_site_joint
+  algorithm: greedy
+  exhaustive_pruning:
+    enabled: true
+    sort_by_upper_bound: true
+    zero_upper_bound: true
+    branch_and_bound: true
+
+sionna:
+  fallback_to_numpy_if_unavailable: false
+
+coverage_heatmap:
+  max_distance_m: 800.0

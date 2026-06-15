@@ -117,12 +117,58 @@ def default_sector_azimuths(num_sectors: int) -> List[float]:
     return [float(k) * 360.0 / float(num_sectors) for k in range(int(num_sectors))]
 
 
-def build_sites(layout: str, isd_m: float, bs_height_m: float) -> List[Site]:
-    if layout in ("single_cell", "one_site", "one_site_three_sector"):
+def _center_sites(sites: List[Site]) -> List[Site]:
+    if not sites:
+        return sites
+    x0 = float(np.mean([s.x_m for s in sites]))
+    y0 = float(np.mean([s.y_m for s in sites]))
+    return [Site(s.site_id, float(s.x_m - x0), float(s.y_m - y0), s.z_m) for s in sites]
+
+
+def _triangle_sites(isd_m: float, bs_height_m: float) -> List[Site]:
+    h = float(np.sqrt(3.0) * float(isd_m) / 2.0)
+    return _center_sites([
+        Site(0, 0.0, 0.0, float(bs_height_m)),
+        Site(1, float(isd_m), 0.0, float(bs_height_m)),
+        Site(2, float(isd_m) / 2.0, h, float(bs_height_m)),
+    ])
+
+
+def _seven_site_hex_sites(isd_m: float, bs_height_m: float) -> List[Site]:
+    sites = [Site(0, 0.0, 0.0, float(bs_height_m))]
+    for k in range(6):
+        a = np.deg2rad(60.0 * float(k))
+        sites.append(Site(k + 1,
+                          float(isd_m) * float(np.cos(a)),
+                          float(isd_m) * float(np.sin(a)),
+                          float(bs_height_m)))
+    return sites
+
+
+def build_sites(layout: str, isd_m: float, bs_height_m: float, num_sites: int | None = None) -> List[Site]:
+    layout_norm = str(layout).lower()
+    requested_sites = None if num_sites is None else int(num_sites)
+    if layout_norm in ("single_cell", "one_site", "one_site_three_sector"):
         return [Site(site_id=0, x_m=0.0, y_m=0.0, z_m=float(bs_height_m))]
-    if layout == "two_site_line":
+    if layout_norm == "two_site_line":
         return [Site(0, 0.0, 0.0, float(bs_height_m)),
                 Site(1, float(isd_m), 0.0, float(bs_height_m))]
+    if layout_norm in ("three_site_triangle", "three_site", "triangle", "3_site_triangle"):
+        if requested_sites not in (None, 3):
+            raise ValueError(f"topology.layout={layout} requires topology.num_sites=3")
+        return _triangle_sites(isd_m, bs_height_m)
+    if layout_norm in ("seven_site_hex", "seven_site_hexagonal", "seven_site", "7_site_hex", "hex7"):
+        if requested_sites not in (None, 7):
+            raise ValueError(f"topology.layout={layout} requires topology.num_sites=7")
+        return _seven_site_hex_sites(isd_m, bs_height_m)
+    if layout_norm in ("multi_site", "hexagonal"):
+        if requested_sites == 1:
+            return [Site(site_id=0, x_m=0.0, y_m=0.0, z_m=float(bs_height_m))]
+        if requested_sites == 3:
+            return _triangle_sites(isd_m, bs_height_m)
+        if requested_sites == 7:
+            return _seven_site_hex_sites(isd_m, bs_height_m)
+        raise ValueError("topology.layout=multi_site/hexagonal currently supports topology.num_sites in {1, 3, 7}")
     raise ValueError(f"Unsupported topology.layout={layout}")
 
 
@@ -180,7 +226,7 @@ def make_topology(cfg: Dict, rng: np.random.Generator) -> Topology:
     sector_width_deg = float(topo_cfg.get("sector_width_deg", sc.get("sector_width_deg", 120.0)))
     sector_az = topo_cfg.get("sector_azimuths_deg", None)
 
-    sites = build_sites(layout, isd_m, bs_height_m)
+    sites = build_sites(layout, isd_m, bs_height_m, num_sites=topo_cfg.get("num_sites", None))
     sectors = build_sectors(sites, sectors_per_site, sector_az, sector_width_deg)
 
     ues: List[UE] = []

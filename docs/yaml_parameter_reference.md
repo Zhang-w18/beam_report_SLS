@@ -27,12 +27,12 @@
 
 | 参数 | 含义 | 典型取值 / 范围 | 说明 |
 |---|---|---|---|
-| `layout` | 拓扑布局 | 当前默认 `one_site_three_sector` | v2.4 默认只实现 1-site 3-sector 主流程。 |
-| `num_sites` | 站点数 | 当前默认 `1` | 预留扩展字段。 |
+| `layout` | 拓扑布局 | `one_site_three_sector`, `three_site_triangle`, `seven_site_hex` | 也支持别名 `multi_site` + `num_sites` in `{1,3,7}`。 |
+| `num_sites` | 站点数 | `1`, `3`, `7` | 多站点布局会按该字段校验站点数。 |
 | `sectors_per_site` | 每站 sector 数 | 默认 `3` | 默认 3 sector/cell。 |
 | `sector_azimuths_deg` | 每个 sector 的方位角 | 长度为 `sectors_per_site` 的数组 | 默认 `[30,150,270]`。 |
 | `sector_width_deg` | sector 宽度 | 通常 `120` | 用于 UE drop 和 topology 图。 |
-| `isd_m` | 站间距 | 正数，单位 m | 当前 1-site 图中作为标尺显示。 |
+| `isd_m` | 站间距 | 正数，单位 m | 三站点中任意两站点间距为 `isd_m`；七站点中中心站到第一圈邻站为 `isd_m`。 |
 | `bs_height_m` | 基站高度 | 正数，单位 m | 传给 topology/channel。 |
 
 输出 `figures/topology.png` 会画出站点、sector、UE 和 ISD 标尺。
@@ -119,18 +119,27 @@ rf_architecture:
 
 默认 TRP 有：
 
-```text
-physical panels = Mg * Ng * Mp * Np = 2
-polarizations = P = 2
-panel-polarization TX units = 2 * 2 = 4
-```
+$$
+\mathrm{physical\ panels} = M_g \times N_g \times M_p \times N_p = 2
+$$
+
+$$
+\mathrm{polarizations} = P = 2
+$$
+
+$$
+\mathrm{panel\ polarization\ TX\ units} = 2 \times 2 = 4
+$$
 
 因此：
 
-```text
-max_parallel_beams_per_trp = 4
-scheduler.max_mu_order(auto) = 4
-```
+$$
+\mathrm{max\_parallel\_beams\_per\_trp} = 4
+$$
+
+$$
+\mathrm{scheduler.max\_mu\_order(auto)} = 4
+$$
 
 每个 TXRU 只使用对应 panel-polarization 子阵列的 DFT beam。
 
@@ -142,10 +151,13 @@ allow_independent_polarization_beams: false
 
 则同一面板两个极化共享一个空间 beam：
 
-```text
-max_parallel_beams_per_trp = physical panels = 2
-scheduler.max_mu_order(auto) = 2
-```
+$$
+\mathrm{max\_parallel\_beams\_per\_trp} = \mathrm{physical\ panels} = 2
+$$
+
+$$
+\mathrm{scheduler.max\_mu\_order(auto)} = 2
+$$
 
 ### 8.2 情况 2：`fully_connected`
 
@@ -159,10 +171,13 @@ rf_architecture:
 
 含义：每个 TXRU 连接到全 TRP 阵列，可独立形成一个 full-array DFT beam：
 
-```text
-max_parallel_beams_per_trp = num_txru = 4
-scheduler.max_mu_order(auto) = 4
-```
+$$
+\mathrm{max\_parallel\_beams\_per\_trp} = \mathrm{num\_txru} = 4
+$$
+
+$$
+\mathrm{scheduler.max\_mu\_order(auto)} = 4
+$$
 
 注意：这个模式隐含 fully-connected 或足够灵活的 hybrid RF 网络；如果实际硬件是 sub-connected，则 full-array 多 beam 不成立。
 
@@ -194,10 +209,14 @@ scheduler.max_mu_order(auto) = 4
 
 码本大小：
 
-```text
-full-array DFT spatial codebook = N*Ng*Np * M*Mg*Mp
-per-panel DFT spatial codebook = N * M
-```
+$$
+\mathrm{full\ array\ DFT\ spatial\ codebook}
+= N \times N_g \times N_p \times M \times M_g \times M_p
+$$
+
+$$
+\mathrm{per\ panel\ DFT\ spatial\ codebook} = N \times M
+$$
 
 默认 sub-connected/panel-polarization 模式下，每个 TXRU 使用对应 physical panel 的 local DFT codebook，即 `N*M = 256` 个完整候选方向；默认 SLS 只采样 `4*4=16` 个。
 
@@ -240,9 +259,10 @@ ue_array:
 
 复杂度大致随：
 
-```text
-UE 数 * TX beam 数^2 * RX beam 数 * 频点数
-```
+$$
+N_{\mathrm{UE}} \times N_{\mathrm{TX\ beam}}^2
+\times N_{\mathrm{RX\ beam}} \times N_{\mathrm{freq}}
+$$
 
 增长。
 
@@ -265,28 +285,36 @@ UE 数 * TX beam 数^2 * RX beam 数 * 频点数
 
 | 参数 | 含义 | 取值范围 | 说明 |
 |---|---|---|---|
-| `domain_mode` | 调度域模式 | 当前默认 `single_site_three_sector_independent` | 预留扩展。 |
+| `domain_mode` | 调度域模式 | `per_site_joint`, `global` | 默认 `per_site_joint`。旧值 `single_site_three_sector_independent` 兼容为站点域。 |
 | `objective` | 优化目标 | `sum_rate`, `proportional_fair` | 总吞吐最大或比例公平。 |
 | `max_mu_order` | 最大 MU order | `auto` 或正整数 | `auto` 时由 RF architecture 自动解析。 |
 | `cap_mu_order_by_rf` | 是否用 RF 物理并发 beam 数截断手动 MU order | `true`/`false` | 默认 `true`。 |
 | `algorithm` | 调度算法 | `greedy`, `exhaustive` | 默认 `greedy`。`exhaustive` 只建议小规模 debug。 |
 | `use_panel_constraint` | 是否约束同一 TX unit 同时只选一个 beam | `true`/`false` | 默认 `true`。 |
+| `exhaustive_pruning.enabled` | 是否启用穷举剪枝配置 | `true`/`false` | 默认 `true`。 |
+| `exhaustive_pruning.sort_by_upper_bound` | 是否按单用户上界排序 | `true`/`false` | 先找到较好当前最优值，帮助上界剪枝。 |
+| `exhaustive_pruning.zero_upper_bound` | 是否移除零上界 UE report | `true`/`false` | 不改变最优性。 |
+| `exhaustive_pruning.branch_and_bound` | 是否启用 branch-and-bound 上界剪枝 | `true`/`false` | 不改变当前候选集合内的穷举最优性。 |
 | `conflict_penalty_lambda` | proposed feedback 冲突惩罚权重 | 非负数 | 用于 ID-only conflict penalty。 |
 | `unknown_interference_policy` | 未知干扰处理 | 当前 `zero` | 预留字段。 |
 | `pf_tbar_init_mbps` | PF 初始平均吞吐 | 正数 | `objective=proportional_fair` 时使用。 |
 
 `max_mu_order:auto` 的解析规则：
 
-```text
-panel_polarization_subarray + independent polarization beams:
-  max_mu_order = num_txru
+$$
+\mathrm{panel\_polarization\_subarray + independent\ polarization\ beams}:
+\quad \mathrm{max\_mu\_order} = \mathrm{num\_txru}
+$$
 
-panel_polarization_subarray + shared polarization beam:
-  max_mu_order = physical panel count
+$$
+\mathrm{panel\_polarization\_subarray + shared\ polarization\ beam}:
+\quad \mathrm{max\_mu\_order} = \mathrm{physical\ panel\ count}
+$$
 
-fully_connected:
-  max_mu_order = num_txru
-```
+$$
+\mathrm{fully\_connected}:
+\quad \mathrm{max\_mu\_order} = \mathrm{num\_txru}
+$$
 
 如果 `num_trps_per_sector > 1`，则每 sector 的 RF 并发上限会乘以 TRP 数。
 

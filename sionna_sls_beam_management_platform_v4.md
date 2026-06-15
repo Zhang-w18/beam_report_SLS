@@ -72,7 +72,7 @@
 
 UE 对每个 CMR 服务波束扫描自身接收波束，选择最适合接收该 CMR 的接收波束。随后 UE 使用这个接收波束测量对应 IMR 的干扰功率。
 
-如果 BS 侧有 \(M\) 个潜在服务波束、\(N\) 个潜在干扰波束，UE 侧每个 CMR 需要扫描 \(K\) 个接收波束，则理想完整测量开销可以写为：
+如果 BS 侧有 $$M$$ 个潜在服务波束、$$N$$ 个潜在干扰波束，UE 侧每个 CMR 需要扫描 $$K$$ 个接收波束，则理想完整测量开销可以写为：
 
 $$
 K M + M N .
@@ -84,7 +84,7 @@ $$
 \ell = (m,n),
 $$
 
-其中 \(m\) 是 CMR 服务波束，\(n\) 是 IMR 干扰波束。传统上报通常反馈若干个逻辑 CMR ID 及其质量，例如最强 SINR 的若干个逻辑 CMR。
+其中 $$m$$ 是 CMR 服务波束，$$n$$ 是 IMR 干扰波束。传统上报通常反馈若干个逻辑 CMR ID 及其质量，例如最强 SINR 的若干个逻辑 CMR。
 
 这种方式的问题是：
 
@@ -92,7 +92,7 @@ $$
 
 对于 MU-MIMO 调度，调度器真正需要知道的是：
 
-> 如果 UE \(u\) 使用服务波束 \(m\)，其他 UE 是否可以同时使用波束 \(n\)？
+> 如果 UE $$u$$ 使用服务波束 $$m$$，其他 UE 是否可以同时使用波束 $$n$$？
 
 这正是传统上报信息不足的地方。
 
@@ -108,7 +108,7 @@ $$
 (u_1,b_{u_1}), (u_2,b_{u_2}), \ldots, (u_Q,b_{u_Q}).
 $$
 
-其中 \(b_u\) 是分配给 UE \(u\) 的服务波束。由于不同用户的服务波束会互相产生 beam-domain interference，因此单用户最优波束组合未必是多用户最优组合。
+其中 $$b_u$$ 是分配给 UE $$u$$ 的服务波束。由于不同用户的服务波束会互相产生 beam-domain interference，因此单用户最优波束组合未必是多用户最优组合。
 
 <a id="sec-1-3"></a>
 
@@ -117,7 +117,7 @@ $$
 本仿真平台需要验证：
 
 1. 在有限反馈开销下，proposed 上报量能否更准确地描述 beam-pair 兼容关系；
-2. 调度器基于 proposed 上报信息，能否更接近完整 \(\Gamma\) 矩阵 oracle 的调度结果；
+2. 调度器基于 proposed 上报信息，能否更接近完整 $$\Gamma$$ 矩阵 oracle 的调度结果；
 3. proposed 上报能否降低被调度 MU 用户之间的实际 inter-beam interference；
 4. proposed 上报能否提升平均吞吐、5%-ile UE 吞吐和 SINR CDF；
 5. 在 OLLA/HARQ 统计闭环下，该增益是否仍然存在。
@@ -140,10 +140,10 @@ $$
 
 其中：
 
-- \(c\)：cell/sector ID；
-- \(t\)：TRP ID；
-- \(p\)：panel ID；
-- \(k\)：该 panel 内的 beam ID。
+- $$c$$：cell/sector ID；
+- $$t$$：TRP ID；
+- $$p$$：panel ID；
+- $$k$$：该 panel 内的 beam ID。
 
 在 baseline 中，可以取：
 
@@ -163,7 +163,7 @@ $$
 b = (c,k).
 $$
 
-对 UE \(u\)，TRP/panel/beam \(b\) 对应的发射模拟波束向量记为：
+对 UE $$u$$，TRP/panel/beam $$b$$ 对应的发射模拟波束向量记为：
 
 $$
 \mathbf f_b .
@@ -175,19 +175,19 @@ $$
 \mathcal Q_u = \{\mathbf q_{u,1}, \mathbf q_{u,2}, \ldots, \mathbf q_{u,K}\}.
 $$
 
-从物理传输点 \(b\) 所属的 TRP/panel 到 UE \(u\) 的 MIMO 信道记为：
+从物理传输点 $$b$$ 所属的 TRP/panel 到 UE $$u$$ 的 MIMO 信道记为：
 
 $$
 \mathbf H_{u,b}(f),
 $$
 
-其中 \(f\) 表示频域位置，可以是子载波、PRB 或 subband。
+其中 $$f$$ 表示频域位置，可以是子载波、PRB 或 subband。
 
 <a id="sec-2-2"></a>
 
 ### 2.2 服务功率与干扰功率
 
-对 UE \(u\)，若使用服务波束 \(m\)，UE 先在自身接收波束集合中选择最强接收波束：
+对 UE $$u$$，若使用服务波束 $$m$$，UE 先在自身接收波束集合中选择最强接收波束：
 
 $$
 k_{u,m}^{\star}
@@ -224,9 +224,9 @@ S_u(m)
 \right|^2 .
 $$
 
-其中 \(P_m\) 是 CMR/服务波束 \(m\) 的发射功率。
+其中 $$P_m$$ 是 CMR/服务波束 $$m$$ 的发射功率。
 
-当另一个潜在干扰波束 \(n\) 发射时，其对 UE \(u\) 在接收服务波束 \(m\) 状态下造成的干扰功率为：
+当另一个潜在干扰波束 $$n$$ 发射时，其对 UE $$u$$ 在接收服务波束 $$m$$ 状态下造成的干扰功率为：
 
 $$
 I_u(m,n)
@@ -250,11 +250,11 @@ $$
 
 ### 2.3 Gamma 矩阵定义：对角线为 SNR，非对角线为 pair-SINR
 
-对 UE \(u\)，定义 \(\Gamma_u\) 矩阵。若 CMR 服务波束集合与 IMR/潜在干扰波束集合使用相同物理 beam 索引，则 \(\Gamma_u\) 可以看成方阵；否则它是一个 \(M\times N\) 的矩阵，此时“对角线”只对共享物理 beam 索引的元素有意义。
+对 UE $$u$$，定义 $$\Gamma_u$$ 矩阵。若 CMR 服务波束集合与 IMR/潜在干扰波束集合使用相同物理 beam 索引，则 $$\Gamma_u$$ 可以看成方阵；否则它是一个 $$M\times N$$ 的矩阵，此时“对角线”只对共享物理 beam 索引的元素有意义。
 
-对于非对角线元素 \(m\neq n\)，\(\Gamma_u(m,n)\) 表示：
+对于非对角线元素 $$m\neq n$$，$$\Gamma_u(m,n)$$ 表示：
 
-> UE \(u\) 使用服务波束 \(m\) 时，若另一个用户/传输点使用波束 \(n\)，UE \(u\) 看到的 pair-level SINR。
+> UE $$u$$ 使用服务波束 $$m$$ 时，若另一个用户/传输点使用波束 $$n$$，UE $$u$$ 看到的 pair-level SINR。
 
 定义为：
 
@@ -269,7 +269,7 @@ I_u(m,n)+N_u
 \qquad m\neq n.
 $$
 
-对于对角线元素，不能把 \(n=m\) 理解为“同一个物理 beam 同时作为服务波束和干扰波束”。在同一个 TRP panel 同一个资源上，一个 panel 只能发射一个波束，因此同一个 beam 不会同时服务本 UE 又作为另一个独立干扰源。对角线元素应定义为服务 beam 的单用户 SNR：
+对于对角线元素，不能把 $$n=m$$ 理解为“同一个物理 beam 同时作为服务波束和干扰波束”。在同一个 TRP panel 同一个资源上，一个 panel 只能发射一个波束，因此同一个 beam 不会同时服务本 UE 又作为另一个独立干扰源。对角线元素应定义为服务 beam 的单用户 SNR：
 
 $$
 \Gamma_u(m,m)
@@ -283,7 +283,7 @@ N_u
 }.
 $$
 
-因此，\(\Gamma_u\) 的物理含义是：
+因此，$$\Gamma_u$$ 的物理含义是：
 
 $$
 \Gamma_u(m,n)
@@ -294,7 +294,7 @@ $$
 \end{cases}
 $$
 
-如果 \(\Gamma_u(m,n)\) 越大，表示服务 beam \(m\) 与潜在干扰 beam \(n\) 越容易共存；如果 \(\Gamma_u(m,n)\) 越小，表示该 pair 对 UE \(u\) 来说冲突越严重。
+如果 $$\Gamma_u(m,n)$$ 越大，表示服务 beam $$m$$ 与潜在干扰 beam $$n$$ 越容易共存；如果 $$\Gamma_u(m,n)$$ 越小，表示该 pair 对 UE $$u$$ 来说冲突越严重。
 
 <a id="sec-2-4"></a>
 
@@ -308,7 +308,7 @@ $$
 \{u_1,u_2,\ldots,u_Q\},
 $$
 
-并为每个 UE \(u\) 分配服务波束 \(b_u\)。UE \(u\) 的实际多用户 SINR 为：
+并为每个 UE $$u$$ 分配服务波束 $$b_u$$。UE $$u$$ 的实际多用户 SINR 为：
 
 $$
 \gamma_u
@@ -322,14 +322,14 @@ I_u(b_u,b_v)
 }.
 $$
 
-注意，\(\Gamma_u(m,n)\) 是 pair-level 信息，而真实 MU-MIMO SINR 需要把多个被调度用户的干扰叠加：
+注意，$$\Gamma_u(m,n)$$ 是 pair-level 信息，而真实 MU-MIMO SINR 需要把多个被调度用户的干扰叠加：
 
 $$
 N_u+
 \sum_{v\neq u}I_u(b_u,b_v).
 $$
 
-如果调度器知道完整 \(\Gamma_u\) 且知道 \(S_u(m)\)、\(N_u\)，则可以从非对角线元素反推 pairwise interference：
+如果调度器知道完整 $$\Gamma_u$$ 且知道 $$S_u(m)$$、$$N_u$$，则可以从非对角线元素反推 pairwise interference：
 
 $$
 I_u(m,n)
@@ -340,7 +340,7 @@ N_u,
 \qquad m\neq n.
 $$
 
-这使完整 \(\Gamma\) 矩阵可以用于构造 oracle 调度器。
+这使完整 $$\Gamma$$ 矩阵可以用于构造 oracle 调度器。
 
 <a id="sec-2-5"></a>
 
@@ -359,10 +359,10 @@ $$
 
 其中：
 
-- \(\mathcal C_{\mathcal D}\)：参与调度的 cell/sector 集合；
-- \(\mathcal T_{\mathcal D}\)：参与调度的 TRP 集合；
-- \(\mathcal P_{\mathcal D}\)：参与调度的 TRP panel 集合；
-- \(\mathcal U_{\mathcal D}\)：该调度域内的候选 UE 集合。
+- $$\mathcal C_{\mathcal D}$$：参与调度的 cell/sector 集合；
+- $$\mathcal T_{\mathcal D}$$：参与调度的 TRP 集合；
+- $$\mathcal P_{\mathcal D}$$：参与调度的 TRP panel 集合；
+- $$\mathcal U_{\mathcal D}$$：该调度域内的候选 UE 集合。
 
 每个物理服务波束写为：
 
@@ -370,7 +370,7 @@ $$
 b=(c,t,p,k),
 $$
 
-其中 \((c,t,p)\in\mathcal P_{\mathcal D}\)，\(k\) 是该 panel 内的 beam index。调度域内可用 beam 集合为：
+其中 $$(c,t,p)\in\mathcal P_{\mathcal D}$$，$$k$$ 是该 panel 内的 beam index。调度域内可用 beam 集合为：
 
 $$
 \mathcal B_{\mathcal D}
@@ -378,13 +378,13 @@ $$
 \left\{(c,t,p,k):(c,t,p)\in\mathcal P_{\mathcal D},\ k\in\mathcal K_{c,t,p}\right\}.
 $$
 
-不同调度模式对应不同的 \(\mathcal D\)：
+不同调度模式对应不同的 $$\mathcal D$$：
 
-| 调度模式 | \(\mathcal C_{\mathcal D}\) | \(\mathcal T_{\mathcal D}\) | 含义 |
+| 调度模式 | $$\mathcal C_{\mathcal D}$$ | $$\mathcal T_{\mathcal D}$$ | 含义 |
 |---|---|---|---|
 | 单小区独立调度 | 单个 sector/cell | 该 cell 内 TRP | 每个 cell 独立调度 |
 | 单站点多小区联合调度 | 同一 site 的 3 个 sector/cell | 该 site 内 3 个 TRP | 一个 site 内跨 sector 联合选 UE/beam |
-| 多站点多小区独立调度 | 每个 cell 分别构造自己的 \(\mathcal D\) | 各自 TRP | 多小区同时运行独立调度器 |
+| 多站点多小区独立调度 | 每个 cell 分别构造自己的 $$\mathcal D$$ | 各自 TRP | 多小区同时运行独立调度器 |
 | 多站点多小区联合调度 | 多个 site 的多个 sector/cell | 多个 site/TRP | coordinated TRP set 内联合调度 |
 
 #### 2.5.2 调度变量
@@ -431,7 +431,7 @@ $$
 
 #### 2.5.3 TRP/panel 硬件约束
 
-一个 TRP 的一个 panel 在同一时频资源上只能发射一个模拟波束。因此，对任意 panel \((c,t,p)\in\mathcal P_{\mathcal D}\)，有硬约束：
+一个 TRP 的一个 panel 在同一时频资源上只能发射一个模拟波束。因此，对任意 panel $$(c,t,p)\in\mathcal P_{\mathcal D}$$，有硬约束：
 
 $$
 \sum_{u\in\mathcal U_{\mathcal D}}
@@ -461,11 +461,11 @@ $$
 \qquad \forall c\in\mathcal C_{\mathcal D},
 $$
 
-其中 \(\mathcal B_c\) 是 cell \(c\) 内所有候选 beam。
+其中 $$\mathcal B_c$$ 是 cell $$c$$ 内所有候选 beam。
 
 #### 2.5.4 优化目标
 
-如果调度器知道完整真实信道和完整 \(S,I\) 信息，可以写出 full-information 目标：
+如果调度器知道完整真实信道和完整 $$S,I$$ 信息，可以写出 full-information 目标：
 
 $$
 \max_{\{x_{u,b}\}}
@@ -511,7 +511,7 @@ $$
 \frac{y_u R_u(\gamma_u)}{\overline T_u},
 $$
 
-其中 \(\overline T_u\) 是 UE \(u\) 的历史平均吞吐。
+其中 $$\overline T_u$$ 是 UE $$u$$ 的历史平均吞吐。
 
 但是，实际有限上报调度器站在 BS 角度时，不一定知道特定调度组合下每个 UE 受到的真实总干扰。因此调度器使用的是基于上报信息构造的估计 SINR：
 
@@ -545,7 +545,7 @@ W_u=
 \end{cases}
 $$
 
-因此，调度算法的核心不是使用真实 \(I_u(b_u,b_v)\)，而是根据不同上报方案构造 \(\widehat I_u(b_u,b_v)\) 或 conflict penalty。
+因此，调度算法的核心不是使用真实 $$I_u(b_u,b_v)$$，而是根据不同上报方案构造 $$\widehat I_u(b_u,b_v)$$ 或 conflict penalty。
 
 
 <a id="sec-2-6"></a>
@@ -624,15 +624,15 @@ $$
 
 本节之后的所有有限上报方案都采用同一个测量前提：**先假定 UE 完成完整的 TX/RX 波束扫描，再基于完整测量结果生成不同形式的上报量**。
 
-也就是说，若一个调度域内 BS/TRP/panel 侧共有 \(M\) 个候选服务波束，UE 侧共有 \(K\) 个接收波束，则 UE 完成：
+也就是说，若一个调度域内 BS/TRP/panel 侧共有 $$M$$ 个候选服务波束，UE 侧共有 $$K$$ 个接收波束，则 UE 完成：
 
 $$
 M K
 $$
 
-次 TX/RX 波束测量。对于每个 TX beam \(m\)，UE 选择最优 RX beam \(r_{u,m}^{\star}\)，并得到该服务波束的 RSRP/SNR/CQI。若进一步需要干扰关系，则在对应接收波束状态下计算或测量潜在干扰 beam 的 SINR/干扰影响。
+次 TX/RX 波束测量。对于每个 TX beam $$m$$，UE 选择最优 RX beam $$r_{u,m}^{\star}$$，并得到该服务波束的 RSRP/SNR/CQI。若进一步需要干扰关系，则在对应接收波束状态下计算或测量潜在干扰 beam 的 SINR/干扰影响。
 
-基线 1 只上报服务 beam 自身质量，不上报干扰 beam 信息。UE 对每个候选服务 beam \(m\) 测量：
+基线 1 只上报服务 beam 自身质量，不上报干扰 beam 信息。UE 对每个候选服务 beam $$m$$ 测量：
 
 $$
 \mathrm{SNR}_u(m)
@@ -656,7 +656,7 @@ $$
 S_u(m).
 $$
 
-UE 上报 \(k_1\) 个最强服务 beam：
+UE 上报 $$k_1$$ 个最强服务 beam：
 
 $$
 \mathcal M^{\mathrm{base}}_u
@@ -665,13 +665,13 @@ $$
 \left\{Q_u(m)\right\},
 $$
 
-其中 \(Q_u(m)\) 可以是 \(\mathrm{CQI}^{\mathrm{SU}}_u(m)\)、\(\mathrm{RSRP}_u(m)\) 或 \(\mathrm{SNR}_u(m)\)。
+其中 $$Q_u(m)$$ 可以是 $$\mathrm{CQI}^{\mathrm{SU}}_u(m)$$、$$\mathrm{RSRP}_u(m)$$ 或 $$\mathrm{SNR}_u(m)$$。
 
 基线 1 的反馈内容为：
 
 | 项目 | 内容 |
 |---|---|
-| 服务 beam ID | \(m\) 或 \(b=(c,t,p,k)\) |
+| 服务 beam ID | $$m$$ 或 $$b=(c,t,p,k)$$ |
 | 服务质量 | CQI 或 RSRP/SNR |
 | 干扰 beam ID | 不上报 |
 | pairwise SINR | 不上报 |
@@ -684,7 +684,7 @@ $$
 
 增强 1 命名为 **TopK-Conflict-ID 上报**。它在基线服务波束 CQI/RSRP 上报的基础上，为每个候选服务波束额外上报若干个最强干扰源 ID。
 
-UE 首先选择 \(k_1\) 个最强服务波束：
+UE 首先选择 $$k_1$$ 个最强服务波束：
 
 $$
 \mathcal M^{\mathrm{TCI}}_u
@@ -693,7 +693,7 @@ $$
 \left\{\mathrm{CQI}^{\mathrm{SU}}_u(m)\right\}.
 $$
 
-对每个服务波束 \(m\in\mathcal M^{\mathrm{TCI}}_u\)，UE 选择 \(k_2\) 个最强干扰源。由于普通 SINR 越低表示干扰越强，因此：
+对每个服务波束 $$m\in\mathcal M^{\mathrm{TCI}}_u$$，UE 选择 $$k_2$$ 个最强干扰源。由于普通 SINR 越低表示干扰越强，因此：
 
 $$
 \mathcal B^{(k_2)}_u(m)
@@ -725,17 +725,17 @@ $$
 \right\}_{m\in\mathcal M^{\mathrm{TCI}}_u}.
 $$
 
-其中 \(k_1\) 和 \(k_2\) 均为可配置参数。
+其中 $$k_1$$ 和 $$k_2$$ 均为可配置参数。
 
-该方案的含义是：如果 UE \(u\) 使用服务波束 \(m\)，则调度器应尽量避免其他 UE 使用 \(\mathcal B^{(k_2)}_u(m)\) 中的 beam。
+该方案的含义是：如果 UE $$u$$ 使用服务波束 $$m$$，则调度器应尽量避免其他 UE 使用 $$\mathcal B^{(k_2)}_u(m)$$ 中的 beam。
 
 <a id="sec-3-4"></a>
 
 ### 3.4 增强 2：Top-k 服务波束 + 门限强干扰源集合（Threshold-Conflict-Set）
 
-增强 2 命名为 **Threshold-Conflict-Set 上报**。它与增强 1 的区别是：增强 1 对每个服务波束固定上报 \(k_2\) 个最强干扰源，而增强 2 上报所有使 pair-SINR 低于门限的强干扰源 ID。
+增强 2 命名为 **Threshold-Conflict-Set 上报**。它与增强 1 的区别是：增强 1 对每个服务波束固定上报 $$k_2$$ 个最强干扰源，而增强 2 上报所有使 pair-SINR 低于门限的强干扰源 ID。
 
-UE 仍然先选择 \(k_1\) 个最强服务波束：
+UE 仍然先选择 $$k_1$$ 个最强服务波束：
 
 $$
 \mathcal M^{\mathrm{TCS}}_u
@@ -744,7 +744,7 @@ $$
 \left\{\mathrm{CQI}^{\mathrm{SU}}_u(m)\right\}.
 $$
 
-对每个服务波束 \(m\in\mathcal M^{\mathrm{TCS}}_u\)，定义强干扰集合：
+对每个服务波束 $$m\in\mathcal M^{\mathrm{TCS}}_u$$，定义强干扰集合：
 
 $$
 \mathcal B^{\mathrm{th}}_u(m)
@@ -755,7 +755,7 @@ $$
 \right\}.
 $$
 
-其中 \(\gamma_{\mathrm{bad}}\) 是可配置的 SINR 门限。UE 上报：
+其中 $$\gamma_{\mathrm{bad}}$$ 是可配置的 SINR 门限。UE 上报：
 
 $$
 \mathrm{Report}^{\mathrm{TCS}}_u
@@ -775,26 +775,26 @@ $$
 
 ### 3.5 上报方案总览与完整波束扫描前提
 
-所有方案暂时采用相同测量前提：UE 先完成调度域内完整的 TX/RX 波束扫描，即调度域内 BS 侧有 \(M\) 个候选 TX beam、UE 侧有 \(K\) 个 RX beam 时，先进行：
+所有方案暂时采用相同测量前提：UE 先完成调度域内完整的 TX/RX 波束扫描，即调度域内 BS 侧有 $$M$$ 个候选 TX beam、UE 侧有 $$K$$ 个 RX beam 时，先进行：
 
 $$
 M K
 $$
 
-次服务波束测量。基于这 \(M K\) 个测量结果，UE 生成不同上报量。当前阶段暂不比较不同方案的测量开销，只比较**在相同完整测量前提下，不同上报内容对调度性能的影响**。
+次服务波束测量。基于这 $$M K$$ 个测量结果，UE 生成不同上报量。当前阶段暂不比较不同方案的测量开销，只比较**在相同完整测量前提下，不同上报内容对调度性能的影响**。
 
 | 方案 | 服务波束个数 | 服务波束 CQI | 服务波束 RSRP/SNR | 干扰波束个数 | 干扰波束 SINR/取值 | 干扰源 ID | 说明 |
 |---|---:|:---:|:---:|---:|:---:|:---:|---|
-| Full-Gamma oracle | 全部 \(M\) | 可选 | 可选 | 全部 \(N\) | 全部 \(\Gamma_u(m,n)\) | 全部 | 上界，不考虑反馈开销 |
-| 基线 1：CQI/RSRP | \(k_1\) | ✓ 或 — | ✓ 或 — | 0 | — | — | 只上报服务 beam 质量 |
-| 增强 1：TopK-Conflict-ID | \(k_1\) | ✓ | 可选 | 每行 \(k_2\) | 可选 | ✓ | 每个服务 beam 上报固定数量强干扰源 |
-| 增强 2：Threshold-Conflict-Set | \(k_1\) | ✓ | 可选 | 每行可变 | 可选 | ✓ | 上报所有低于门限的强干扰源 |
+| Full-Gamma oracle | 全部 $$M$$ | 可选 | 可选 | 全部 $$N$$ | 全部 $$\Gamma_u(m,n)$$ | 全部 | 上界，不考虑反馈开销 |
+| 基线 1：CQI/RSRP | $$k_1$$ | ✓ 或 — | ✓ 或 — | 0 | — | — | 只上报服务 beam 质量 |
+| 增强 1：TopK-Conflict-ID | $$k_1$$ | ✓ | 可选 | 每行 $$k_2$$ | 可选 | ✓ | 每个服务 beam 上报固定数量强干扰源 |
+| 增强 2：Threshold-Conflict-Set | $$k_1$$ | ✓ | 可选 | 每行可变 | 可选 | ✓ | 上报所有低于门限的强干扰源 |
 
 其中：
 
-- \(k_1\)：上报的候选服务波束数量；
-- \(k_2\)：每个服务波束上报的最强干扰源数量；
-- \(\gamma_{\mathrm{bad}}\)：强干扰 SINR 门限；
+- $$k_1$$：上报的候选服务波束数量；
+- $$k_2$$：每个服务波束上报的最强干扰源数量；
+- $$\gamma_{\mathrm{bad}}$$：强干扰 SINR 门限；
 - “干扰波束 SINR/取值”如果不上报，则调度器只能知道干扰源 ID，不能知道干扰强弱的连续值。
 
 <a id="sec-3-6"></a>
@@ -805,7 +805,7 @@ $$
 
 #### 方式 A：标准 CQI index
 
-给定 effective SINR \(\gamma_{\mathrm{eff}}\)，选择最高 CQI index：
+给定 effective SINR $$\gamma_{\mathrm{eff}}$$，选择最高 CQI index：
 
 $$
 \mathrm{CQI}^{\star}
@@ -853,7 +853,7 @@ RSRP，例如 L1-RSRP 和 L1-SRS-RSRP：
 
 | 项目 | 取值 |
 |---|---:|
-| 绝对值范围 | \([-140,-44]\) dBm |
+| 绝对值范围 | $$[-140,-44]$$ dBm |
 | 绝对值量化步长 | 1 dB |
 | 最强 RSRP 上报比特数 | 7 bits |
 | 其余 RSRP 上报方式 | 相对最大 RSRP 的差分量化 |
@@ -864,14 +864,14 @@ SINR，例如 L1-SINR：
 
 | 项目 | 取值 |
 |---|---:|
-| 绝对值范围 | \([-23,40]\) dB |
+| 绝对值范围 | $$[-23,40]$$ dB |
 | 绝对值量化步长 | 0.5 dB |
 | 最强 SINR 上报比特数 | 7 bits |
 | 其余 SINR 上报方式 | 相对最大 SINR 的差分量化 |
 | 差分量化步长 | 1 dB |
 | 差分上报比特数 | 4 bits |
 
-设某个上报集合中的最大值为 \(X_{\max}\)，其余元素为 \(X_i\)。差分量化对象为：
+设某个上报集合中的最大值为 $$X_{\max}$$，其余元素为 $$X_i$$。差分量化对象为：
 
 $$
 \Delta_i=X_i-X_{\max}\le 0.
@@ -1039,7 +1039,7 @@ $$
 若一个调度域内多个 panel/TRP 同时发射，则每个 panel/TRP 按各自功率约束发射。
 ```
 
-热噪声功率按资源带宽计算。若资源带宽为 \(B\) Hz，UE 噪声系数为 \(F_{\mathrm{UE}}\) dB，则：
+热噪声功率按资源带宽计算。若资源带宽为 $$B$$ Hz，UE 噪声系数为 $$F_{\mathrm{UE}}$$ dB，则：
 
 $$
 N_{\mathrm{dBm}}
@@ -1160,10 +1160,10 @@ $$
 
 其中：
 
-- \(c\)：cell/sector ID；
-- \(t\)：TRP ID；
-- \(p\)：panel ID；
-- \(k\)：beam ID。
+- $$c$$：cell/sector ID；
+- $$t$$：TRP ID；
+- $$p$$：panel ID；
+- $$k$$：beam ID。
 
 一个 TRP 的一个 panel 在同一时频资源上只能发射一个模拟波束，这是调度硬约束：
 
@@ -1232,8 +1232,8 @@ $$
 
 说明：
 
-1. \(M,N,P,M_g,N_g\) 描述 TRP 的 panel array；
-2. \(M_p,N_p\) 描述 panel virtualization / subarray mapping；
+1. $$M,N,P,M_g,N_g$$ 描述 TRP 的 panel array；
+2. $$M_p,N_p$$ 描述 panel virtualization / subarray mapping；
 3. 第一版可以把一个 panel 作为一个可独立发射模拟 beam 的单元；
 4. 后续可以加入更细的 TXRU-to-AE mapping。
 
@@ -1247,9 +1247,9 @@ UE model 按如下方式配置，面向 around 30 GHz。
 
 | 项目 | Values |
 |---|---|
-| # of antenna elements per panel | 8 elements per panel, \((M,N,P)=(2,2,2)\) for Config 1 and Config 2 |
-| Config 0 baseline | \((M,N,P,M_g,N_g;M_p,N_p)=(4,1,2,1,1;1,1)\) |
-| CPE Config 0 | \((M,N,P,M_g,N_g;M_p,N_p)=(4,4,2,1,1;1,1)\) |
+| # of antenna elements per panel | 8 elements per panel, $$(M,N,P)=(2,2,2)$$ for Config 1 and Config 2 |
+| Config 0 baseline | $$(M,N,P,M_g,N_g;M_p,N_p)=(4,1,2,1,1;1,1)$$ |
+| CPE Config 0 | $$(M,N,P,M_g,N_g;M_p,N_p)=(4,4,2,1,1;1,1)$$ |
 | # of panels | Config 0: 1 panel |
 | # of panels | Config 1: 2 panels on front and back |
 | # of panels | Config 2: 4 panels on 4 edges |
@@ -1284,10 +1284,10 @@ $$
 
 | Parameter | Values |
 |---|---|
-| Antenna element radiation pattern in \(\theta''\) dimension | see Table A.2.1-8 TR 38.802 |
-| Antenna element radiation pattern in \(\phi''\) dimension | see Table A.2.1-8 TR 38.802 |
+| Antenna element radiation pattern in $$\theta''$$ dimension | see Table A.2.1-8 TR 38.802 |
+| Antenna element radiation pattern in $$\phi''$$ dimension | see Table A.2.1-8 TR 38.802 |
 | Combining method for 3D antenna element pattern | see Table A.2.1-8 TR 38.802 |
-| Maximum directional gain \(G_{E,\max}\) | 5 dBi |
+| Maximum directional gain $$G_{E,\max}$$ | 5 dBi |
 
 第一版建议：
 
@@ -1355,8 +1355,8 @@ UE 使用对应 RX beam；
 
 | 调度目标 | 目标函数权重 | 说明 |
 |---|---|---|
-| 总吞吐最大 | \(W_u=1\) | 最大化当前 TTI/调度周期的 sum throughput |
-| 比例公平 | \(W_u=1/\overline T_u\) | 在吞吐和公平性之间折中 |
+| 总吞吐最大 | $$W_u=1$$ | 最大化当前 TTI/调度周期的 sum throughput |
+| 比例公平 | $$W_u=1/\overline T_u$$ | 在吞吐和公平性之间折中 |
 
 统一写为：
 
@@ -1463,7 +1463,7 @@ $$
 \mathbf q_{u,p_{\mathrm{UE}},k_{\mathrm{UE}}}.
 $$
 
-如果 TRP panel 是一个 \(N_H\times N_V\) 的 UPA，则可以构造二维 DFT beam：
+如果 TRP panel 是一个 $$N_H\times N_V$$ 的 UPA，则可以构造二维 DFT beam：
 
 $$
 \mathbf f_{a,e}
@@ -1471,7 +1471,7 @@ $$
 \mathbf a_H(a)\otimes \mathbf a_V(e),
 $$
 
-其中 \(a\) 是水平 beam index，\(e\) 是垂直 beam index。
+其中 $$a$$ 是水平 beam index，$$e$$ 是垂直 beam index。
 
 波束 ID 统一写为：
 
@@ -1479,7 +1479,7 @@ $$
 b=(c,t,p,k).
 $$
 
-对于多 panel UE，UE 对每个 CMR 服务 beam \(m\) 从所有 UE panel 和 panel 内 DFT beams 中选择接收 beam：
+对于多 panel UE，UE 对每个 CMR 服务 beam $$m$$ 从所有 UE panel 和 panel 内 DFT beams 中选择接收 beam：
 
 $$
 r_{u,m}^{\star}
@@ -1494,7 +1494,7 @@ $$
 
 第一版不生成真实参考信号 waveform，不做真实波束扫描，而是在信道矩阵上直接计算测量功率。
 
-对服务 beam \(m\)，UE 接收 beam 选择：
+对服务 beam $$m$$，UE 接收 beam 选择：
 
 $$
 r_{u,m}^{\star}
@@ -1558,11 +1558,11 @@ $$
 
 | 方案 | 反馈内容 | 调度器可用信息 |
 |---|---|---|
-| Full-Gamma oracle | 完整 \(\Gamma_u(m,n)\)、\(S_u(m)\)、\(N_u\) | 完整 pairwise interference |
+| Full-Gamma oracle | 完整 $$\Gamma_u(m,n)$$、$$S_u(m)$$、$$N_u$$ | 完整 pairwise interference |
 | 基线 1：RSRP/SNR | Top-L 服务 beam、SNR/CQI | 只知道单用户质量 |
 | 增强 1：1 beam + 3 bad | 1 个服务 beam、CQI、3 个最强干扰源 | 可规避少量强干扰 |
-| 传统有限点 | 若干 \((m,n,\Gamma)\) 点 | known-good / known-bad / unknown |
-| Threshold-Conflict-Set / proposed row-set | Top-L rows、每行 \(\mathcal G_u(m)\)、row CQI | row-level compatibility graph |
+| 传统有限点 | 若干 $$(m,n,\Gamma)$$ 点 | known-good / known-bad / unknown |
+| Threshold-Conflict-Set / proposed row-set | Top-L rows、每行 $$\mathcal G_u(m)$$、row CQI | row-level compatibility graph |
 
 CQI 计算：
 
@@ -1616,7 +1616,7 @@ $$
 Q_{\max}.
 $$
 
-其中 \(\mathcal C_u\subseteq\mathcal B_{\mathcal D}\) 是 UE \(u\) 可选择的候选服务 beam 集合，来自 UE 上报。
+其中 $$\mathcal C_u\subseteq\mathcal B_{\mathcal D}$$ 是 UE $$u$$ 可选择的候选服务 beam 集合，来自 UE 上报。
 
 #### 5.6.2 调度器输出
 
@@ -1654,14 +1654,14 @@ $$
 }.
 $$
 
-不同上报方案对应不同的 \(\widehat I_u(b_u,b_v)\)：
+不同上报方案对应不同的 $$\widehat I_u(b_u,b_v)$$：
 
-| 方案 | \(\widehat I_u(b_u,b_v)\) 构造方式 |
+| 方案 | $$\widehat I_u(b_u,b_v)$$ 构造方式 |
 |---|---|
 | 基线 1 | 不知道 pairwise interference，可设为 0、平均干扰先验或 unknown penalty |
-| TopK-Conflict-ID | 若 \(b_v\in\mathcal B_u^{(k_2)}(b_u)\)，施加强 conflict penalty |
-| Threshold-Conflict-Set | 若 \(b_v\in\mathcal B_u^{\mathrm{th}}(b_u)\)，施加强 conflict penalty |
-| Full-Gamma oracle | 由完整 \(\Gamma\)、\(S\)、\(N\) 反推 \(I_u(b_u,b_v)\) |
+| TopK-Conflict-ID | 若 $$b_v\in\mathcal B_u^{(k_2)}(b_u)$$，施加强 conflict penalty |
+| Threshold-Conflict-Set | 若 $$b_v\in\mathcal B_u^{\mathrm{th}}(b_u)$$，施加强 conflict penalty |
+| Full-Gamma oracle | 由完整 $$\Gamma$$、$$S$$、$$N$$ 反推 $$I_u(b_u,b_v)$$ |
 
 如果只上报强干扰源 ID 而不上报干扰 SINR，则可采用 penalty 目标函数：
 
@@ -1745,7 +1745,7 @@ $$
 L^q,
 $$
 
-其中 \(L\) 是每个 UE 的候选服务 beam 数。第一版需要通过较小的候选集合保证可运行。
+其中 $$L$$ 是每个 UE 的候选服务 beam 数。第一版需要通过较小的候选集合保证可运行。
 
 #### 5.6.5 贪婪算法
 
@@ -1781,12 +1781,12 @@ Output:
     A
 ```
 
-可选增强：加入 beam swap / user swap 局部搜索。对当前调度结果 \(\mathcal A\)，尝试：
+可选增强：加入 beam swap / user swap 局部搜索。对当前调度结果 $$\mathcal A$$，尝试：
 
 1. 固定 UE，替换其服务 beam；
 2. 替换某个 UE；
 3. 同时替换一个 UE 和一个 beam；
-4. 若 \(\widehat U\) 增加，则接受替换。
+4. 若 $$\widehat U$$ 增加，则接受替换。
 
 #### 5.6.6 MCS 决策
 
@@ -1804,7 +1804,7 @@ $$
 \mathcal M\left(\widehat\gamma_u(\mathcal A)\right),
 $$
 
-其中 \(\mathcal M(\cdot)\) 是 SINR 到 MCS 的映射函数。若方案不支持 pairwise SINR 重估，则：
+其中 $$\mathcal M(\cdot)$$ 是 SINR 到 MCS 的映射函数。若方案不支持 pairwise SINR 重估，则：
 
 $$
 \widehat{\mathrm{MCS}}_u
@@ -1835,7 +1835,7 @@ $$
 
 #### 5.7.1 符号级 post-SINR
 
-对于 beam-domain MU-MIMO、每 UE 单流、无 digital ZF/RZF 的第一版，UE \(u\) 在频域位置 \(f\)、OFDM symbol \(\ell\) 上的 post-SINR 为：
+对于 beam-domain MU-MIMO、每 UE 单流、无 digital ZF/RZF 的第一版，UE $$u$$ 在频域位置 $$f$$、OFDM symbol $$\ell$$ 上的 post-SINR 为：
 
 $$
 \gamma_u(f,\ell)
@@ -1862,9 +1862,9 @@ $$
 
 其中：
 
-- \(f\)：PRB、子载波或 subband index；
-- \(\ell\)：PDSCH OFDM symbol index；
-- \(N_{\mathrm{sym}}^{\mathrm{PDSCH}}=12\) 为第一版默认 PDSCH symbol 数。
+- $$f$$：PRB、子载波或 subband index；
+- $$\ell$$：PDSCH OFDM symbol index；
+- $$N_{\mathrm{sym}}^{\mathrm{PDSCH}}=12$$ 为第一版默认 PDSCH symbol 数。
 
 初版可以假设 UE 移动性低，slot 内信道近似静态：
 
@@ -1947,7 +1947,7 @@ $$
 \right).
 $$
 
-其中 \(N_{\mathrm{RE}}=|\mathcal R_{\mathrm{PDSCH}}|\)。
+其中 $$N_{\mathrm{RE}}=|\mathcal R_{\mathrm{PDSCH}}|$$。
 
 若初版假设 slot 内信道静态，则可以退化为频域 EESM：
 
@@ -2011,7 +2011,7 @@ TBLER
 
 实例化时，`PHYAbstraction` 会加载预计算 BLER tables，并在 SINR 和 code block size 维度上插值。调用时先把 post-equalization SINR 转成 effective SINR，然后用 effective SINR 查 BLER 表，最后由 code-block BLER 得到 TBLER，即至少一个 code block 解错的概率。
 
-如果一个 TB 被分为 \(C\) 个 code blocks，第 \(c\) 个 code block 的错误概率为 \(p_c\)，则：
+如果一个 TB 被分为 $$C$$ 个 code blocks，第 $$c$$ 个 code block 的错误概率为 $$p_c$$，则：
 
 $$
 P_{\mathrm{TB\ error}}
@@ -2020,7 +2020,7 @@ P_{\mathrm{TB\ error}}
 \prod_{c=1}^{C}(1-p_c).
 $$
 
-如果所有 code block 近似有相同错误概率 \(p_{\mathrm{CB}}\)，则：
+如果所有 code block 近似有相同错误概率 $$p_{\mathrm{CB}}$$，则：
 
 $$
 P_{\mathrm{TB\ error}}
@@ -2048,7 +2048,7 @@ post-SINR
     -> goodput
 ```
 
-对 TB，若有 \(C\) 个 code blocks，第 \(c\) 个 code block 错误概率为 \(p_c\)，则：
+对 TB，若有 $$C$$ 个 code blocks，第 $$c$$ 个 code block 错误概率为 $$p_c$$，则：
 
 $$
 P_{\mathrm{TB\ error}}
@@ -2145,7 +2145,7 @@ flowchart TD
 
 每个 drop 记录：
 
-1. 完整 \(\Gamma\) 矩阵；
+1. 完整 $$\Gamma$$ 矩阵；
 2. 有限 feedback；
 3. 调度结果；
 4. oracle 调度结果；
@@ -2173,7 +2173,7 @@ flowchart TD
 | BLER / TBLER | 链路自适应质量 |
 | OLLA offset distribution | MCS 调整稳定性 |
 | conflict rate | 调度组合中 known-bad pair 比例 |
-| oracle gap | 与完整 \(\Gamma\) oracle 的差距 |
+| oracle gap | 与完整 $$\Gamma$$ oracle 的差距 |
 | report efficiency | 单位反馈 bit 带来的吞吐增益 |
 
 调度准确性指标：
@@ -2350,7 +2350,7 @@ link_abstraction:
 | 模块 | 是否需自研 | 原因 |
 |---|---:|---|
 | CMR/IMR beam measurement | 需要 | Sionna 不直接提供该测量抽象 |
-| \(\Gamma\) 矩阵生成 | 需要 | 需按本方案定义对角线 SNR、非对角线 pair-SINR |
+| $$\Gamma$$ 矩阵生成 | 需要 | 需按本方案定义对角线 SNR、非对角线 pair-SINR |
 | UE feedback emulator | 需要 | 需模拟不同上报方案 |
 | CQI report emulator | 需要 | 可复用 Sionna MCS/BLER 映射，但 CSI report 本身需自研 |
 | beam-domain MU-MIMO scheduler | 需要 | Sionna 现有 PF scheduler 是 SU-MIMO 资源调度，不满足该问题 |
@@ -2577,7 +2577,7 @@ full TX/RX beam sweep
 exhaustive scheduler + greedy scheduler
 ```
 
-第一版必须额外实现覆盖热力图，用于调整 TRP 下倾角。对给定二维位置 \(\mathbf r\)，计算该 TRP 所有波束的平均接收功率，并在线性域平均：
+第一版必须额外实现覆盖热力图，用于调整 TRP 下倾角。对给定二维位置 $$\mathbf r$$，计算该 TRP 所有波束的平均接收功率，并在线性域平均：
 
 $$
 \overline P_{\mathrm{TRP}}(\mathbf r)

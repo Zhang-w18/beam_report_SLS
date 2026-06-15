@@ -2,11 +2,15 @@
 
 本项目是一个面向“服务波束 + 干扰波束上报”的系统级波束管理仿真原型。默认场景为 **1-site 3-sector**，默认 TRP 天线为：
 
-```text
-4 TXRUs, 1024 AEs
-(M, N, P, Mg, Ng; Mp, Np) = (16, 16, 2, 2, 1; 1, 1)
-(dH, dV) = (0.5, 0.5)
-```
+4 TXRUs, 1024 AEs：
+
+$$
+(M, N, P, M_g, N_g; M_p, N_p) = (16, 16, 2, 2, 1; 1, 1)
+$$
+
+$$
+(d_H, d_V) = (0.5, 0.5)
+$$
 
 v2.4 的核心变化是新增了 **RF architecture** 配置层，代码会自动把射频架构、波束发射方式和 MU order 关联起来：
 
@@ -15,6 +19,9 @@ v2.4 的核心变化是新增了 **RF architecture** 配置层，代码会自动
 - 默认参数为情况 1，允许不同极化采用不同波束，每个物理面板/极化子阵列独立发射 DFT 波束；
 - 默认 `scheduler.max_mu_order: auto`，会根据 RF architecture 自动解析；
 - 默认 4 TXRUs，因此默认最大同时发射模拟波束数 = 4，默认最大 MU order = 4；
+- 支持 1 站点、3 站点等边三角形、7 站点六边形站群；
+- 支持 `per_site_joint` 站点域调度：同一站点的 3 个扇区一起调度，UE 只上报本服务站点 3 个扇区内的候选波束；
+- `exhaustive` 穷举调度新增站点域拆分、panel 约束剪枝、零上界剪枝和 branch-and-bound 上界剪枝；
 - 新增仿真进度输出；
 - 新增 `docs/yaml_parameter_reference.md`，自包含说明 YAML 参数含义、取值范围和注意事项。
 
@@ -92,9 +99,47 @@ link_abstraction:
   --quiet
 ```
 
+三站点等边三角形站点域调度：
+
+```bash
+/home/zhangwei/anaconda3/envs/tf_sionna_rt/bin/python -m beam_sls.run \
+  --config configs/v2_three_site_triangle.yaml \
+  --out runs/v2_4_three_site_greedy \
+  --num-drops 5 \
+  --num-tti 5 \
+  --algorithm greedy \
+  --skip-heatmap
+```
+
+七站点六边形站群：
+
+```bash
+/home/zhangwei/anaconda3/envs/tf_sionna_rt/bin/python -m beam_sls.run \
+  --config configs/v2_seven_site_hex.yaml \
+  --out runs/v2_4_seven_site_greedy \
+  --num-drops 5 \
+  --num-tti 5 \
+  --algorithm greedy \
+  --skip-heatmap
+```
+
+也可以直接在命令行覆盖 topology 和调度域：
+
+```bash
+/home/zhangwei/anaconda3/envs/tf_sionna_rt/bin/python -m beam_sls.run \
+  --config configs/v2_one_site_three_sector.yaml \
+  --layout three_site_triangle \
+  --num-sites 3 \
+  --domain-mode per_site_joint \
+  --out runs/v2_4_three_site_override \
+  --num-drops 1 \
+  --num-tti 1 \
+  --skip-heatmap
+```
+
 ---
 
-## 2. 默认 topology
+## 2. Topology：1/3/7 站点
 
 默认配置为 1 个站点、3 个 sector/cell：
 
@@ -117,7 +162,49 @@ figures/topology.png
 
 图中会标出 site、sector boresight、sector 边界、UE drop 和 ISD 标尺。
 
-当前版本默认仍是 1-site 3-sector，没有实现 7-site / 21-sector wrap-around 动态邻区干扰。
+新增多站点布局：
+
+```yaml
+topology:
+  layout: three_site_triangle
+  num_sites: 3
+  sectors_per_site: 3
+  isd_m: 500.0
+```
+
+`three_site_triangle` 生成 3 个站点，任意两站点距离均为 `isd_m`，总小区数为 `3 * sectors_per_site`。
+
+```yaml
+topology:
+  layout: seven_site_hex
+  num_sites: 7
+  sectors_per_site: 3
+  isd_m: 500.0
+```
+
+`seven_site_hex` 生成 1 个中心站点和 6 个第一圈邻站，总小区数为 `7 * sectors_per_site`。当前实现是有限 7 站点站群，不做 wrap-around 边界复制。
+
+UE drop 仍按 sector 扇形区域生成：
+
+```yaml
+ue_drop:
+  num_ut_per_sector: 10
+  distribution: uniform_in_sector
+```
+
+因此 7 站点、每站 3 扇区、每扇区 10 个 UE 时：
+
+$$
+\mathrm{num\_sites} = 7
+$$
+
+$$
+\mathrm{num\_cells} = 21
+$$
+
+$$
+\mathrm{num\_ues} = 210
+$$
 
 ---
 
@@ -143,20 +230,25 @@ tx_array:
 
 AE 数校验：
 
-```text
-num_ae = M * N * P * Mg * Ng * Mp * Np
-       = 16 * 16 * 2 * 2 * 1 * 1 * 1
-       = 1024
-```
+$$
+\begin{aligned}
+\mathrm{num\_ae}
+&= M \times N \times P \times M_g \times N_g \times M_p \times N_p \\
+&= 16 \times 16 \times 2 \times 2 \times 1 \times 1 \times 1 \\
+&= 1024
+\end{aligned}
+$$
 
 DFT 空间码本不乘极化数 `P`：
 
-```text
-H = N * Ng * Np = 16
-V = M * Mg * Mp = 32
-full spatial codebook size = H * V = 512
-beam vector length = H * V * P = 1024 AEs
-```
+$$
+\begin{aligned}
+H &= N \times N_g \times N_p = 16 \\
+V &= M \times M_g \times M_p = 32 \\
+\mathrm{full\ spatial\ codebook\ size} &= H \times V = 512 \\
+\mathrm{beam\ vector\ length} &= H \times V \times P = 1024\ \mathrm{AEs}
+\end{aligned}
+$$
 
 默认 SLS 扫描不是完整 512 个方向，而是均匀采样：
 
@@ -169,9 +261,9 @@ tx_array:
 
 即每个活动码本扫描：
 
-```text
-num_beams_h * num_beams_v = 16 beams
-```
+$$
+\mathrm{num\_beams}_h \times \mathrm{num\_beams}_v = 16\ \mathrm{beams}
+$$
 
 ---
 
@@ -213,17 +305,23 @@ TXRU 3 -> panel 1, polarization 1
 
 每个 TXRU 形成一个局部 panel-polarization DFT beam。两个极化允许使用不同 beam，因此：
 
-```text
-max_parallel_beams_per_trp = num_txru = 4
-scheduler.max_mu_order(auto) = 4
-```
+$$
+\mathrm{max\_parallel\_beams\_per\_trp} = \mathrm{num\_txru} = 4
+$$
+
+$$
+\mathrm{scheduler.max\_mu\_order(auto)} = 4
+$$
 
 在默认 1-site 3-sector、每 sector 1 个 TRP 的情况下：
 
-```text
-每 sector: 4 TX units * 16 beams = 64 TX beam IDs
-全网: 3 sectors * 64 = 192 TX beam IDs
-```
+$$
+\mathrm{per\ sector}: 4\ \mathrm{TX\ units} \times 16\ \mathrm{beams} = 64\ \mathrm{TX\ beam\ IDs}
+$$
+
+$$
+\mathrm{network}: 3\ \mathrm{sectors} \times 64 = 192\ \mathrm{TX\ beam\ IDs}
+$$
 
 ### 4.2 情况 1 但同一面板两个极化共享 beam
 
@@ -237,10 +335,13 @@ rf_architecture:
 
 含义：同一 panel 的两个极化共享一个空间 beam，不允许两个极化独立扫不同方向。默认 TRP 有 2 个物理面板，因此：
 
-```text
-max_parallel_beams_per_trp = number_of_physical_panels = 2
-scheduler.max_mu_order(auto) = 2
-```
+$$
+\mathrm{max\_parallel\_beams\_per\_trp} = \mathrm{number\_of\_physical\_panels} = 2
+$$
+
+$$
+\mathrm{scheduler.max\_mu\_order(auto)} = 2
+$$
 
 ### 4.3 情况 2：fully-connected hybrid beamforming
 
@@ -254,10 +355,13 @@ rf_architecture:
 
 含义：每个 TXRU 都连接到整个 TRP 的 1024 AEs，每个 TXRU 可形成一个 full-array DFT beam。因此：
 
-```text
-max_parallel_beams_per_trp = num_txru = 4
-scheduler.max_mu_order(auto) = 4
-```
+$$
+\mathrm{max\_parallel\_beams\_per\_trp} = \mathrm{num\_txru} = 4
+$$
+
+$$
+\mathrm{scheduler.max\_mu\_order(auto)} = 4
+$$
 
 这个模式下，每个同时发射的 beam 都是 full-array beam；这隐含了 fully-connected 或足够灵活的 hybrid RF 连接结构。
 
@@ -301,12 +405,87 @@ fixed_vertical_beam_selection.json
 
 ```yaml
 scheduler:
+  domain_mode: per_site_joint
   algorithm: greedy
   objective: sum_rate
   max_mu_order: auto
+  use_panel_constraint: true
+  exhaustive_pruning:
+    enabled: true
+    sort_by_upper_bound: true
+    zero_upper_bound: true
+    branch_and_bound: true
 ```
 
-`greedy` 推荐用于常规仿真；`exhaustive` 只建议用于很小的 debug 配置，因为复杂度会随 UE 数、候选 beam 数和 MU order 组合爆炸。
+### 6.1 调度域
+
+`scheduler.domain_mode` 支持：
+
+```yaml
+scheduler:
+  domain_mode: per_site_joint
+```
+
+`per_site_joint` 表示站点域调度：
+
+- 每个 UE 只在自己 `site_id` 对应站点的 3 个扇区内选择候选服务 beam；
+- `topk_conflict_id` 和 `threshold_conflict_set` 的冲突 beam 也只来自该站点域；
+- 调度器按 `site_id` 分组，每个站点独立运行一次 `greedy` 或 `exhaustive`；
+- 各站点的调度结果会合并成一个全网 schedule；
+- 链路层实际传输时仍使用合并后的全网同时发射结果计算真实 effective SINR、BLER 和 ACK，因此其他站点的已调度 beam 会作为实际干扰出现。
+
+也可以使用全网调度：
+
+```yaml
+scheduler:
+  domain_mode: global
+```
+
+`global` 下 UE 可以从全网所有 beam 中上报候选 beam，调度器也把所有 UE 放在一个全局问题里求解。旧配置名 `single_site_three_sector_independent` 仍兼容，内部等价为 `per_site_joint`。
+
+### 6.2 Greedy 与穷举
+
+`greedy` 推荐用于常规仿真。它每一步加入一个能带来最大目标增益的 UE/beam，直到达到 `max_mu_order` 或没有正增益候选。
+
+`exhaustive` 会在给定上报候选集合内搜索最优组合。未剪枝时复杂度近似为：
+
+$$
+\sum_{q=1}^{Q} \binom{U}{q} K^q
+$$
+
+其中：
+
+- `U` 是调度域内 UE 数；
+- `K` 是每个 UE 上报的候选服务 beam 数；
+- `Q` 是 `max_mu_order`。
+
+在 `per_site_joint` 下，上式里的 `U` 是单个站点域内的 UE 数，而不是全网 UE 数。七站点时相当于做 7 个较小的站点内穷举，再合并结果。
+
+### 6.3 穷举剪枝
+
+当前穷举剪枝默认开启：
+
+```yaml
+scheduler:
+  exhaustive_pruning:
+    enabled: true
+    sort_by_upper_bound: true
+    zero_upper_bound: true
+    branch_and_bound: true
+```
+
+剪枝方式：
+
+- 站点域拆分：`per_site_joint` 下每个站点单独穷举，避免把多个站点的 UE 放进一个组合爆炸的全局搜索。
+- 候选集预限制：穷举只搜索 UE 已上报的服务 beam。候选数由 `feedback.service_beam_top_k1` 和 `feedback.oracle_service_beam_top_k` 控制。
+- panel 约束剪枝：若 `use_panel_constraint: true`，同一个 `(cell, trp, panel)` 同时只能选择一个 beam；违反该约束的分支直接跳过，不进入链路目标计算。
+- 零上界剪枝：如果某个 UE 所有候选 beam 的单用户加权速率上界为 0，它不可能提高目标函数，会被跳过。
+- branch-and-bound 上界剪枝：对每个 UE 计算“单用户、无干扰、无冲突惩罚”的最大加权速率，作为该 UE 在任何 MU 组合中的收益上界。搜索过程中，如果“当前已选组合目标 + 剩余 UE 最大可能上界”仍不超过当前最优值，则整棵分支跳过。
+- 上界排序：先搜索单用户上界更高的 UE/beam，更快得到较好的当前最优值，从而让 branch-and-bound 更早生效。
+
+上述剪枝不会改变 `exhaustive` 在当前上报候选集合内的最优性。它只跳过违反硬约束的组合，或跳过理论上不可能超过当前最优解的分支。
+
+### 6.4 MU order
 
 `max_mu_order: auto` 时，程序根据 RF architecture 自动设置最大同时调度 UE 数。若手动写整数，例如：
 
@@ -318,9 +497,16 @@ scheduler:
 
 实际 MU order 会被 RF 物理并发 beam 数截断：
 
-```text
-effective_max_mu_order = min(3, max_parallel_beams_per_trp)
-```
+$$
+\mathrm{effective\_max\_mu\_order}
+= \min(3,\ \mathrm{max\_parallel\_beams\_per\_trp})
+$$
+
+在 `per_site_joint` 下，这个 MU order 是每个站点域的 MU order；全网同一 TTI 最多可能调度：
+
+$$
+\mathrm{num\_sites} \times \mathrm{effective\_max\_mu\_order}
+$$
 
 ---
 
@@ -365,6 +551,7 @@ figures/fixed_vertical_beam_cdf.png
 metrics/summary.csv
 metrics/link_tti.csv
 metrics/schedules.csv
+metrics/scheduler_stats.csv
 metrics/beams.csv
 metrics/reports.csv
 metrics/ues.csv
@@ -382,6 +569,75 @@ max_parallel_beams_per_trp
 effective_beam_scope
 each TX unit's panel/polarization mapping
 ```
+
+`metrics/drops.csv` 记录每个 drop 的网络规模和后端：
+
+```text
+num_sites
+num_cells
+num_ues
+num_beams
+scheduler_domain_mode
+channel_backend
+link_adaptation_backend
+```
+
+`metrics/reports.csv` 中的 `report_json` 会记录 UE 上报内容。站点域调度时，每条 report 会包含：
+
+```text
+ue_id
+site_id
+serving_cell
+candidates
+```
+
+候选 beam 的 `beam_id` 形如：
+
+```text
+c<cell>t<site/trp>p<panel>b<beam>
+```
+
+站点域下，UE 的候选服务 beam 应只来自与 `site_id` 相同的 `t<site/trp>`。
+
+`metrics/scheduler_stats.csv` 用于解读调度复杂度和剪枝效果。常用字段：
+
+```text
+drop
+scheme
+domain_mode
+domain_id
+algorithm
+num_reports_input
+num_reports_with_candidates
+num_reports_after_pruning
+max_mu_order
+raw_assignment_count
+assignment_count_after_zero_prune
+evaluated_assignment_count
+panel_pruned_count
+bound_pruned_count
+zero_upper_bound_pruned_reports
+best_objective_value
+num_scheduled
+```
+
+字段含义：
+
+- `domain_id`：站点域调度时为 `site_id`；`all` 行是所有站点的合计。
+- `raw_assignment_count`：穷举在剪枝前、基于上报候选集合需要考虑的组合数。
+- `assignment_count_after_zero_prune`：移除零上界 UE 后剩余的理论组合数。
+- `evaluated_assignment_count`：真正进入目标函数计算的组合数。
+- `panel_pruned_count`：因同一 panel/TX unit 重复用 beam 而跳过的组合数。
+- `bound_pruned_count`：被 branch-and-bound 上界剪掉的分支数。
+- `zero_upper_bound_pruned_reports`：因单用户速率上界为 0 而移除的 UE report 数。
+
+一般可用下面的比例粗略看剪枝收益：
+
+$$
+\frac{\mathrm{evaluated\_assignment\_count}}{\mathrm{raw\_assignment\_count}}
+$$
+
+比例越小，说明穷举实际评估的组合越少。该比例只反映调度搜索复杂度，不代表链路性能。
 
 ---
 

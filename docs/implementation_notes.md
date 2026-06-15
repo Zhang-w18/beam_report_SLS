@@ -4,10 +4,13 @@
 
 For UE `u`, service beam `m`, and potential interferer beam `n`:
 
-```text
-Gamma[u,m,m] = S[u,m] / N
-Gamma[u,m,n] = S[u,m] / (I[u,m,n] + N), m != n
-```
+$$
+\Gamma[u,m,m] = \frac{S[u,m]}{N}
+$$
+
+$$
+\Gamma[u,m,n] = \frac{S[u,m]}{I[u,m,n] + N},\quad m \ne n
+$$
 
 The selected RX beam is tied to the service beam `m`, not to the interferer `n`.
 
@@ -34,9 +37,11 @@ If `sionna.fallback_to_numpy_if_unavailable=true`, backend construction failures
 
 `link_abstraction.mode=sionna_sys_precomputed_bler` tries to use Sionna SYS `PHYAbstraction` and `InnerLoopLinkAdaptation`. The MCS selection rule follows ILLA:
 
-```text
-max MCS such that TBLER(MCS, SINR_eff) <= target_bler
-```
+$$
+\max\ \mathrm{MCS}\quad \mathrm{s.t.}\quad
+\mathrm{TBLER}(\mathrm{MCS}, \mathrm{SINR}_{\mathrm{eff}})
+\le \mathrm{target\_bler}
+$$
 
 The actual backend is written to `link_abstraction_status.json`.
 
@@ -44,19 +49,25 @@ The actual backend is written to `link_abstraction_status.json`.
 
 The initial v2 package kept a legacy simplified TX UPA (`num_h: 8`, `num_v: 8`), which did not match the requested TRP antenna. v2.1 replaces it with explicit 3GPP-style parameters:
 
-```text
-4 TXRUs, 1024 AEs
-(M,N,P,Mg,Ng;Mp,Np)=(16,16,2,2,1;1,1)
-(dH,dV)=(0.5,0.5)
-```
+4 TXRUs, 1024 AEs：
+
+$$
+(M,N,P,M_g,N_g;M_p,N_p)=(16,16,2,2,1;1,1)
+$$
+
+$$
+(d_H,d_V)=(0.5,0.5)
+$$
 
 `ArrayConfig.from_dict()` now accepts either the legacy format or the explicit TRP format. For the explicit format it computes:
 
-```text
-num_ae = M*N*P*Mg*Ng*Mp*Np
-num_h = N*Ng*Np
-num_v = M*Mg*Mp
-polarization_count = P
-```
+$$
+\begin{aligned}
+\mathrm{num\_ae} &= M \times N \times P \times M_g \times N_g \times M_p \times N_p \\
+\mathrm{num\_h} &= N \times N_g \times N_p \\
+\mathrm{num\_v} &= M \times M_g \times M_p \\
+\mathrm{polarization\_count} &= P
+\end{aligned}
+$$
 
 The numpy fallback channel and DFT codebook now expand the polarization dimension, so TX beam vectors have length 1024 for the requested TRP. The Sionna TR38901 adapter also uses M/N and Mg/Ng/Mp/Np when attempting to construct `PanelArray`.

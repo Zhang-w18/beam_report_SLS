@@ -147,7 +147,7 @@ feedback:
   conflict_sinr_threshold_db: 0.0
 
 scheduler:
-  domain_mode: single_site_three_sector_independent
+  domain_mode: per_site_joint
   objective: sum_rate
   # auto binds MU order to RF architecture. With default case-1 RF, 4 TXRUs and
   # independent polarization beams, resolved max_mu_order = 4.
@@ -155,6 +155,11 @@ scheduler:
   cap_mu_order_by_rf: true
   algorithm: greedy       # greedy is the recommended default; exhaustive is for tiny debug cases only.
   use_panel_constraint: true
+  exhaustive_pruning:
+    enabled: true
+    sort_by_upper_bound: true
+    zero_upper_bound: true
+    branch_and_bound: true
   conflict_penalty_lambda: 0.35
   unknown_interference_policy: zero
   pf_tbar_init_mbps: 1.0
