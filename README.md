@@ -434,6 +434,20 @@ scheduler:
 - 各站点的调度结果会合并成一个全网 schedule；
 - 链路层实际传输时仍使用合并后的全网同时发射结果计算真实 effective SINR、BLER 和 ACK，因此其他站点的已调度 beam 会作为实际干扰出现。
 
+扇区独立域：
+
+```yaml
+scheduler:
+  domain_mode: single_site_three_sector_independent
+```
+
+`single_site_three_sector_independent` 是旧配置名，现在语义明确为 `per_sector_independent`：
+
+- 每个 UE 只在自己的 `serving_cell`/sector 内选择候选服务 beam；
+- 调度器按 sector/cell 分组，每个 sector 独立运行一次 `greedy` 或 `exhaustive`；
+- 同一站点的三个扇区不会放在同一个调度问题里联合优化；
+- 各 sector 的调度结果仍会合并到同一 TTI，链路层计算真实干扰时会看到其他 sector/site 已调度 beam。
+
 也可以使用全网调度：
 
 ```yaml
@@ -441,7 +455,47 @@ scheduler:
   domain_mode: global
 ```
 
-`global` 下 UE 可以从全网所有 beam 中上报候选 beam，调度器也把所有 UE 放在一个全局问题里求解。旧配置名 `single_site_three_sector_independent` 仍兼容，内部等价为 `per_site_joint`。
+`global` 下 UE 可以从全网所有 beam 中上报候选 beam，调度器也把所有 UE 放在一个全局问题里求解。
+
+Gamma 测量也按调度域裁剪：
+
+- `single_site_three_sector_independent` / `per_sector_independent`：只计算 UE serving sector 内 beam 的服务质量和 pairwise Gamma；
+- `per_site_joint`：只计算 UE 所属 site 三个扇区内 beam 的服务质量和 pairwise Gamma；
+- `global`：计算全网 beam 的 Gamma。
+
+为了保留全局 `beam_index` 编号，稀疏 Gamma 仍支持 `gamma[u, m, n]` 这种全局索引访问；域外条目返回 0，但不会分配完整全网三维 Gamma 矩阵。
+
+这里的裁剪只作用于调度前的测量、上报和预测信息，不表示实际传输时忽略域外干扰。调度器先在自己的调度域内选择 UE/beam；各调度域的结果随后会合并到同一个 TTI。链路层评估 ACK/BLER 时，不再查询一个预先算好的全网 Gamma 表，而是用真实信道 `H`、合并后的 `schedule.links`、已选 TX/RX beam 重新计算本 TTI 的 effective SINR。
+
+因此需要区分两类计算：
+
+- 调度前候选 Gamma：如果全网有 `B` 个 beam，完整预计算复杂度近似随下面的量增长：
+
+$$
+U \times B^2
+$$
+
+域内裁剪后变成：
+
+$$
+U \times B_{\text{domain}}^2
+$$
+
+这里节省的是候选 beam pair 的测量/预测开销。
+
+- 调度后真实干扰：只对本 TTI 实际发射的 link 集合计算，复杂度近似随下面的量增长：
+
+$$
+L^2
+$$
+
+其中 `L` 是当前 TTI 已调度 link 数，通常远小于全网候选 beam 数。
+
+所以，真实传输仍然考虑全网已调度 beam 的干扰；节省的是调度前不必要的全网候选 Gamma 预计算。可以理解为：
+
+$$
+\text{全网真实干扰必须算；全网候选 Gamma 不必算。}
+$$
 
 ### 6.2 Greedy 与穷举
 
@@ -460,6 +514,7 @@ $$
 - `Q` 是 `max_mu_order`。
 
 在 `per_site_joint` 下，上式里的 `U` 是单个站点域内的 UE 数，而不是全网 UE 数。七站点时相当于做 7 个较小的站点内穷举，再合并结果。
+在 `single_site_three_sector_independent` 下，`U` 是单个 sector 内的 UE 数。
 
 ### 6.3 穷举剪枝
 
@@ -476,7 +531,7 @@ scheduler:
 
 剪枝方式：
 
-- 站点域拆分：`per_site_joint` 下每个站点单独穷举，避免把多个站点的 UE 放进一个组合爆炸的全局搜索。
+- 调度域拆分：`per_site_joint` 下每个站点单独穷举，`single_site_three_sector_independent` 下每个 sector 单独穷举，避免把多个独立域的 UE 放进一个组合爆炸的全局搜索。
 - 候选集预限制：穷举只搜索 UE 已上报的服务 beam。候选数由 `feedback.service_beam_top_k1` 和 `feedback.oracle_service_beam_top_k` 控制。
 - panel 约束剪枝：若 `use_panel_constraint: true`，同一个 `(cell, trp, panel)` 同时只能选择一个 beam；违反该约束的分支直接跳过，不进入链路目标计算。
 - 零上界剪枝：如果某个 UE 所有候选 beam 的单用户加权速率上界为 0，它不可能提高目标函数，会被跳过。

@@ -254,7 +254,7 @@ ue_array:
 | 参数 | 含义 | 取值范围 | 说明 |
 |---|---|---|---|
 | `num_freq_points` | 频域采样点数 | 正整数 | Gamma 矩阵和 EESM 使用。越大越慢。 |
-| `compute_full_gamma` | 是否计算完整服务/干扰 beam Gamma | `true`/`false` | 当前主流程需要完整 Gamma 用于 full_gamma/oracle。 |
+| `compute_full_gamma` | 是否计算完整服务/干扰 beam Gamma | `true`/`false` | 当前主流程需要 Gamma 用于 full_gamma/oracle；实际计算会按 `scheduler.domain_mode` 裁剪到 UE 的调度域。 |
 | `frequency_average` | 频域平均方式 | 当前 `linear_power` | 预留字段。 |
 
 复杂度大致随：
@@ -285,7 +285,7 @@ $$
 
 | 参数 | 含义 | 取值范围 | 说明 |
 |---|---|---|---|
-| `domain_mode` | 调度域模式 | `per_site_joint`, `global` | 默认 `per_site_joint`。旧值 `single_site_three_sector_independent` 兼容为站点域。 |
+| `domain_mode` | 调度域模式 | `single_site_three_sector_independent`, `per_site_joint`, `global` | 默认 `per_site_joint`。`single_site_three_sector_independent` 表示每个 sector 独立测量和调度；`per_site_joint` 表示同站点 3 个 sector 联合测量和调度。 |
 | `objective` | 优化目标 | `sum_rate`, `proportional_fair` | 总吞吐最大或比例公平。 |
 | `max_mu_order` | 最大 MU order | `auto` 或正整数 | `auto` 时由 RF architecture 自动解析。 |
 | `cap_mu_order_by_rf` | 是否用 RF 物理并发 beam 数截断手动 MU order | `true`/`false` | 默认 `true`。 |

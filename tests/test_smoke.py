@@ -7,8 +7,8 @@ from beam_sls.config import load_config
 from beam_sls.feedback import ServiceCandidate, UEReport, make_reports
 from beam_sls.link import eesm
 from beam_sls.link import run_tti_loop
-from beam_sls.measurement import MeasurementResult
-from beam_sls.scheduler import ScheduledLink, ScheduleResult, exhaustive_schedule, schedule
+from beam_sls.measurement import MeasurementResult, SparseGamma, compute_gamma_measurement
+from beam_sls.scheduler import ScheduledLink, ScheduleResult, exhaustive_schedule, normalize_domain_mode, schedule
 from beam_sls.sim import run_simulation
 from beam_sls.topology import make_topology
 
@@ -135,6 +135,63 @@ def test_site_domain_feedback_and_schedule():
     assert sched.metadata["domain_mode"] == "per_site_joint"
     assert len(sched.links) == 2
     assert {beam_ids[l.beam_index].trp for l in sched.links} == {0, 1}
+
+
+def test_single_site_three_sector_independent_is_sector_domain():
+    cfg = load_config(None)
+    cfg["scheduler"]["algorithm"] = "greedy"
+    cfg["scheduler"]["domain_mode"] = "single_site_three_sector_independent"
+    cfg["_resolved"] = {"max_mu_order": 1}
+    assert normalize_domain_mode(cfg["scheduler"]["domain_mode"]) == "per_sector_independent"
+
+    beam_ids = [
+        BeamId(cell=0, trp=0, panel=0, beam=0, global_index=0, tx_unit=0),
+        BeamId(cell=1, trp=0, panel=0, beam=0, global_index=1, tx_unit=1),
+    ]
+    meas = MeasurementResult(
+        service_power_w=np.ones((2, 2)),
+        interference_power_w=np.zeros((2, 2, 2)),
+        gamma=np.ones((2, 2, 2)),
+        noise_power_w=1.0,
+        selected_rx_beam=np.zeros((2, 2), dtype=int),
+        su_mcs=np.asarray([[1, 28], [28, 1]], dtype=int),
+        su_snr_db=np.asarray([[1.0, 30.0], [30.0, 1.0]], dtype=float),
+    )
+    reports = make_reports(
+        meas, beam_ids, schemes=["baseline"], k1=1, oracle_top_k=1, k2=1, threshold_db=0.0,
+        ue_site_ids={0: 0, 1: 0},
+        ue_serving_cells={0: 0, 1: 1},
+        candidate_beam_indices_by_ue={0: [0], 1: [1]},
+    )["baseline"]
+
+    assert reports[0].candidates[0].beam_index == 0
+    assert reports[1].candidates[0].beam_index == 1
+    sched = schedule(reports, beam_ids, cfg)
+    assert sched.metadata["domain_mode"] == "per_sector_independent"
+    assert len(sched.links) == 2
+    assert {l.beam_index for l in sched.links} == {0, 1}
+
+
+def test_domain_limited_measurement_uses_sparse_gamma():
+    beam_ids = [
+        BeamId(cell=0, trp=0, panel=0, beam=0, global_index=0, tx_unit=0),
+        BeamId(cell=1, trp=0, panel=0, beam=0, global_index=1, tx_unit=1),
+    ]
+    h_freq = np.ones((1, 2, 1, 1, 1), dtype=np.complex128)
+    tx_beams = np.ones((2, 1), dtype=np.complex128)
+    rx_beams = np.ones((1, 1), dtype=np.complex128)
+    meas = compute_gamma_measurement(
+        h_freq, tx_beams, rx_beams, beam_ids,
+        tx_power_w_per_panel=1.0,
+        noise_power_w=1.0,
+        candidate_beam_indices_by_ue={0: [0]},
+    )
+
+    assert isinstance(meas.gamma, SparseGamma)
+    assert meas.service_power_w[0, 0] > 0.0
+    assert meas.service_power_w[0, 1] == 0.0
+    assert meas.gamma[0, 0, 0] > 0.0
+    assert meas.gamma[0, 0, 1] == 0.0
 
 
 def test_exhaustive_pruning_matches_unpruned_small_case():

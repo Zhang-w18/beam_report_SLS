@@ -135,20 +135,39 @@ def plot_topology(topology, cfg: Dict, path: str | Path) -> None:
         except Exception:
             pass
 
-    # ISD marker: for a one-site topology, draw a ghost neighbor on +x to annotate distance.
+    # ISD marker: use real sites for multi-site layouts; keep a ghost neighbor
+    # only for the single-site reference plot.
     if isd > 0:
-        ax.scatter([isd], [0.0], marker="^", s=50, alpha=0.35)
-        ax.annotate("", xy=(isd, -0.12 * max_d), xytext=(0.0, -0.12 * max_d),
-                    arrowprops=dict(arrowstyle="<->", linewidth=1.2))
-        ax.text(isd / 2.0, -0.17 * max_d, f"ISD = {isd:.0f} m", ha="center", va="top", fontsize=9)
+        if len(topology.sites) >= 2:
+            s0 = topology.sites[0]
+            s1 = min(topology.sites[1:],
+                     key=lambda s: float(np.hypot(s.x_m - s0.x_m, s.y_m - s0.y_m)))
+            ax.annotate("", xy=(s1.x_m, s1.y_m), xytext=(s0.x_m, s0.y_m),
+                        arrowprops=dict(arrowstyle="<->", linewidth=1.2, alpha=0.65))
+            ax.text((s0.x_m + s1.x_m) / 2.0,
+                    (s0.y_m + s1.y_m) / 2.0,
+                    f"ISD = {isd:.0f} m",
+                    ha="center", va="bottom", fontsize=9)
+        else:
+            ax.scatter([isd], [0.0], marker="^", s=50, alpha=0.35)
+            ax.annotate("", xy=(isd, -0.12 * max_d), xytext=(0.0, -0.12 * max_d),
+                        arrowprops=dict(arrowstyle="<->", linewidth=1.2))
+            ax.text(isd / 2.0, -0.17 * max_d, f"ISD = {isd:.0f} m", ha="center", va="top", fontsize=9)
 
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
-    ax.set_title("Topology: sites, 3 sectors, UE drops, inter-site distance")
-    lim = max(max_d, isd * 0.6)
-    ax.set_xlim(-lim, max(isd * 1.05, lim))
-    ax.set_ylim(-lim, lim)
+    ax.set_title(f"Topology: {len(topology.sites)} sites, {topology.num_cells} cells/sectors, UE drops")
+    xs = [float(s.x_m) for s in topology.sites] + [float(u.x_m) for u in topology.ues]
+    ys = [float(s.y_m) for s in topology.sites] + [float(u.y_m) for u in topology.ues]
+    if xs and ys:
+        pad = max(80.0, 0.25 * max(max_d, isd))
+        ax.set_xlim(min(xs) - pad, max(xs) + pad)
+        ax.set_ylim(min(ys) - pad, max(ys) + pad)
+    else:
+        lim = max(max_d, isd * 0.6)
+        ax.set_xlim(-lim, max(isd * 1.05, lim))
+        ax.set_ylim(-lim, lim)
     ax.grid(True, alpha=0.3)
     handles, labels = ax.get_legend_handles_labels()
     if handles:

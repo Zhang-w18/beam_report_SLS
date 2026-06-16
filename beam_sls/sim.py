@@ -16,7 +16,7 @@ from .link_adaptation import make_link_adapter
 from .measurement import compute_gamma_measurement
 from .rf import resolve_rf_architecture, resolved_max_mu_order, tx_units_per_sector
 from .plotting import plot_bar, plot_best_beam_heatmap, plot_cdf, plot_heatmap, plot_topology
-from .scheduler import is_site_domain_mode, schedule
+from .scheduler import is_sector_domain_mode, is_site_domain_mode, normalize_domain_mode, schedule
 from .topology import make_topology, topology_to_rows
 from .utils import dbm_to_watt, ensure_dir, percentile, thermal_noise_watt, watt_to_dbm, write_csv, write_json
 
@@ -55,6 +55,55 @@ def _beam_indices_by_site(beam_ids) -> Dict[int, List[int]]:
     for bi, bid in enumerate(beam_ids):
         out.setdefault(int(bid.trp), []).append(int(bi))
     return out
+
+
+def _beam_indices_by_cell(beam_ids) -> Dict[int, List[int]]:
+    out: Dict[int, List[int]] = {}
+    for bi, bid in enumerate(beam_ids):
+        out.setdefault(int(bid.cell), []).append(int(bi))
+    return out
+
+
+def _domain_candidate_beam_indices_by_ue(topo, beam_ids, domain_mode: str) -> Dict[int, List[int]] | None:
+    if is_site_domain_mode(domain_mode):
+        beams_by_site = _beam_indices_by_site(beam_ids)
+        return {
+            int(ue.ue_id): beams_by_site.get(int(ue.site_id), [])
+            for ue in topo.ues
+        }
+    if is_sector_domain_mode(domain_mode):
+        beams_by_cell = _beam_indices_by_cell(beam_ids)
+        return {
+            int(ue.ue_id): beams_by_cell.get(int(ue.serving_cell), [])
+            for ue in topo.ues
+        }
+    return None
+
+
+def _domain_metric(values: np.ndarray,
+                   candidate_beam_indices_by_ue: Dict[int, List[int]] | None,
+                   fn) -> float:
+    if candidate_beam_indices_by_ue is None:
+        arr = np.asarray(values, dtype=float).reshape(-1)
+    else:
+        chunks = []
+        for u, inds in candidate_beam_indices_by_ue.items():
+            if inds:
+                chunks.append(np.asarray(values[int(u), inds], dtype=float))
+        arr = np.concatenate(chunks) if chunks else np.asarray([], dtype=float)
+    if arr.size == 0:
+        return 0.0
+    return float(fn(arr))
+
+
+def _avg_domain_beams(candidate_beam_indices_by_ue: Dict[int, List[int]] | None,
+                      num_beams: int,
+                      num_ues: int) -> float:
+    if num_ues <= 0:
+        return 0.0
+    if candidate_beam_indices_by_ue is None:
+        return float(num_beams)
+    return float(np.mean([len(v) for v in candidate_beam_indices_by_ue.values()]))
 
 
 def _schedule_stat_rows(drop: int, scheme: str, sched) -> List[Dict[str, Any]]:
@@ -175,7 +224,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     scheduler_stat_rows: List[Dict[str, Any]] = []
     tbar_by_scheme: Dict[str, Dict[int, float]] = {}
     channel_backend_rows: List[Dict[str, Any]] = []
-    domain_mode = cfg["scheduler"].get("domain_mode", "global")
+    domain_mode = normalize_domain_mode(cfg["scheduler"].get("domain_mode", "global"))
 
     schemes = list(cfg["feedback"].get("schemes", ["baseline"]))
     total_ues = int(cfg["ue_drop"]["num_ut_per_sector"]) * max(1, topo0.num_cells)
@@ -199,19 +248,14 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
         ch = generate_channel(topo, cfg, tx_cfg, rx_cfg, rng)
         channel_backend_rows.append({"drop": drop, "backend": ch.backend, "backend_status": ch.backend_status})
         _progress(cfg, f"[drop {drop+1}/{num_drops}] channel backend={ch.backend}; computing Gamma measurement")
+        ue_site_ids = {int(ue.ue_id): int(ue.site_id) for ue in topo.ues}
+        ue_serving_cells = {int(ue.ue_id): int(ue.serving_cell) for ue in topo.ues}
+        candidate_beam_indices_by_ue = _domain_candidate_beam_indices_by_ue(topo, beam_ids, domain_mode)
         meas = compute_gamma_measurement(ch.h_freq, tx_beams, rx_beams, beam_ids,
                                          tx_power_w_per_panel=tx_power_w_per_panel,
                                          noise_power_w=noise_w,
-                                         link_adapter=link_adapter)
-        ue_site_ids = {int(ue.ue_id): int(ue.site_id) for ue in topo.ues}
-        ue_serving_cells = {int(ue.ue_id): int(ue.serving_cell) for ue in topo.ues}
-        candidate_beam_indices_by_ue = None
-        if is_site_domain_mode(domain_mode):
-            beams_by_site = _beam_indices_by_site(beam_ids)
-            candidate_beam_indices_by_ue = {
-                int(ue.ue_id): beams_by_site.get(int(ue.site_id), [])
-                for ue in topo.ues
-            }
+                                         link_adapter=link_adapter,
+                                         candidate_beam_indices_by_ue=candidate_beam_indices_by_ue)
         reports_by_scheme = make_reports(
             meas, beam_ids, schemes=schemes,
             k1=int(cfg["feedback"].get("service_beam_top_k1", 2)),
@@ -269,8 +313,9 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             "scheduler_domain_mode": domain_mode,
             "noise_dbm": float(watt_to_dbm(noise_w)),
             "tx_power_per_tx_unit_dbm": float(watt_to_dbm(tx_power_w_per_panel)),
-            "avg_su_snr_db": float(np.mean(meas.su_snr_db)),
-            "p95_su_snr_db": float(np.percentile(meas.su_snr_db, 95)),
+            "avg_su_snr_db": _domain_metric(meas.su_snr_db, candidate_beam_indices_by_ue, np.mean),
+            "p95_su_snr_db": _domain_metric(meas.su_snr_db, candidate_beam_indices_by_ue, lambda x: np.percentile(x, 95)),
+            "avg_measurement_beams_per_ue": _avg_domain_beams(candidate_beam_indices_by_ue, len(beam_ids), len(topo.ues)),
             "channel_backend": ch.backend,
             "link_adaptation_backend": link_adapter.status.backend,
         })

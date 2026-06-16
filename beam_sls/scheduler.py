@@ -13,6 +13,17 @@ from .utils import lin_to_db
 
 
 GLOBAL_DOMAIN_MODES = {"global", "network", "global_joint", "network_joint"}
+SECTOR_DOMAIN_MODES = {
+    "sector",
+    "cell",
+    "per_sector",
+    "per_cell",
+    "sector_independent",
+    "cell_independent",
+    "per_sector_independent",
+    "per_cell_independent",
+    "single_site_three_sector_independent",
+}
 SITE_DOMAIN_MODES = {
     "site",
     "site_joint",
@@ -20,7 +31,6 @@ SITE_DOMAIN_MODES = {
     "per_site",
     "per_site_joint",
     "per_site_three_sector_joint",
-    "single_site_three_sector_independent",
 }
 
 
@@ -28,6 +38,8 @@ def normalize_domain_mode(mode: str | None) -> str:
     raw = str(mode or "global").lower()
     if raw in GLOBAL_DOMAIN_MODES:
         return "global"
+    if raw in SECTOR_DOMAIN_MODES:
+        return "per_sector_independent"
     if raw in SITE_DOMAIN_MODES:
         return "per_site_joint"
     raise ValueError(f"Unknown scheduler.domain_mode={mode}")
@@ -35,6 +47,10 @@ def normalize_domain_mode(mode: str | None) -> str:
 
 def is_site_domain_mode(mode: str | None) -> bool:
     return normalize_domain_mode(mode) == "per_site_joint"
+
+
+def is_sector_domain_mode(mode: str | None) -> bool:
+    return normalize_domain_mode(mode) == "per_sector_independent"
 
 
 @dataclass
@@ -79,8 +95,15 @@ def schedule(reports: List[UEReport],
              link_adapter=None) -> ScheduleResult:
     domain_mode = normalize_domain_mode(cfg["scheduler"].get("domain_mode", "global"))
     if domain_mode == "per_site_joint":
-        return schedule_per_site_joint(reports, beam_ids, cfg, tbar_mbps, link_adapter)
-    return _schedule_single_domain(reports, beam_ids, cfg, tbar_mbps, link_adapter, domain_id=None)
+        return schedule_grouped_domains(reports, beam_ids, cfg, tbar_mbps, link_adapter,
+                                        domain_mode=domain_mode,
+                                        group_key=lambda r: 0 if r.site_id is None else int(r.site_id))
+    if domain_mode == "per_sector_independent":
+        return schedule_grouped_domains(reports, beam_ids, cfg, tbar_mbps, link_adapter,
+                                        domain_mode=domain_mode,
+                                        group_key=lambda r: 0 if r.serving_cell is None else int(r.serving_cell))
+    return _schedule_single_domain(reports, beam_ids, cfg, tbar_mbps, link_adapter,
+                                   domain_id=None, domain_mode="global")
 
 
 def _schedule_single_domain(reports: List[UEReport],
@@ -88,13 +111,49 @@ def _schedule_single_domain(reports: List[UEReport],
                             cfg: Dict,
                             tbar_mbps: Dict[int, float] | None = None,
                             link_adapter=None,
-                            domain_id: int | None = None) -> ScheduleResult:
+                            domain_id: int | None = None,
+                            domain_mode: str = "global") -> ScheduleResult:
     alg = cfg["scheduler"].get("algorithm", "exhaustive")
     if alg == "exhaustive":
-        return exhaustive_schedule(reports, beam_ids, cfg, tbar_mbps, link_adapter, domain_id=domain_id)
+        return exhaustive_schedule(reports, beam_ids, cfg, tbar_mbps, link_adapter,
+                                   domain_id=domain_id, domain_mode=domain_mode)
     if alg == "greedy":
-        return greedy_schedule(reports, beam_ids, cfg, tbar_mbps, link_adapter, domain_id=domain_id)
+        return greedy_schedule(reports, beam_ids, cfg, tbar_mbps, link_adapter,
+                               domain_id=domain_id, domain_mode=domain_mode)
     raise ValueError(f"Unknown scheduler.algorithm={alg}")
+
+
+def schedule_grouped_domains(reports: List[UEReport],
+                             beam_ids: Sequence[BeamId],
+                             cfg: Dict,
+                             tbar_mbps: Dict[int, float] | None = None,
+                             link_adapter=None,
+                             domain_mode: str = "per_site_joint",
+                             group_key=None) -> ScheduleResult:
+    scheme = reports[0].scheme if reports else "unknown"
+    key_fn = group_key or (lambda r: 0)
+    by_domain: Dict[int, List[UEReport]] = {}
+    for r in reports:
+        by_domain.setdefault(int(key_fn(r)), []).append(r)
+
+    links: List[ScheduledLink] = []
+    objective = 0.0
+    domains: List[Dict] = []
+    for domain_id in sorted(by_domain):
+        res = _schedule_single_domain(by_domain[domain_id], beam_ids, cfg, tbar_mbps, link_adapter,
+                                      domain_id=domain_id, domain_mode=domain_mode)
+        links.extend(res.links)
+        objective += float(res.objective_value)
+        domains.append(res.metadata)
+
+    metadata = {
+        "domain_mode": domain_mode,
+        "algorithm": cfg["scheduler"].get("algorithm", "exhaustive"),
+        "num_domains": len(domains),
+        "domains": domains,
+        "aggregate_stats": _aggregate_domain_stats(domains),
+    }
+    return ScheduleResult(scheme=scheme, objective_value=float(objective), links=links, metadata=metadata)
 
 
 def schedule_per_site_joint(reports: List[UEReport],
@@ -102,28 +161,11 @@ def schedule_per_site_joint(reports: List[UEReport],
                             cfg: Dict,
                             tbar_mbps: Dict[int, float] | None = None,
                             link_adapter=None) -> ScheduleResult:
-    scheme = reports[0].scheme if reports else "unknown"
-    by_site: Dict[int, List[UEReport]] = {}
-    for r in reports:
-        by_site.setdefault(0 if r.site_id is None else int(r.site_id), []).append(r)
-
-    links: List[ScheduledLink] = []
-    objective = 0.0
-    domains: List[Dict] = []
-    for site_id in sorted(by_site):
-        res = _schedule_single_domain(by_site[site_id], beam_ids, cfg, tbar_mbps, link_adapter, domain_id=site_id)
-        links.extend(res.links)
-        objective += float(res.objective_value)
-        domains.append(res.metadata)
-
-    metadata = {
-        "domain_mode": "per_site_joint",
-        "algorithm": cfg["scheduler"].get("algorithm", "exhaustive"),
-        "num_domains": len(domains),
-        "domains": domains,
-        "aggregate_stats": _aggregate_domain_stats(domains),
-    }
-    return ScheduleResult(scheme=scheme, objective_value=float(objective), links=links, metadata=metadata)
+    return schedule_grouped_domains(
+        reports, beam_ids, cfg, tbar_mbps, link_adapter,
+        domain_mode="per_site_joint",
+        group_key=lambda r: 0 if r.site_id is None else int(r.site_id),
+    )
 
 
 def _aggregate_domain_stats(domains: Sequence[Dict]) -> Dict:
@@ -314,7 +356,8 @@ def exhaustive_schedule(reports: List[UEReport],
                         cfg: Dict,
                         tbar_mbps: Dict[int, float] | None = None,
                         link_adapter=None,
-                        domain_id: int | None = None) -> ScheduleResult:
+                        domain_id: int | None = None,
+                        domain_mode: str = "global") -> ScheduleResult:
     max_q = _effective_max_mu_order(cfg)
     num_reports_input = len(reports)
     reports = [r for r in reports if r.candidates]
@@ -415,7 +458,7 @@ def exhaustive_schedule(reports: List[UEReport],
     dfs(0, [], set(), 0.0, [])
     stats["best_objective_value"] = float(best_val)
     stats["num_scheduled"] = int(len(best_links))
-    metadata = {"domain_mode": "global" if domain_id is None else "per_site_joint",
+    metadata = {"domain_mode": domain_mode,
                 "domain_id": None if domain_id is None else int(domain_id),
                 "stats": stats}
     return ScheduleResult(scheme=scheme, objective_value=float(best_val), links=best_links, metadata=metadata)
@@ -426,7 +469,8 @@ def greedy_schedule(reports: List[UEReport],
                     cfg: Dict,
                     tbar_mbps: Dict[int, float] | None = None,
                     link_adapter=None,
-                    domain_id: int | None = None) -> ScheduleResult:
+                    domain_id: int | None = None,
+                    domain_mode: str = "global") -> ScheduleResult:
     max_q = _effective_max_mu_order(cfg)
     num_reports_input = len(reports)
     reports = [r for r in reports if r.candidates]
@@ -471,7 +515,7 @@ def greedy_schedule(reports: List[UEReport],
     final_val, final_links = _evaluate_assignments(current, reports, beam_ids, cfg, tbar_mbps, link_adapter)
     stats["best_objective_value"] = float(final_val)
     stats["num_scheduled"] = int(len(final_links))
-    metadata = {"domain_mode": "global" if domain_id is None else "per_site_joint",
+    metadata = {"domain_mode": domain_mode,
                 "domain_id": None if domain_id is None else int(domain_id),
                 "stats": stats}
     return ScheduleResult(scheme=scheme, objective_value=final_val, links=final_links, metadata=metadata)
