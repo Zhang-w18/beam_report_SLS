@@ -1,0 +1,92 @@
+==============================================================================
+Sionna SLS beam-management -- GAIN-SPACE ANALYSIS (post-processing, no re-sim)
+==============================================================================
+
+------------------------------------------------------------------------------
+[CONFIG] diagnostic_small_drops5_tti5_final
+------------------------------------------------------------------------------
+  domain_mode                = single_site_three_sector_independent
+  algorithm                  = greedy
+  objective                  = sum_rate
+  max_mu_order (cfg / resolved) = auto / 4
+  cap_mu_order_by_rf         = True
+  max_parallel_beams_per_trp = 4
+  conflict_penalty_lambda    = 0.35      <-- compare against per-UE rate (~700-1100 Mbps)
+  service_beam_top_k1        = 2      <-- candidates for baseline/topk/threshold
+  oracle_service_beam_top_k  = 4      <-- candidates for full_gamma (asymmetry if != k1)
+  conflict_top_k2            = 3
+  conflict_sinr_threshold_db = 0.0
+  layout / num_sites / sectors = one_site_three_sector / 1 / 3
+  num_ut_per_sector          = 2
+  num_beams_h x num_beams_v  = 2 x 2   (vertical_mode=scan, fixed_v=None)
+  tx_units/sector, beams/sector = 4, 16
+  channel_model / fc_ghz     = sionna_tr38901_uma / 30.0
+  num_drops x num_tti        = 5 x 5
+  target_bler / tx_power_dbm = 0.1 / 33.0
+  --- derived loading ---
+  candidate UEs (network)    = 6
+  panels/TX-units (network)  = 12
+  scheduled UEs/slot (approx)= 4   => load = 33% of panels, 67% of UEs
+
+------------------------------------------------------------------------------
+[REALIZED METRICS] diagnostic_small_drops5_tti5_final   (from summary.json)
+------------------------------------------------------------------------------
+  scheme                      sys_gp   p05_ue  eff_SINR   ack  #sched   gain%  oracle
+  full_gamma                  2052.1    148.6      8.64  0.93    4.00    0.47   1.000
+  baseline                    2042.4    148.6      8.34  0.94    4.00    0.00   0.995
+  topk_conflict_id            1925.0    129.3      8.34  0.89    4.00   -5.75   0.938
+  threshold_conflict_set      2084.6    148.6      8.34  0.95    4.00    2.06   1.016
+  (sys_gp = avg system goodput Mbps; gain% vs baseline; oracle = ratio to full_gamma)
+
+------------------------------------------------------------------------------
+[EXPERIMENT A] Interference-free ceiling & capture   diagnostic_small_drops5_tti5_final
+------------------------------------------------------------------------------
+  interference-free ceiling (baseline SU predicted sum) =   2315.9 Mbps
+    - ack-aligned ceiling (x baseline ack=0.94)   =   2177.0 Mbps
+  realized baseline (with interference)                 =   2042.4 Mbps
+  => throughput baseline LOSES to interference          =    6.59 %   (this is the MAX gain any interference-aware scheme can add)
+  realized full_gamma                                   =   2052.1 Mbps
+  => full_gamma ACHIEVED gain                           =    0.47 %
+  => CAPTURE RATIO (achieved / max)                     =   7.21%
+     capture ~100%  -> full_gamma near the physical ceiling; small gain is REAL/expected.
+     capture <<100% -> gain left on the table -> suspect greedy suboptimality (see Exp F/G).
+  NOTE: ceiling uses baseline's max-SNR beams with interference removed; because
+        baseline already picks max-SU-rate users, this is a valid upper bound on
+        sum-rate. It is an estimate (target-BLER, no re-sim); see report for the
+        exact re-simulation variant.
+
+------------------------------------------------------------------------------
+[EXPERIMENT B] Effective-SINR & MCS-saturation regime   diagnostic_small_drops5_tti5_final
+------------------------------------------------------------------------------
+  MCS saturates at ~28 dB (MCS 28, ~1122 Mbps). Users above it cannot gain rate from interference avoidance.
+  scheme                      p05    p50    p95   mean  >=28dB  >=22dB  MCS=28
+  full_gamma                 -1.8    7.2   27.9    8.6    5.0%   10.0%    0.0%
+  baseline                   -1.8    6.8   27.9    8.3    5.0%   10.0%    0.0%
+  topk_conflict_id           -1.8    6.8   27.9    8.3    5.0%   10.0%    0.0%
+  threshold_conflict_set     -1.8    6.8   27.9    8.3    5.0%   10.0%    0.0%
+  Interpretation: if a large fraction is >=28dB (MCS=28), the SUM-rate gain is
+  compressed by saturation -> look at p05_ue / SINR-CDF instead of sum for the story.
+
+------------------------------------------------------------------------------
+[EXPERIMENT C] Schedule similarity vs baseline   diagnostic_small_drops5_tti5_final
+------------------------------------------------------------------------------
+  Jaccard(scheme, baseline) over scheduled sets, averaged over drops.
+  (ue,beam)=1.0 means IDENTICAL schedule to baseline -> the report info is unused.
+  scheme                    J(ue,beam)  J(ue-set) ==baseline%
+  full_gamma                     0.867      1.000       80.0%
+  baseline                       1.000      1.000      100.0%
+  topk_conflict_id               1.000      1.000      100.0%
+  threshold_conflict_set         1.000      1.000      100.0%
+  Interpretation: topk/threshold with J~1.0 vs baseline => the conflict penalty is
+  NOT changing decisions (see conflict_penalty_lambda). full_gamma with low J is
+  where the gain comes from (it genuinely reschedules users/beams).
+
+==============================================================================
+HOW TO READ / WHAT TO PASTE BACK:
+  1. [CONFIG] blocks -> confirm the runs are comparable (same load%pan, k1 vs
+     oracle_k, conflict_penalty_lambda).
+  2. [EXPERIMENT A] capture ratio -> is 12/19% near the physical ceiling?
+  3. [EXPERIMENT B] >=28dB fraction -> is sum-gain compressed by MCS saturation?
+  4. [EXPERIMENT C] topk/threshold Jaccard vs baseline -> is the penalty inert?
+  Paste this entire txt back for interpretation.
+==============================================================================
