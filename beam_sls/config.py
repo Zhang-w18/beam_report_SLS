@@ -163,6 +163,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "objective": "sum_rate",
         "max_mu_order": "auto",
         "cap_mu_order_by_rf": True,
+        # greedy / exhaustive / hard_conflict_greedy / adaptive_lambda_greedy
         "algorithm": "greedy",
         "use_panel_constraint": True,
         "exhaustive_pruning": {
@@ -172,8 +173,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "branch_and_bound": True,
         },
         "conflict_penalty_lambda": 0.35,
+        # fixed uses conflict_penalty_lambda. adaptive uses
+        # adaptive_lambda_alpha * median(candidate SU rate in Mbps).
+        "conflict_penalty_mode": "fixed",
+        "adaptive_lambda_alpha": 0.2,
         "unknown_interference_policy": "zero",
         "pf_tbar_init_mbps": 1.0,
+    },
+    "analysis": {
+        # Re-evaluate the baseline schedule with inter-beam interference forced
+        # to zero, using common ACK random numbers for a clean comparison.
+        "baseline_no_interference_upper_bound": True,
     },
     "link_abstraction": {
         # v2 preferred path: Sionna SYS PHYAbstraction + ILLA. If sionna.sys or

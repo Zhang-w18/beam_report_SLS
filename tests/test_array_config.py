@@ -119,3 +119,35 @@ def test_rf_architecture_default_and_fully_connected():
     assert rf2.effective_beam_scope == "joint"
     assert rf2.max_parallel_beams_per_trp == 4
     assert all(u.array_panel_index is None for u in rf2.tx_units)
+
+
+def test_three_site_global_36ue_config_exposes_36_tx_units():
+    import numpy as np
+
+    from beam_sls.codebook import build_network_tx_beams
+    from beam_sls.config import load_config
+    from beam_sls.rf import resolve_rf_architecture, resolved_max_mu_order, tx_units_per_sector
+    from beam_sls.topology import make_topology
+
+    cfg = load_config("configs/v2_three_site_global_36ue.yaml")
+    topo = make_topology(cfg, np.random.default_rng(1))
+    tx = ArrayConfig.from_dict(cfg["tx_array"])
+    rf = resolve_rf_architecture(cfg, tx)
+    site_ids = [topo.sector_by_cell(c).site_id for c in range(topo.num_cells)]
+    beam_ids, _ = build_network_tx_beams(
+        num_cells=topo.num_cells,
+        panels_per_cell=tx_units_per_sector(cfg, rf),
+        tx_cfg=tx,
+        max_beams_per_panel=int(cfg["tx_array"]["max_beams"]),
+        site_id_by_cell=site_ids,
+        rf_architecture=rf,
+    )
+
+    assert len(topo.sites) == 3
+    assert topo.num_cells == 9
+    assert len(topo.ues) == 36
+    assert rf.tx_units_per_trp == 4
+    assert resolved_max_mu_order(cfg, rf) == 36
+    assert cfg["feedback"]["service_beam_top_k1"] == 56
+    assert len({b.panel_key() for b in beam_ids}) == 36
+    assert len(beam_ids) == 36 * 8

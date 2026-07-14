@@ -153,7 +153,8 @@ scheduler:
   # independent polarization beams, resolved max_mu_order = 4.
   max_mu_order: auto
   cap_mu_order_by_rf: true
-  algorithm: greedy       # greedy is the recommended default; exhaustive is for tiny debug cases only.
+  # greedy / exhaustive / hard_conflict_greedy / adaptive_lambda_greedy
+  algorithm: greedy
   use_panel_constraint: true
   exhaustive_pruning:
     enabled: true
@@ -161,8 +162,13 @@ scheduler:
     zero_upper_bound: true
     branch_and_bound: true
   conflict_penalty_lambda: 0.35
+  conflict_penalty_mode: fixed   # fixed / adaptive
+  adaptive_lambda_alpha: 0.2
   unknown_interference_policy: zero
   pf_tbar_init_mbps: 1.0
+
+analysis:
+  baseline_no_interference_upper_bound: true
 
 link_abstraction:
   mode: sionna_sys_precomputed_bler

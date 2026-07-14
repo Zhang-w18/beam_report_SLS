@@ -17,7 +17,12 @@ def main() -> None:
                         help="Override system.num_drops for quick tests")
     parser.add_argument("--num-tti", type=int, default=None,
                         help="Override system.num_tti_per_drop")
-    parser.add_argument("--algorithm", type=str, default=None, choices=["exhaustive", "greedy"],
+    parser.add_argument("--algorithm", type=str, default=None, choices=[
+        "exhaustive",
+        "greedy",
+        "hard_conflict_greedy",
+        "adaptive_lambda_greedy",
+    ],
                         help="Override scheduler.algorithm")
     parser.add_argument("--domain-mode", type=str, default=None,
                         help="Override scheduler.domain_mode, e.g. per_site_joint or global")
@@ -57,10 +62,12 @@ def main() -> None:
     print("Simulation finished. Summary:")
     for scheme, vals in summary.items():
         if isinstance(vals, dict) and not str(scheme).startswith("_"):
+            gain = vals.get("gain_over_baseline")
+            gain_text = "n/a" if gain is None else f"{float(gain):+7.2%}"
             print(f"  {scheme:24s} avg_system={vals.get('avg_system_goodput_mbps', 0.0):9.3f} Mbps "
                   f"p05_ue={vals.get('p05_ue_goodput_mbps', 0.0):8.3f} Mbps "
                   f"oracle_ratio={vals.get('oracle_ratio', 0.0):6.3f} "
-                  f"gain_base={vals.get('gain_over_baseline', 0.0):+7.2%}")
+                  f"gain_base={gain_text:>8s}")
     print(f"Outputs written to: {Path(args.out).resolve()}")
 
 

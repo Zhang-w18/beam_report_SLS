@@ -52,7 +52,8 @@ def realized_sinr_grid(schedule: ScheduleResult,
                        rx_beams: np.ndarray,
                        beam_ids: Sequence[BeamId],
                        meas: MeasurementResult,
-                       tx_power_w_per_panel: float) -> Dict[int, np.ndarray]:
+                       tx_power_w_per_panel: float,
+                       ignore_interference: bool = False) -> Dict[int, np.ndarray]:
     """Return SINR[f] per scheduled UE using true H and selected RX beam."""
     out: Dict[int, np.ndarray] = {}
     links = schedule.links
@@ -67,16 +68,17 @@ def realized_sinr_grid(schedule: ScheduleResult,
         z = np.einsum("n,fn->f", np.conjugate(q), hf)
         sig = tx_power_w_per_panel * (np.abs(z) ** 2)
         den = np.full_like(sig, meas.noise_power_w, dtype=float)
-        for other in links:
-            if other.ue_id == u:
-                continue
-            bn = other.beam_index
-            bid_n = beam_ids[bn]
-            h_int = h_freq[u, bid_n.tx_unit]
-            f_int = tx_beams[bn]
-            hf_i = np.einsum("frt,t->fr", h_int, f_int)
-            z_i = np.einsum("n,fn->f", np.conjugate(q), hf_i)
-            den += tx_power_w_per_panel * (np.abs(z_i) ** 2)
+        if not ignore_interference:
+            for other in links:
+                if other.ue_id == u:
+                    continue
+                bn = other.beam_index
+                bid_n = beam_ids[bn]
+                h_int = h_freq[u, bid_n.tx_unit]
+                f_int = tx_beams[bn]
+                hf_i = np.einsum("frt,t->fr", h_int, f_int)
+                z_i = np.einsum("n,fn->f", np.conjugate(q), hf_i)
+                den += tx_power_w_per_panel * (np.abs(z_i) ** 2)
         out[u] = sig / np.maximum(den, 1e-30)
     return out
 
@@ -92,7 +94,8 @@ def run_tti_loop(schedule: ScheduleResult,
                  drop_idx: int,
                  rng: np.random.Generator,
                  initial_olla: Dict[Tuple[str, int], float] | None = None,
-                 link_adapter=None) -> Tuple[List[LinkEvalRow], Dict[Tuple[str, int], float]]:
+                 link_adapter=None,
+                 ignore_interference: bool = False) -> Tuple[List[LinkEvalRow], Dict[Tuple[str, int], float]]:
     num_tti = int(cfg["system"].get("num_tti_per_drop", 1))
     slot_ms = float(cfg["pdsch"].get("slot_duration_ms", 0.125))
     beta_db = float(cfg["link_abstraction"].get("eesm_beta_db", 5.0))
@@ -103,7 +106,10 @@ def run_tti_loop(schedule: ScheduleResult,
 
     olla = dict(initial_olla or {})
     rows: List[LinkEvalRow] = []
-    sinr_grid = realized_sinr_grid(schedule, h_freq, tx_beams, rx_beams, beam_ids, meas, tx_power_w_per_panel)
+    sinr_grid = realized_sinr_grid(
+        schedule, h_freq, tx_beams, rx_beams, beam_ids, meas,
+        tx_power_w_per_panel, ignore_interference=ignore_interference,
+    )
 
     for tti in range(num_tti):
         for link in schedule.links:

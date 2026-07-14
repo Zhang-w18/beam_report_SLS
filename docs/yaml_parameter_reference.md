@@ -289,13 +289,15 @@ $$
 | `objective` | 优化目标 | `sum_rate`, `proportional_fair` | 总吞吐最大或比例公平。 |
 | `max_mu_order` | 最大 MU order | `auto` 或正整数 | `auto` 时由 RF architecture 自动解析。 |
 | `cap_mu_order_by_rf` | 是否用 RF 物理并发 beam 数截断手动 MU order | `true`/`false` | 默认 `true`。 |
-| `algorithm` | 调度算法 | `greedy`, `exhaustive` | 默认 `greedy`。`exhaustive` 只建议小规模 debug。 |
+| `algorithm` | 调度算法 | `greedy`, `exhaustive`, `hard_conflict_greedy`, `adaptive_lambda_greedy` | `hard_conflict_greedy` 在候选二元组级实施硬冲突删除；`adaptive_lambda_greedy` 使用场景自适应冲突惩罚。 |
 | `use_panel_constraint` | 是否约束同一 TX unit 同时只选一个 beam | `true`/`false` | 默认 `true`。 |
 | `exhaustive_pruning.enabled` | 是否启用穷举剪枝配置 | `true`/`false` | 默认 `true`。 |
 | `exhaustive_pruning.sort_by_upper_bound` | 是否按单用户上界排序 | `true`/`false` | 先找到较好当前最优值，帮助上界剪枝。 |
 | `exhaustive_pruning.zero_upper_bound` | 是否移除零上界 UE report | `true`/`false` | 不改变最优性。 |
 | `exhaustive_pruning.branch_and_bound` | 是否启用 branch-and-bound 上界剪枝 | `true`/`false` | 不改变当前候选集合内的穷举最优性。 |
 | `conflict_penalty_lambda` | proposed feedback 冲突惩罚权重 | 非负数 | 用于 ID-only conflict penalty。 |
+| `conflict_penalty_mode` | lambda 模式 | `fixed`, `adaptive` | `adaptive` 时忽略固定值，按候选 SU rate 中位数计算。 |
+| `adaptive_lambda_alpha` | 自适应 lambda 比例 | 非负数，常用 `0.1`, `0.2`, `0.5` | `lambda = alpha * median(candidate SU rate [Mbps])`，逐调度域计算。 |
 | `unknown_interference_policy` | 未知干扰处理 | 当前 `zero` | 预留字段。 |
 | `pf_tbar_init_mbps` | PF 初始平均吞吐 | 正数 | `objective=proportional_fair` 时使用。 |
 
@@ -443,6 +445,12 @@ link_abstraction_status.json
 sionna_import_probe.json
 metrics/beams.csv
 metrics/summary.csv
+metrics/ue_goodput.csv
+metrics/schedule_similarity.csv
+metrics/schedule_similarity_by_drop.csv
+metrics/su_snr_samples.csv
+metrics/su_snr_max_per_ue.csv
+metrics/su_snr_summary.csv
 ```
 
 `rf_architecture_summary.json` 是确认 MU order 与射频架构是否按预期解析的核心文件。

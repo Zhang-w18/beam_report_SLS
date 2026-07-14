@@ -1,0 +1,151 @@
+# Three-site global scheduling configuration.
+# Physical scheduling capacity:
+#   3 sites * 3 sector/TRPs per site * 4 TXRUs per TRP = 36 concurrent links.
+
+scenario:
+  name: urban_macro_v2_three_site_global_36ue
+  carrier_frequency_ghz: 30.0
+  channel_model: numpy_geometric_uma
+  min_ue_distance_m: 35.0
+  max_ue_distance_m: 250.0
+  num_clusters: 4
+  delay_spread_ns: 100.0
+  shadow_fading_std_db: 4.0
+  pathloss_exponent: 3.0
+  enable_pathloss: true
+  enable_shadow_fading: true
+
+topology:
+  layout: three_site_triangle
+  num_sites: 3
+  # In this model each sector/cell is one TRP, so this gives 3 TRPs per site.
+  sectors_per_site: 3
+  sector_azimuths_deg: [30.0, 150.0, 270.0]
+  sector_width_deg: 120.0
+  isd_m: 500.0
+  bs_height_m: 25.0
+
+system:
+  bandwidth_mhz: 20.0
+  subcarrier_spacing_khz: 120.0
+  # The simulator divides this network-wide power over 36 TX units.
+  # 42.542 dBm network total gives approximately 33 dBm per TRP and 27 dBm/TXRU.
+  tx_power_dbm: 42.542
+  num_drops: 1
+  num_tti_per_drop: 10
+  random_seed: 20260714
+  target_bler: 0.1
+
+ue_drop:
+  # 4 UE/sector * 9 sectors = exactly 36 UE, so baseline can fill all 36 TX units.
+  num_ut_per_sector: 4
+  distribution: uniform_in_sector
+  speed_kmh: 3.0
+
+trp:
+  # One sector is one TRP. Do not set this to 3: that would create 3 TRPs per sector.
+  num_trps_per_sector: 1
+  num_panels_per_sector: 1
+  panel_azimuth_offsets_deg: [0.0, 0.0]
+  panel_power_mode: per_tx_unit_equal
+
+rf_architecture:
+  txru_connectivity: panel_polarization_subarray
+  allow_independent_polarization_beams: true
+  num_txru: 4
+  max_parallel_beams_per_trp: auto
+
+# Reduced array dimensions keep the 36-TX-unit global channel tensor practical
+# while preserving 2 physical panels * 2 polarizations = 4 independent TXRUs.
+tx_array:
+  model: tr38901_panel
+  num_txru: 4
+  num_ae: 64
+  M: 4
+  N: 4
+  P: 2
+  Mg: 2
+  Ng: 1
+  Mp: 1
+  Np: 1
+  dH: 0.5
+  dV: 0.5
+  beam_scope: per_panel
+  sampling_mode: uniform
+  num_beams_h: 4
+  num_beams_v: 2
+  max_beams: 8
+  vertical_beam_mode: scan
+  fixed_v_index: null
+
+ue_array:
+  model: tr38901_panel
+  num_rxru: 1
+  num_ae: 4
+  M: 2
+  N: 2
+  P: 1
+  Mg: 1
+  Ng: 1
+  Mp: 1
+  Np: 1
+  dH: 0.5
+  dV: 0.5
+  beam_scope: joint
+  sampling_mode: uniform
+  num_beams_h: 2
+  num_beams_v: 2
+  max_beams: 4
+  vertical_beam_mode: scan
+  fixed_v_index: null
+
+measurement:
+  num_freq_points: 2
+  compute_full_gamma: true
+  frequency_average: linear_power
+
+feedback:
+  schemes: [full_gamma, baseline, topk_conflict_id, threshold_conflict_set]
+  cqi_mode: illa_target_bler
+  # One serving TRP has 4 TXRUs * 8 beams/TXRU = 32 beams, but global SU-rate
+  # ordering can place neighbor-TRP beams inside the top candidates. Using 56
+  # was verified through run_simulation's actual drop RNG path to cover all
+  # 36 TX units and schedule all 36 UEs for this fixed-seed configuration.
+  service_beam_top_k1: 56
+  oracle_service_beam_top_k: 56
+  conflict_top_k2: 3
+  conflict_sinr_threshold_db: 0.0
+
+scheduler:
+  domain_mode: global
+  objective: sum_rate
+  # Global aggregate capacity is 9 TRPs * 4 TXRUs = 36.
+  max_mu_order: 36
+  # Current automatic RF cap is per sector/TRP (4); the global aggregate is
+  # enforced by max_mu_order plus the per-TX-unit panel constraint below.
+  cap_mu_order_by_rf: false
+  algorithm: greedy
+  use_panel_constraint: true
+  exhaustive_pruning:
+    enabled: true
+    sort_by_upper_bound: true
+    zero_upper_bound: true
+    branch_and_bound: true
+  conflict_penalty_lambda: 0.35
+  conflict_penalty_mode: fixed
+  adaptive_lambda_alpha: 0.2
+  unknown_interference_policy: zero
+  pf_tbar_init_mbps: 1.0
+
+analysis:
+  baseline_no_interference_upper_bound: true
+
+coverage_heatmap:
+  enabled: false
+
+progress:
+  enabled: true
+
+sionna:
+  enable_import_probe: false
+  fallback_to_numpy_if_unavailable: true

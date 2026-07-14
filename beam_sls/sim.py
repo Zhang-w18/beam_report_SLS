@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import copy
 import json
+from itertools import combinations
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -16,9 +18,12 @@ from .link_adaptation import make_link_adapter
 from .measurement import compute_gamma_measurement
 from .rf import resolve_rf_architecture, resolved_max_mu_order, tx_units_per_sector
 from .plotting import plot_bar, plot_best_beam_heatmap, plot_cdf, plot_heatmap, plot_topology
-from .scheduler import is_sector_domain_mode, is_site_domain_mode, normalize_domain_mode, schedule
+from .scheduler import ScheduleResult, is_sector_domain_mode, is_site_domain_mode, normalize_domain_mode, schedule
 from .topology import make_topology, topology_to_rows
 from .utils import dbm_to_watt, ensure_dir, percentile, thermal_noise_watt, watt_to_dbm, write_csv, write_json
+
+
+BASELINE_NO_INTERFERENCE_SCHEME = "baseline_no_interference_upper_bound"
 
 
 def _asdict_rows(rows: List[Any]) -> List[Dict[str, Any]]:
@@ -153,6 +158,107 @@ def _max_beams_from_cfg(array_section: Dict[str, Any], array_cfg: ArrayConfig) -
     return int(val)
 
 
+def build_ue_goodput_rows(link_rows: List[Dict[str, Any]],
+                          schemes: List[str],
+                          ue_rows: List[Dict[str, Any]],
+                          num_tti: int) -> List[Dict[str, Any]]:
+    """Average every (drop, UE) over all TTIs, including unscheduled zeros."""
+    sums: Dict[Tuple[str, int, int], float] = {}
+    for r in link_rows:
+        key = (str(r["scheme"]), int(r["drop"]), int(r["ue_id"]))
+        sums[key] = sums.get(key, 0.0) + float(r["goodput_mbps"])
+    ue_keys = sorted({(int(r["drop"]), int(r["ue_id"])) for r in ue_rows})
+    divisor = max(1, int(num_tti))
+    return [
+        {
+            "scheme": scheme,
+            "drop": drop,
+            "ue_id": ue_id,
+            "avg_goodput_mbps": float(sums.get((scheme, drop, ue_id), 0.0) / divisor),
+            "scheduled": int((scheme, drop, ue_id) in sums),
+        }
+        for scheme in schemes
+        for drop, ue_id in ue_keys
+    ]
+
+
+def schedule_similarity_rows(pair_sets: Dict[Tuple[int, str], set],
+                             schemes: List[str]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    per_drop: List[Dict[str, Any]] = []
+    drops = sorted({drop for drop, _ in pair_sets})
+    for a, b in combinations(schemes, 2):
+        for drop in drops:
+            sa = pair_sets.get((drop, a), set())
+            sb = pair_sets.get((drop, b), set())
+            inter = len(sa & sb)
+            union = len(sa | sb)
+            max_size = max(len(sa), len(sb))
+            min_size = min(len(sa), len(sb))
+            per_drop.append({
+                "drop": int(drop),
+                "scheme_a": a,
+                "scheme_b": b,
+                "num_pairs_a": int(len(sa)),
+                "num_pairs_b": int(len(sb)),
+                "num_same_pairs": int(inter),
+                "num_union_pairs": int(union),
+                "jaccard_similarity": float(inter / union) if union else 1.0,
+                "same_pair_ratio_over_max_size": float(inter / max_size) if max_size else 1.0,
+                "overlap_coefficient": float(inter / min_size) if min_size else (1.0 if max_size == 0 else 0.0),
+                "exact_schedule_match": int(sa == sb),
+            })
+
+    aggregate: List[Dict[str, Any]] = []
+    for a, b in combinations(schemes, 2):
+        rows = [r for r in per_drop if r["scheme_a"] == a and r["scheme_b"] == b]
+        sum_inter = sum(int(r["num_same_pairs"]) for r in rows)
+        sum_union = sum(int(r["num_union_pairs"]) for r in rows)
+        aggregate.append({
+            "scheme_a": a,
+            "scheme_b": b,
+            "num_drops": int(len(rows)),
+            "mean_jaccard_similarity": float(np.mean([r["jaccard_similarity"] for r in rows])) if rows else 0.0,
+            "micro_jaccard_similarity": float(sum_inter / sum_union) if sum_union else 1.0,
+            "mean_same_pair_ratio_over_max_size": float(np.mean([r["same_pair_ratio_over_max_size"] for r in rows])) if rows else 0.0,
+            "exact_schedule_match_ratio": float(np.mean([r["exact_schedule_match"] for r in rows])) if rows else 0.0,
+            "total_same_pairs": int(sum_inter),
+            "total_union_pairs": int(sum_union),
+        })
+    return per_drop, aggregate
+
+
+def summarize_su_snr(samples: List[Dict[str, Any]], schemes: List[str]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    maxima: List[Dict[str, Any]] = []
+    by_ue: Dict[Tuple[int, str, int], List[float]] = {}
+    for r in samples:
+        by_ue.setdefault((int(r["drop"]), str(r["scheme"]), int(r["ue_id"])), []).append(float(r["su_snr_db"]))
+    for (drop, scheme, ue_id), vals in sorted(by_ue.items()):
+        maxima.append({
+            "drop": drop,
+            "scheme": scheme,
+            "ue_id": ue_id,
+            "max_su_snr_db": float(max(vals)),
+            "num_reported_candidates": int(len(vals)),
+        })
+
+    summary: List[Dict[str, Any]] = []
+    for scheme in schemes:
+        vals = [float(r["su_snr_db"]) for r in samples if r["scheme"] == scheme]
+        max_vals = [float(r["max_su_snr_db"]) for r in maxima if r["scheme"] == scheme]
+        summary.append({
+            "scheme": scheme,
+            "num_reported_candidate_samples": int(len(vals)),
+            "avg_reported_su_snr_db": float(np.mean(vals)) if vals else 0.0,
+            "p05_reported_su_snr_db": percentile(vals, 5.0),
+            "p50_reported_su_snr_db": percentile(vals, 50.0),
+            "num_ue_samples": int(len(max_vals)),
+            "avg_max_su_snr_per_ue_db": float(np.mean(max_vals)) if max_vals else 0.0,
+            "p05_max_su_snr_per_ue_db": percentile(max_vals, 5.0),
+            "p50_max_su_snr_per_ue_db": percentile(max_vals, 50.0),
+        })
+    return maxima, summary
+
+
 def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     out_dir = ensure_dir(out_dir)
     save_config(out_dir / "resolved_config.yaml", cfg)
@@ -221,12 +327,21 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     sector_rows_all: List[Dict[str, Any]] = []
     beam_rows: List[Dict[str, Any]] = [b.to_dict() for b in beam_ids]
     report_rows: List[Dict[str, Any]] = []
+    su_snr_sample_rows: List[Dict[str, Any]] = []
     scheduler_stat_rows: List[Dict[str, Any]] = []
     tbar_by_scheme: Dict[str, Dict[int, float]] = {}
     channel_backend_rows: List[Dict[str, Any]] = []
+    scheduled_pair_sets: Dict[Tuple[int, str], set] = {}
     domain_mode = normalize_domain_mode(cfg["scheduler"].get("domain_mode", "global"))
 
     schemes = list(cfg["feedback"].get("schemes", ["baseline"]))
+    upper_bound_enabled = bool(
+        cfg.get("analysis", {}).get("baseline_no_interference_upper_bound", True)
+        and "baseline" in schemes
+    )
+    analysis_schemes = list(schemes)
+    if upper_bound_enabled:
+        analysis_schemes.append(BASELINE_NO_INTERFERENCE_SCHEME)
     total_ues = int(cfg["ue_drop"]["num_ut_per_sector"]) * max(1, topo0.num_cells)
     for s in schemes:
         tbar_by_scheme[s] = {u: float(cfg["scheduler"].get("pf_tbar_init_mbps", 1.0))
@@ -281,6 +396,16 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             for r in reps:
                 report_rows.append({"drop": drop, "scheme": scheme, "ue_id": r.ue_id,
                                     "report_json": json.dumps(r.to_dict(beam_ids), ensure_ascii=False)})
+                for rank, cand in enumerate(r.candidates):
+                    su_snr_sample_rows.append({
+                        "drop": int(drop),
+                        "scheme": scheme,
+                        "ue_id": int(r.ue_id),
+                        "candidate_rank": int(rank),
+                        "beam_index": int(cand.beam_index),
+                        "beam_id": beam_ids[cand.beam_index].short(),
+                        "su_snr_db": float(cand.su_snr_db),
+                    })
 
         _progress(cfg, f"[drop {drop+1}/{num_drops}] scheduling {len(schemes)} feedback schemes")
         # Drops are independent UE/topology realizations. Keep OLLA state across
@@ -288,15 +413,37 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
         olla_state: Dict[Tuple[str, int], float] = {}
         for scheme in schemes:
             sched = schedule(reports_by_scheme[scheme], beam_ids, cfg, tbar_by_scheme.get(scheme), link_adapter=link_adapter)
+            scheduled_pair_sets[(drop, scheme)] = {
+                (int(link.ue_id), int(link.beam_index)) for link in sched.links
+            }
             schedule_rows.append({"drop": drop, "scheme": scheme,
                                   "objective_value": sched.objective_value,
                                   "num_scheduled": len(sched.links),
                                   "schedule_json": json.dumps(sched.to_dict(beam_ids), ensure_ascii=False)})
             scheduler_stat_rows.extend(_schedule_stat_rows(drop, scheme, sched))
+            rng_state_before_link_eval = copy.deepcopy(rng.bit_generator.state)
             link_rows, olla_state = run_tti_loop(sched, ch.h_freq, tx_beams, rx_beams, beam_ids, meas,
                                                  tx_power_w_per_panel, cfg, drop, rng, olla_state,
                                                  link_adapter=link_adapter)
             all_link_rows.extend(link_rows)
+            if scheme == "baseline" and upper_bound_enabled:
+                upper_sched = ScheduleResult(
+                    scheme=BASELINE_NO_INTERFERENCE_SCHEME,
+                    objective_value=float(sched.objective_value),
+                    links=list(sched.links),
+                    metadata={
+                        "source_scheme": "baseline",
+                        "interference_mode": "forced_zero",
+                    },
+                )
+                upper_rng = np.random.default_rng()
+                upper_rng.bit_generator.state = rng_state_before_link_eval
+                upper_rows, _ = run_tti_loop(
+                    upper_sched, ch.h_freq, tx_beams, rx_beams, beam_ids, meas,
+                    tx_power_w_per_panel, cfg, drop, upper_rng, {},
+                    link_adapter=link_adapter, ignore_interference=True,
+                )
+                all_link_rows.extend(upper_rows)
             if cfg["scheduler"].get("objective", "sum_rate") == "proportional_fair":
                 alpha = 0.05
                 for r in link_rows:
@@ -332,15 +479,37 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     write_csv(out_dir / "metrics" / "scheduler_stats.csv", scheduler_stat_rows)
     write_csv(out_dir / "metrics" / "channel_backend.csv", channel_backend_rows)
 
-    summary = summarize_results(link_dict_rows, schemes)
+    ue_goodput_rows = build_ue_goodput_rows(
+        link_dict_rows, analysis_schemes, ue_rows, num_tti,
+    )
+    write_csv(out_dir / "metrics" / "ue_goodput.csv", ue_goodput_rows)
+
+    similarity_by_drop, similarity_summary = schedule_similarity_rows(scheduled_pair_sets, schemes)
+    write_csv(out_dir / "metrics" / "schedule_similarity_by_drop.csv", similarity_by_drop)
+    write_csv(out_dir / "metrics" / "schedule_similarity.csv", similarity_summary)
+
+    su_snr_max_rows, su_snr_summary = summarize_su_snr(su_snr_sample_rows, schemes)
+    write_csv(out_dir / "metrics" / "su_snr_samples.csv", su_snr_sample_rows)
+    write_csv(out_dir / "metrics" / "su_snr_max_per_ue.csv", su_snr_max_rows)
+    write_csv(out_dir / "metrics" / "su_snr_summary.csv", su_snr_summary)
+
+    summary = summarize_results(link_dict_rows, analysis_schemes, ue_goodput_rows)
     summary["_backend"] = {
         "link_adaptation": link_adapter.status.__dict__,
         "channel_backends": channel_backend_rows,
     }
+    summary["_schedule_similarity"] = similarity_summary
+    summary["_su_snr"] = su_snr_summary
     write_json(out_dir / "metrics" / "summary.json", summary)
     write_csv(out_dir / "metrics" / "summary.csv", [{"scheme": k, **v} for k, v in summary.items() if isinstance(v, dict) and not k.startswith("_")])
 
-    make_plots(out_dir, link_dict_rows, summary, schemes)
+    make_plots(
+        out_dir, link_dict_rows, summary, analysis_schemes,
+        ue_goodput_rows=ue_goodput_rows,
+        su_snr_samples=su_snr_sample_rows,
+        su_snr_max_rows=su_snr_max_rows,
+        feedback_schemes=schemes,
+    )
 
     if cfg.get("coverage_heatmap", {}).get("enabled", True):
         _progress(cfg, "[coverage] generating coverage heatmap and fixed-vertical-beam CDF")
@@ -383,7 +552,9 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     return summary
 
 
-def summarize_results(link_rows: List[Dict[str, Any]], schemes: List[str]) -> Dict[str, Any]:
+def summarize_results(link_rows: List[Dict[str, Any]],
+                      schemes: List[str],
+                      ue_goodput_rows: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
     summary: Dict[str, Any] = {}
     for scheme in schemes:
         rows = [r for r in link_rows if r.get("scheme") == scheme]
@@ -398,13 +569,21 @@ def summarize_results(link_rows: List[Dict[str, Any]], schemes: List[str]) -> Di
             }
             continue
         sys_by_slot: Dict[Tuple[int, int], float] = {}
-        ue_vals: Dict[Tuple[int, int], List[float]] = {}
         for r in rows:
             key = (int(r["drop"]), int(r["tti"]))
             sys_by_slot[key] = sys_by_slot.get(key, 0.0) + float(r["goodput_mbps"])
-            ue_key = (int(r["drop"]), int(r["ue_id"]))
-            ue_vals.setdefault(ue_key, []).append(float(r["goodput_mbps"]))
-        ue_mean = [float(np.mean(v)) for v in ue_vals.values()]
+        if ue_goodput_rows is None:
+            ue_vals: Dict[Tuple[int, int], List[float]] = {}
+            for r in rows:
+                ue_key = (int(r["drop"]), int(r["ue_id"]))
+                ue_vals.setdefault(ue_key, []).append(float(r["goodput_mbps"]))
+            ue_mean = [float(np.mean(v)) for v in ue_vals.values()]
+        else:
+            ue_mean = [
+                float(r["avg_goodput_mbps"])
+                for r in ue_goodput_rows
+                if r.get("scheme") == scheme
+            ]
         summary[scheme] = {
             "avg_system_goodput_mbps": float(np.mean(list(sys_by_slot.values()))) if sys_by_slot else 0.0,
             "avg_ue_goodput_mbps": float(np.mean(ue_mean)) if ue_mean else 0.0,
@@ -420,17 +599,72 @@ def summarize_results(link_rows: List[Dict[str, Any]], schemes: List[str]) -> Di
             if isinstance(summary.get(scheme), dict):
                 summary[scheme]["oracle_ratio"] = float(summary[scheme].get("avg_system_goodput_mbps", 0.0)) / oracle
     if "baseline" in summary:
-        base = max(float(summary["baseline"].get("avg_system_goodput_mbps", 0.0)), 1e-12)
+        base = float(summary["baseline"].get("avg_system_goodput_mbps", 0.0))
+        base_p05 = float(summary["baseline"].get("p05_ue_goodput_mbps", 0.0))
         for scheme in schemes:
             if isinstance(summary.get(scheme), dict):
-                summary[scheme]["gain_over_baseline"] = (float(summary[scheme].get("avg_system_goodput_mbps", 0.0)) - base) / base
+                value = float(summary[scheme].get("avg_system_goodput_mbps", 0.0))
+                summary[scheme]["gain_over_baseline"] = (
+                    (value - base) / base if base > 0.0 else (0.0 if scheme == "baseline" else None)
+                )
+                p05 = float(summary[scheme].get("p05_ue_goodput_mbps", 0.0))
+                summary[scheme]["p05_gain_over_baseline_mbps"] = p05 - base_p05
+                summary[scheme]["p05_gain_over_baseline"] = (
+                    (p05 - base_p05) / base_p05 if base_p05 > 0.0 else (0.0 if scheme == "baseline" else None)
+                )
+    if BASELINE_NO_INTERFERENCE_SCHEME in summary and "baseline" in summary:
+        upper = max(float(summary[BASELINE_NO_INTERFERENCE_SCHEME].get("avg_system_goodput_mbps", 0.0)), 1e-12)
+        for scheme in schemes:
+            if isinstance(summary.get(scheme), dict):
+                summary[scheme]["ratio_to_baseline_no_interference_upper_bound"] = (
+                    float(summary[scheme].get("avg_system_goodput_mbps", 0.0)) / upper
+                )
     return summary
 
 
-def make_plots(out_dir: Path, link_rows: List[Dict[str, Any]], summary: Dict[str, Any], schemes: List[str]) -> None:
+def make_plots(out_dir: Path,
+               link_rows: List[Dict[str, Any]],
+               summary: Dict[str, Any],
+               schemes: List[str],
+               ue_goodput_rows: List[Dict[str, Any]] | None = None,
+               su_snr_samples: List[Dict[str, Any]] | None = None,
+               su_snr_max_rows: List[Dict[str, Any]] | None = None,
+               feedback_schemes: List[str] | None = None) -> None:
     sinr_by_scheme = {s: [float(r["effective_sinr_db"]) for r in link_rows if r.get("scheme") == s] for s in schemes}
     goodput_by_scheme = {s: [float(r["goodput_mbps"]) for r in link_rows if r.get("scheme") == s] for s in schemes}
     plot_cdf(sinr_by_scheme, "Effective SINR [dB]", "Post-SINR CDF", out_dir / "figures" / "effective_sinr_cdf.png")
     plot_cdf(goodput_by_scheme, "TTI link goodput [Mbps]", "Link goodput CDF", out_dir / "figures" / "link_goodput_cdf.png")
+    if ue_goodput_rows is not None:
+        ue_goodput_by_scheme = {
+            s: [float(r["avg_goodput_mbps"]) for r in ue_goodput_rows if r.get("scheme") == s]
+            for s in schemes
+        }
+        plot_cdf(
+            ue_goodput_by_scheme,
+            "Per-UE average goodput [Mbps]",
+            "Per-UE goodput CDF (unscheduled UEs included as zero)",
+            out_dir / "figures" / "ue_goodput_cdf.png",
+        )
+    report_schemes = feedback_schemes or schemes
+    if su_snr_samples is not None:
+        plot_cdf(
+            {
+                s: [float(r["su_snr_db"]) for r in su_snr_samples if r.get("scheme") == s]
+                for s in report_schemes
+            },
+            "Reported standalone SNR [dB]",
+            "Reported SU SNR CDF (every candidate counted)",
+            out_dir / "figures" / "reported_su_snr_cdf.png",
+        )
+    if su_snr_max_rows is not None:
+        plot_cdf(
+            {
+                s: [float(r["max_su_snr_db"]) for r in su_snr_max_rows if r.get("scheme") == s]
+                for s in report_schemes
+            },
+            "Maximum reported standalone SNR per UE [dB]",
+            "Per-UE maximum SU SNR CDF",
+            out_dir / "figures" / "reported_max_su_snr_per_ue_cdf.png",
+        )
     bar = {s: float(summary[s]["avg_system_goodput_mbps"]) for s in schemes if s in summary}
     plot_bar(bar, "Average system goodput [Mbps]", "Average system goodput", out_dir / "figures" / "avg_system_goodput.png")

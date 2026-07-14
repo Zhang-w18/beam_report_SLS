@@ -120,6 +120,16 @@ def _schedule_single_domain(reports: List[UEReport],
     if alg == "greedy":
         return greedy_schedule(reports, beam_ids, cfg, tbar_mbps, link_adapter,
                                domain_id=domain_id, domain_mode=domain_mode)
+    if alg == "adaptive_lambda_greedy":
+        return greedy_schedule(reports, beam_ids, cfg, tbar_mbps, link_adapter,
+                               domain_id=domain_id, domain_mode=domain_mode,
+                               force_adaptive_lambda=True,
+                               algorithm_name="adaptive_lambda_greedy")
+    if alg == "hard_conflict_greedy":
+        return hard_conflict_greedy_schedule(
+            reports, beam_ids, cfg, tbar_mbps, link_adapter,
+            domain_id=domain_id, domain_mode=domain_mode,
+        )
     raise ValueError(f"Unknown scheduler.algorithm={alg}")
 
 
@@ -227,14 +237,16 @@ def _evaluate_assignments(assignments: Sequence[Tuple[int, int]],
                           beam_ids: Sequence[BeamId],
                           cfg: Dict,
                           tbar_mbps: Dict[int, float] | None,
-                          link_adapter=None) -> Tuple[float, List[ScheduledLink]]:
+                          link_adapter=None,
+                          penalty_lambda: float | None = None) -> Tuple[float, List[ScheduledLink]]:
     if not assignments:
         return 0.0, []
 
     rep_by_ue = {r.ue_id: r for r in reports}
     scheme = reports[0].scheme if reports else "unknown"
     rate_kwargs = _rate_kwargs(cfg)
-    penalty_lambda = float(cfg["scheduler"].get("conflict_penalty_lambda", 0.0))
+    if penalty_lambda is None:
+        penalty_lambda = float(cfg["scheduler"].get("conflict_penalty_lambda", 0.0))
 
     links: List[ScheduledLink] = []
     utility = 0.0
@@ -285,18 +297,54 @@ def _evaluate_assignments(assignments: Sequence[Tuple[int, int]],
     return float(utility), links
 
 
+def _candidate_rate_mbps(rep: UEReport,
+                         beam_index: int,
+                         cfg: Dict,
+                         link_adapter=None) -> float:
+    cand = rep.candidate_by_beam(beam_index)
+    if cand is None:
+        return 0.0
+    if link_adapter is not None:
+        return float(link_adapter.rate_mbps(int(cand.su_mcs)))
+    return float(rate_mbps_from_mcs(int(cand.su_mcs), **_rate_kwargs(cfg)))
+
+
+def _resolve_conflict_penalty(reports: Sequence[UEReport],
+                              cfg: Dict,
+                              link_adapter=None,
+                              force_adaptive: bool = False) -> Dict:
+    scheduler_cfg = cfg["scheduler"]
+    mode = str(scheduler_cfg.get("conflict_penalty_mode", "fixed")).lower()
+    if force_adaptive:
+        mode = "adaptive"
+    rates = [
+        _candidate_rate_mbps(r, c.beam_index, cfg, link_adapter)
+        for r in reports
+        for c in r.candidates
+    ]
+    median_rate = float(np.median(np.asarray(rates, dtype=float))) if rates else 0.0
+    alpha = float(scheduler_cfg.get("adaptive_lambda_alpha", 0.2))
+    if mode == "adaptive":
+        value = alpha * median_rate
+    elif mode == "fixed":
+        value = float(scheduler_cfg.get("conflict_penalty_lambda", 0.0))
+    else:
+        raise ValueError(f"Unknown scheduler.conflict_penalty_mode={mode}")
+    return {
+        "conflict_penalty_mode": mode,
+        "conflict_penalty_lambda_mbps": float(value),
+        "adaptive_lambda_alpha": float(alpha),
+        "candidate_su_rate_median_mbps": float(median_rate),
+        "candidate_count_for_lambda": int(len(rates)),
+    }
+
+
 def _candidate_upper_bound(rep: UEReport,
                            beam_index: int,
                            cfg: Dict,
                            tbar_mbps: Dict[int, float] | None,
                            link_adapter=None) -> float:
-    cand = rep.candidate_by_beam(beam_index)
-    if cand is None:
-        return 0.0
-    if link_adapter is not None:
-        r_mbps = float(link_adapter.rate_mbps(int(cand.su_mcs)))
-    else:
-        r_mbps = rate_mbps_from_mcs(int(cand.su_mcs), **_rate_kwargs(cfg))
+    r_mbps = _candidate_rate_mbps(rep, beam_index, cfg, link_adapter)
     return float(_pf_weight(rep.ue_id, cfg, tbar_mbps) * r_mbps)
 
 
@@ -370,6 +418,8 @@ def exhaustive_schedule(reports: List[UEReport],
     zero_prune = bool(pruning_cfg.get("zero_upper_bound", True))
     branch_and_bound = bool(pruning_cfg.get("branch_and_bound", pruning_cfg.get("enabled", True)))
     use_panel_constraint = bool(cfg["scheduler"].get("use_panel_constraint", True))
+    penalty_info = _resolve_conflict_penalty(reports, cfg, link_adapter)
+    penalty_lambda = float(penalty_info["conflict_penalty_lambda_mbps"])
 
     raw_assignment_count = _count_candidate_assignments(reports, max_q)
     if sort_by_bound:
@@ -411,6 +461,7 @@ def exhaustive_schedule(reports: List[UEReport],
         "branch_and_bound_enabled": branch_and_bound,
         "panel_constraint_enabled": use_panel_constraint,
         "candidate_ordering": "standalone_rate_desc" if sort_by_bound else "config_order",
+        **penalty_info,
     }
 
     def remaining_upper_bound(start_index: int, slots: int) -> float:
@@ -446,7 +497,10 @@ def exhaustive_schedule(reports: List[UEReport],
                     stats["panel_pruned_count"] += 1
                     continue
                 trial = assignments + [(r.ue_id, c.beam_index)]
-                val, links = _evaluate_assignments(trial, reports, beam_ids, cfg, tbar_mbps, link_adapter)
+                val, links = _evaluate_assignments(
+                    trial, reports, beam_ids, cfg, tbar_mbps, link_adapter,
+                    penalty_lambda=penalty_lambda,
+                )
                 stats["evaluated_assignment_count"] += 1
                 if not np.isfinite(val):
                     continue
@@ -470,7 +524,9 @@ def greedy_schedule(reports: List[UEReport],
                     tbar_mbps: Dict[int, float] | None = None,
                     link_adapter=None,
                     domain_id: int | None = None,
-                    domain_mode: str = "global") -> ScheduleResult:
+                    domain_mode: str = "global",
+                    force_adaptive_lambda: bool = False,
+                    algorithm_name: str = "greedy") -> ScheduleResult:
     max_q = _effective_max_mu_order(cfg)
     num_reports_input = len(reports)
     reports = [r for r in reports if r.candidates]
@@ -478,14 +534,19 @@ def greedy_schedule(reports: List[UEReport],
     current: List[Tuple[int, int]] = []
     current_val = 0.0
     used_ues = set()
+    penalty_info = _resolve_conflict_penalty(
+        reports, cfg, link_adapter, force_adaptive=force_adaptive_lambda,
+    )
+    penalty_lambda = float(penalty_info["conflict_penalty_lambda_mbps"])
     stats = {
-        "algorithm": "greedy",
+        "algorithm": algorithm_name,
         "domain_id": None if domain_id is None else int(domain_id),
         "num_reports_input": int(num_reports_input),
         "num_reports_with_candidates": int(len(reports)),
         "max_mu_order": int(max_q),
         "evaluated_assignment_count": 0,
         "panel_pruned_count": 0,
+        **penalty_info,
     }
 
     while len(current) < max_q:
@@ -500,7 +561,10 @@ def greedy_schedule(reports: List[UEReport],
                 if not _panel_constraint_ok(trial, reports, beam_ids, cfg):
                     stats["panel_pruned_count"] += 1
                     continue
-                val, _ = _evaluate_assignments(trial, reports, beam_ids, cfg, tbar_mbps, link_adapter)
+                val, _ = _evaluate_assignments(
+                    trial, reports, beam_ids, cfg, tbar_mbps, link_adapter,
+                    penalty_lambda=penalty_lambda,
+                )
                 stats["evaluated_assignment_count"] += 1
                 delta = val - current_val
                 if delta > best_delta:
@@ -512,10 +576,103 @@ def greedy_schedule(reports: List[UEReport],
         current.append(best_assignment)
         used_ues.add(best_assignment[0])
         current_val = best_val
-    final_val, final_links = _evaluate_assignments(current, reports, beam_ids, cfg, tbar_mbps, link_adapter)
+    final_val, final_links = _evaluate_assignments(
+        current, reports, beam_ids, cfg, tbar_mbps, link_adapter,
+        penalty_lambda=penalty_lambda,
+    )
     stats["best_objective_value"] = float(final_val)
     stats["num_scheduled"] = int(len(final_links))
     metadata = {"domain_mode": domain_mode,
                 "domain_id": None if domain_id is None else int(domain_id),
                 "stats": stats}
     return ScheduleResult(scheme=scheme, objective_value=final_val, links=final_links, metadata=metadata)
+
+
+def hard_conflict_greedy_schedule(reports: List[UEReport],
+                                  beam_ids: Sequence[BeamId],
+                                  cfg: Dict,
+                                  tbar_mbps: Dict[int, float] | None = None,
+                                  link_adapter=None,
+                                  domain_id: int | None = None,
+                                  domain_mode: str = "global") -> ScheduleResult:
+    """Greedy maximum-weight independent set over reported (UE, beam) nodes.
+
+    Selecting one node removes the selected UE's other nodes and only the
+    conflicting candidate nodes of other UEs. It never removes an entire UE
+    merely because one of that UE's candidate beams conflicts.
+    """
+    max_q = _effective_max_mu_order(cfg)
+    num_reports_input = len(reports)
+    reports = [r for r in reports if r.candidates]
+    scheme = reports[0].scheme if reports else "unknown"
+    rep_by_ue = {r.ue_id: r for r in reports}
+    pool: Dict[Tuple[int, int], float] = {
+        (r.ue_id, c.beam_index): _candidate_rate_mbps(r, c.beam_index, cfg, link_adapter)
+        for r in reports
+        for c in r.candidates
+    }
+    initial_pool_size = len(pool)
+    selected: List[Tuple[int, int]] = []
+    removed_same_ue = 0
+    removed_conflict = 0
+    removed_panel = 0
+    use_panel_constraint = bool(cfg["scheduler"].get("use_panel_constraint", True))
+
+    def conflicts(a: Tuple[int, int], b: Tuple[int, int]) -> bool:
+        ua, ba = a
+        ub, bb = b
+        ca = rep_by_ue[ua].candidate_by_beam(ba)
+        cb = rep_by_ue[ub].candidate_by_beam(bb)
+        return bool(
+            (ca is not None and bb in ca.conflict_beams)
+            or (cb is not None and ba in cb.conflict_beams)
+        )
+
+    while pool and len(selected) < max_q:
+        # The tuple suffix gives deterministic tie-breaking across runs.
+        chosen = min(pool, key=lambda node: (-pool[node], node[0], node[1]))
+        selected.append(chosen)
+        chosen_ue, chosen_beam = chosen
+        chosen_panel = beam_ids[chosen_beam].panel_key()
+        del pool[chosen]
+
+        for node in list(pool):
+            if node[0] == chosen_ue:
+                del pool[node]
+                removed_same_ue += 1
+            elif conflicts(chosen, node):
+                del pool[node]
+                removed_conflict += 1
+            elif use_panel_constraint and beam_ids[node[1]].panel_key() == chosen_panel:
+                del pool[node]
+                removed_panel += 1
+
+    final_val, final_links = _evaluate_assignments(
+        selected, reports, beam_ids, cfg, tbar_mbps, link_adapter, penalty_lambda=0.0,
+    )
+    stats = {
+        "algorithm": "hard_conflict_greedy",
+        "domain_id": None if domain_id is None else int(domain_id),
+        "num_reports_input": int(num_reports_input),
+        "num_reports_with_candidates": int(len(reports)),
+        "max_mu_order": int(max_q),
+        "initial_candidate_pool_size": int(initial_pool_size),
+        "removed_same_ue_candidates": int(removed_same_ue),
+        "removed_conflicting_candidates": int(removed_conflict),
+        "removed_panel_candidates": int(removed_panel),
+        "panel_constraint_enabled": use_panel_constraint,
+        "node_weight": "su_rate_mbps",
+        "best_objective_value": float(final_val),
+        "num_scheduled": int(len(final_links)),
+    }
+    metadata = {
+        "domain_mode": domain_mode,
+        "domain_id": None if domain_id is None else int(domain_id),
+        "stats": stats,
+    }
+    return ScheduleResult(
+        scheme=scheme,
+        objective_value=float(final_val),
+        links=final_links,
+        metadata=metadata,
+    )

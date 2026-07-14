@@ -111,6 +111,16 @@ link_abstraction:
   --skip-heatmap
 ```
 
+三站点、每站点 3 TRP、全网联合调度且最多 36 用户并发：
+
+```bash
+/home/zhangwei/anaconda3/envs/tf_sionna_rt/bin/python -m beam_sls.run \
+  --config configs/v2_three_site_global_36ue.yaml \
+  --out runs/v2_4_three_site_global_36ue
+```
+
+该配置的统计口径、候选数选择和 36 并发验证过程见 `修改说明v2.4.md`。
+
 七站点六边形站群：
 
 ```bash
@@ -401,7 +411,7 @@ fixed_vertical_beam_selection.json
 
 ## 6. 调度器
 
-默认调度器为 greedy：
+调度器支持普通 greedy、硬冲突 greedy、自适应 lambda greedy 和小规模 exhaustive：
 
 ```yaml
 scheduler:
@@ -417,6 +427,25 @@ scheduler:
     branch_and_bound: true
 ```
 
+硬冲突 greedy：
+
+```yaml
+scheduler:
+  algorithm: hard_conflict_greedy
+```
+
+它把每个 `(UE, beam)` 当作一个节点，按 SU rate 从高到低选择。选中节点后，只删除该 UE 的其他候选节点、与该节点存在任一方向冲突的候选节点，以及违反 TX unit 约束的候选节点。某个 UE 的一个 beam 冲突不会导致该 UE 的其他 beam 被删除。
+
+自适应 lambda：
+
+```yaml
+scheduler:
+  algorithm: adaptive_lambda_greedy
+  adaptive_lambda_alpha: 0.2
+```
+
+每个调度域内使用 `lambda = alpha * median(candidate SU rate [Mbps])`。也可以保留 `algorithm: greedy`，同时设置 `conflict_penalty_mode: adaptive`。实际使用的 lambda、中位 SU rate 和候选样本数会写入 `metrics/scheduler_stats.csv`。
+
 ### 6.1 调度域
 
 `scheduler.domain_mode` 支持：
@@ -430,7 +459,7 @@ scheduler:
 
 - 每个 UE 只在自己 `site_id` 对应站点的 3 个扇区内选择候选服务 beam；
 - `topk_conflict_id` 和 `threshold_conflict_set` 的冲突 beam 也只来自该站点域；
-- 调度器按 `site_id` 分组，每个站点独立运行一次 `greedy` 或 `exhaustive`；
+- 调度器按 `site_id` 分组，每个站点独立运行一次所配置的调度算法；
 - 各站点的调度结果会合并成一个全网 schedule；
 - 链路层实际传输时仍使用合并后的全网同时发射结果计算真实 effective SINR、BLER 和 ACK，因此其他站点的已调度 beam 会作为实际干扰出现。
 
@@ -444,7 +473,7 @@ scheduler:
 `single_site_three_sector_independent` 是旧配置名，现在语义明确为 `per_sector_independent`：
 
 - 每个 UE 只在自己的 `serving_cell`/sector 内选择候选服务 beam；
-- 调度器按 sector/cell 分组，每个 sector 独立运行一次 `greedy` 或 `exhaustive`；
+- 调度器按 sector/cell 分组，每个 sector 独立运行一次所配置的调度算法；
 - 同一站点的三个扇区不会放在同一个调度问题里联合优化；
 - 各 sector 的调度结果仍会合并到同一 TTI，链路层计算真实干扰时会看到其他 sector/site 已调度 beam。
 
@@ -607,12 +636,25 @@ metrics/summary.csv
 metrics/link_tti.csv
 metrics/schedules.csv
 metrics/scheduler_stats.csv
+metrics/ue_goodput.csv
+metrics/schedule_similarity.csv
+metrics/schedule_similarity_by_drop.csv
+metrics/su_snr_samples.csv
+metrics/su_snr_max_per_ue.csv
+metrics/su_snr_summary.csv
 metrics/beams.csv
 metrics/reports.csv
 metrics/ues.csv
 metrics/sites.csv
 metrics/sectors.csv
+figures/ue_goodput_cdf.png
+figures/reported_su_snr_cdf.png
+figures/reported_max_su_snr_per_ue_cdf.png
 ```
+
+`baseline_no_interference_upper_bound` 是 baseline 原调度集合在“波束间干扰强制为零”条件下重新运行链路层得到的诊断上界，并出现在 `link_tti.csv`、`summary.csv` 和吞吐 CDF 中。`ue_goodput.csv` 对每个 `(drop, UE)` 跨全部 TTI 求平均，未调度 UE 按零吞吐计入，因此其 5% 边缘吞吐和 CDF 不会产生幸存者偏差。
+
+调度相似度使用完全相同的 `(UE, beam_index)` 二元组。主指标为 Jaccard 相似度，同时输出按较大调度集合归一化的相同比例、overlap coefficient 和完全一致比例。
 
 `rf_architecture_summary.json` 会记录最终解析出的：
 
