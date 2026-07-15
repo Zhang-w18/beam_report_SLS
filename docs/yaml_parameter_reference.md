@@ -333,6 +333,7 @@ $$
 | `eesm_beta_db` | EESM beta | 正数，dB | 默认 5 dB。 |
 | `olla_enabled` | 是否启用 OLLA | `true`/`false` | 默认 `true`。 |
 | `olla_step_db` | OLLA 步长 | 正数，dB | 默认 0.1 dB。 |
+| `olla_warmup_tti` | 每个 drop 的 OLLA 预热 TTI 数 | 非负整数 | 默认 `0`。预热期间正常抽样 ACK、更新 MCS/OLLA，但不写入 `link_tti.csv`，也不进入吞吐、BLER、CDF 等统计；`system.num_tti_per_drop` 始终只表示正式统计 TTI 数。 |
 | `harq_enabled` | HARQ 预留开关 | `true`/`false` | 当前为预留/记录字段。 |
 | `bler_curve_slope` | fallback logistic BLER 斜率 | 正数 | 仅 fallback 使用。 |
 | `fallback_snr_min_db` | fallback table 最小 SNR | dB | 仅 fallback 使用。 |
@@ -349,6 +350,7 @@ link_abstraction:
   mode: sionna_sys_precomputed_bler
   mcs_table_index: 1
   mcs_category: 1
+  olla_warmup_tti: 100
 ```
 
 ---

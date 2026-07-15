@@ -1,0 +1,59 @@
+# Example configuration for scripts/plot_cdf.py.
+# metric options: link_goodput, ue_goodput, effective_sinr, tbler,
+#                 olla_offset, reported_su_snr, reported_max_su_snr
+metric: ue_goodput
+# null uses <RUN_DIR>/figures/custom_<metric>_cdf.png. Set explicit paths when
+# PDF/SVG output or an ECDF sidecar CSV is wanted.
+output: null
+export_data: null
+
+figsize: [8.0, 5.2]
+dpi: 220
+font_size: 13
+title_font_size: 14
+label_font_size: 13
+tick_font_size: 12
+legend_font_size: 11
+
+title: Per-UE goodput comparison
+xlabel: Per-UE average goodput [Mbps]
+ylabel: CDF
+xlim: null
+ylim: [0.0, 1.0]
+grid: true
+grid_alpha: 0.25
+legend: true
+legend_loc: lower right
+legend_ncol: 1
+legend_frame: true
+
+# The order below is also the legend/drawing order. Delete entries to omit
+# curves. baseline_no_interference_upper_bound is the baseline schedule
+# re-evaluated with all inter-beam interference forced to zero.
+curves:
+  - scheme: full_gamma
+    label: Full Gamma (oracle)
+    color: "#1f77b4"
+    linestyle: "-"
+    linewidth: 2.4
+  - scheme: baseline
+    label: Baseline
+    color: "#d62728"
+    linestyle: "--"
+    linewidth: 2.2
+  - scheme: baseline_no_interference_upper_bound
+    label: Baseline SU (no interference)
+    color: "#2ca02c"
+    linestyle: "-."
+    linewidth: 2.2
+  - scheme: topk_conflict_id
+    label: Top-K conflict ID
+    color: "#9467bd"
+    linestyle: ":"
+    linewidth: 2.2
+  - scheme: threshold_conflict_set
+    label: Threshold conflict set
+    color: "#ff7f0e"
+    linestyle: "-"
+    linewidth: 1.8
+    alpha: 0.9

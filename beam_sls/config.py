@@ -197,6 +197,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "eesm_beta_db": 5.0,
         "olla_enabled": True,
         "olla_step_db": 0.1,
+        # Extra TTIs run before each drop's measured interval. ACK/OLLA state
+        # evolves during warmup, but warmup rows are excluded from all metrics.
+        "olla_warmup_tti": 0,
         "harq_enabled": True,
         "bler_curve_slope": 1.1,
         "fallback_snr_min_db": -8.0,

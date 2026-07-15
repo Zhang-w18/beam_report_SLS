@@ -355,7 +355,8 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
 
     num_drops = int(cfg["system"].get("num_drops", 1))
     num_tti = int(cfg["system"].get("num_tti_per_drop", 1))
-    _progress(cfg, f"[run] drops={num_drops}, tti/drop={num_tti}, schemes={','.join(schemes)}, beams={len(beam_ids)}, tx_units/sector={_panels_per_cell(cfg, tx_cfg, rf_arch)}")
+    olla_warmup_tti = int(cfg["link_abstraction"].get("olla_warmup_tti", 0))
+    _progress(cfg, f"[run] drops={num_drops}, warmup_tti/drop={olla_warmup_tti}, measured_tti/drop={num_tti}, schemes={','.join(schemes)}, beams={len(beam_ids)}, tx_units/sector={_panels_per_cell(cfg, tx_cfg, rf_arch)}")
     for drop in range(num_drops):
         _progress(cfg, f"[drop {drop+1}/{num_drops}] topology + channel generation")
         rng = np.random.default_rng(int(rng_master.integers(0, 2**31 - 1)))
@@ -457,6 +458,8 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             "num_cells": topo.num_cells,
             "num_sites": len(topo.sites),
             "num_beams": len(beam_ids),
+            "olla_warmup_tti": olla_warmup_tti,
+            "num_measured_tti": num_tti,
             "scheduler_domain_mode": domain_mode,
             "noise_dbm": float(watt_to_dbm(noise_w)),
             "tx_power_per_tx_unit_dbm": float(watt_to_dbm(tx_power_w_per_panel)),

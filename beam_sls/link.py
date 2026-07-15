@@ -97,6 +97,9 @@ def run_tti_loop(schedule: ScheduleResult,
                  link_adapter=None,
                  ignore_interference: bool = False) -> Tuple[List[LinkEvalRow], Dict[Tuple[str, int], float]]:
     num_tti = int(cfg["system"].get("num_tti_per_drop", 1))
+    warmup_tti = int(cfg["link_abstraction"].get("olla_warmup_tti", 0))
+    if warmup_tti < 0:
+        raise ValueError("link_abstraction.olla_warmup_tti must be >= 0")
     slot_ms = float(cfg["pdsch"].get("slot_duration_ms", 0.125))
     beta_db = float(cfg["link_abstraction"].get("eesm_beta_db", 5.0))
     slope = float(cfg["link_abstraction"].get("bler_curve_slope", 1.1))
@@ -111,7 +114,10 @@ def run_tti_loop(schedule: ScheduleResult,
         tx_power_w_per_panel, ignore_interference=ignore_interference,
     )
 
-    for tti in range(num_tti):
+    # Negative loop indices are warmup TTIs. They consume ACK randomness and
+    # update OLLA exactly like measured TTIs, but are not written to link_tti.csv.
+    # Measured rows retain the backward-compatible tti range [0, num_tti).
+    for tti in range(-warmup_tti, num_tti):
         for link in schedule.links:
             key = (schedule.scheme, link.ue_id)
             off = float(olla.get(key, 0.0))
@@ -148,23 +154,24 @@ def run_tti_loop(schedule: ScheduleResult,
             else:
                 goodput_bits = 0
             goodput_mbps = goodput_bits / (slot_ms * 1e-3) / 1e6
-            rows.append(LinkEvalRow(
-                scheme=schedule.scheme,
-                drop=drop_idx,
-                tti=tti,
-                ue_id=link.ue_id,
-                beam_index=link.beam_index,
-                beam_id=beam_ids[link.beam_index].short(),
-                predicted_mcs=int(link.predicted_mcs),
-                actual_mcs=int(actual_mcs),
-                effective_sinr_db=eff_db,
-                tbler=float(tbler),
-                ack=ack,
-                goodput_bits=int(goodput_bits),
-                goodput_mbps=float(goodput_mbps),
-                olla_offset_db=off,
-                mcs_selection_sinr_db=mcs_selection_sinr_db,
-            ))
+            if tti >= 0:
+                rows.append(LinkEvalRow(
+                    scheme=schedule.scheme,
+                    drop=drop_idx,
+                    tti=tti,
+                    ue_id=link.ue_id,
+                    beam_index=link.beam_index,
+                    beam_id=beam_ids[link.beam_index].short(),
+                    predicted_mcs=int(link.predicted_mcs),
+                    actual_mcs=int(actual_mcs),
+                    effective_sinr_db=eff_db,
+                    tbler=float(tbler),
+                    ack=ack,
+                    goodput_bits=int(goodput_bits),
+                    goodput_mbps=float(goodput_mbps),
+                    olla_offset_db=off,
+                    mcs_selection_sinr_db=mcs_selection_sinr_db,
+                ))
             if olla_enabled:
                 # off is a backoff subtracted from predicted_sinr_db.
                 if ack:

@@ -178,6 +178,8 @@ link_abstraction:
   eesm_beta_db: 5.0
   olla_enabled: true
   olla_step_db: 0.1
+  # Extra OLLA-only TTIs before the 50 measured TTIs; warmup is not counted.
+  olla_warmup_tti: 0
   harq_enabled: true
   # Fallback table parameters, used only if Sionna SYS is unavailable and fallback is enabled.
   bler_curve_slope: 1.1

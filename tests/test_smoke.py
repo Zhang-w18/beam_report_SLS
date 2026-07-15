@@ -83,6 +83,57 @@ def test_transmitted_mcs_uses_predicted_sinr_not_realized_sinr():
     assert rows[0].actual_mcs == 0
 
 
+def test_olla_warmup_updates_state_but_is_excluded_from_metrics():
+    class AlwaysNackAdapter:
+        @staticmethod
+        def select_mcs_from_sinr_db(_sinr_db):
+            return 0
+
+        @staticmethod
+        def tbler_from_sinr_db(_sinr_db, _mcs):
+            return 1.0
+
+        @staticmethod
+        def tbs_bits(_mcs):
+            return 1
+
+    cfg = load_config(None)
+    cfg["system"]["num_tti_per_drop"] = 2
+    cfg["system"]["target_bler"] = 0.1
+    cfg["link_abstraction"]["olla_enabled"] = True
+    cfg["link_abstraction"]["olla_step_db"] = 0.1
+    cfg["link_abstraction"]["olla_warmup_tti"] = 2
+
+    schedule = ScheduleResult(
+        scheme="unit",
+        objective_value=0.0,
+        links=[ScheduledLink(0, 0, 10.0, 0, 0.0)],
+    )
+    h_freq = np.ones((1, 1, 1, 1, 1), dtype=np.complex128)
+    tx_beams = np.ones((1, 1), dtype=np.complex128)
+    rx_beams = np.ones((1, 1), dtype=np.complex128)
+    beam_ids = [BeamId(cell=0, trp=0, panel=0, beam=0, global_index=0, tx_unit=0)]
+    meas = MeasurementResult(
+        service_power_w=np.ones((1, 1)),
+        interference_power_w=np.zeros((1, 1, 1)),
+        gamma=np.ones((1, 1, 1)),
+        noise_power_w=1.0,
+        selected_rx_beam=np.zeros((1, 1), dtype=int),
+        su_mcs=np.zeros((1, 1), dtype=int),
+        su_snr_db=np.zeros((1, 1)),
+    )
+
+    rows, olla = run_tti_loop(
+        schedule, h_freq, tx_beams, rx_beams, beam_ids, meas,
+        tx_power_w_per_panel=1.0, cfg=cfg, drop_idx=0,
+        rng=np.random.default_rng(1), link_adapter=AlwaysNackAdapter(),
+    )
+
+    assert [r.tti for r in rows] == [0, 1]
+    assert np.isclose(rows[0].olla_offset_db, 1.8)
+    assert np.isclose(olla[("unit", 0)], 3.6)
+
+
 def test_no_interference_reference_forces_denominator_to_noise_only():
     schedule = ScheduleResult(
         scheme="baseline",

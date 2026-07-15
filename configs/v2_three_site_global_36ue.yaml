@@ -140,6 +140,11 @@ scheduler:
 analysis:
   baseline_no_interference_upper_bound: true
 
+link_abstraction:
+  # Run 100 extra ACK/OLLA updates before the 10 measured TTIs in every drop.
+  # Increase/decrease after checking offset and BLER convergence for the run.
+  olla_warmup_tti: 100
+
 coverage_heatmap:
   enabled: false
 

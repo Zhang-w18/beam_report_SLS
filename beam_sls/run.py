@@ -17,6 +17,8 @@ def main() -> None:
                         help="Override system.num_drops for quick tests")
     parser.add_argument("--num-tti", type=int, default=None,
                         help="Override system.num_tti_per_drop")
+    parser.add_argument("--olla-warmup-tti", type=int, default=None,
+                        help="Override link_abstraction.olla_warmup_tti")
     parser.add_argument("--algorithm", type=str, default=None, choices=[
         "exhaustive",
         "greedy",
@@ -43,6 +45,10 @@ def main() -> None:
         cfg["system"]["num_drops"] = args.num_drops
     if args.num_tti is not None:
         cfg["system"]["num_tti_per_drop"] = args.num_tti
+    if args.olla_warmup_tti is not None:
+        if args.olla_warmup_tti < 0:
+            parser.error("--olla-warmup-tti must be >= 0")
+        cfg["link_abstraction"]["olla_warmup_tti"] = args.olla_warmup_tti
     if args.algorithm is not None:
         cfg["scheduler"]["algorithm"] = args.algorithm
     if args.domain_mode is not None:

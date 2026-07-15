@@ -131,6 +131,7 @@ CONFIG_KEYS = [
     ("system", "num_tti_per_drop"),
     ("system", "tx_power_dbm"),
     ("system", "target_bler"),
+    ("link_abstraction", "olla_warmup_tti"),
     ("scenario", "channel_model"),
     ("scenario", "carrier_frequency_ghz"),
     ("pdsch", "num_prbs"),
@@ -309,7 +310,8 @@ def section_config(rd: RunData, w) -> None:
     w(f"  tx_units/sector, beams/sector = {g('_resolved.tx_units_per_sector')}, "
       f"{g('_resolved.tx_beams_per_sector')}")
     w(f"  channel_model / fc_ghz     = {g('scenario.channel_model')} / {g('scenario.carrier_frequency_ghz')}")
-    w(f"  num_drops x num_tti        = {g('system.num_drops')} x {g('system.num_tti_per_drop')}")
+    w(f"  drops x warmup x measured TTI = {g('system.num_drops')} x "
+      f"{g('link_abstraction.olla_warmup_tti', 0)} x {g('system.num_tti_per_drop')}")
     w(f"  target_bler / tx_power_dbm = {g('system.target_bler')} / {g('system.tx_power_dbm')}")
     # loading indicator
     try:

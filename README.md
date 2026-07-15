@@ -53,6 +53,7 @@ CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 \
   --out runs/v2_4_pdsch_greedy_drop50_tti50 \
   --num-drops 50 \
   --num-tti 50 \
+  --olla-warmup-tti 100 \
   --algorithm greedy
 ```
 
@@ -68,7 +69,13 @@ link_abstraction:
   mode: sionna_sys_precomputed_bler
   mcs_table_index: 1
   mcs_category: 1   # Sionna SYS category 1 = PDSCH
+  # Extra TTIs per drop; OLLA updates normally, but these rows are not counted.
+  olla_warmup_tti: 100
 ```
+
+`system.num_tti_per_drop` 只表示正式统计 TTI 数。每个 drop 实际运行
+`olla_warmup_tti + num_tti_per_drop` 个 TTI；warmup 期间使用同一调度和信道，
+正常抽样 ACK 并更新 OLLA，但不写入 `link_tti.csv`，也不进入吞吐、BLER 和 CDF。
 
 运行默认配置：
 
@@ -607,7 +614,7 @@ progress:
 
 ```text
 [init] RF=panel_polarization_subarray, tx_units/TRP=4, max_mu_order=4
-[run] drops=10, tti/drop=50, schemes=full_gamma,baseline,..., beams=192, tx_units/sector=4
+[run] drops=10, warmup_tti/drop=100, measured_tti/drop=50, schemes=full_gamma,baseline,..., beams=192, tx_units/sector=4
 [drop 1/10] topology + channel generation
 [drop 1/10] channel backend=fallback_numpy_for_sionna_tr38901_uma; computing Gamma measurement
 [drop 1/10] scheduling 4 feedback schemes
@@ -653,6 +660,29 @@ figures/reported_max_su_snr_per_ue_cdf.png
 ```
 
 `baseline_no_interference_upper_bound` 是 baseline 原调度集合在“波束间干扰强制为零”条件下重新运行链路层得到的诊断上界，并出现在 `link_tti.csv`、`summary.csv` 和吞吐 CDF 中。`ue_goodput.csv` 对每个 `(drop, UE)` 跨全部 TTI 求平均，未调度 UE 按零吞吐计入，因此其 5% 边缘吞吐和 CDF 不会产生幸存者偏差。
+
+已有 run 可以用独立脚本重新选择曲线和样式，无需重跑仿真：
+
+```bash
+python scripts/plot_cdf.py runs/YOUR_RUN \
+  --metric ue_goodput \
+  --schemes full_gamma baseline baseline_no_interference_upper_bound \
+  --font-size 13 \
+  --output runs/YOUR_RUN/figures/ue_goodput_compare.pdf
+```
+
+完整的字体、标题、坐标范围、图例、颜色、线型、线宽、marker 和 ECDF
+数据导出配置见 `configs/cdf_plot_example.yaml`：
+
+```bash
+python scripts/plot_cdf.py runs/YOUR_RUN \
+  --config configs/cdf_plot_example.yaml
+```
+
+支持的 `--metric` 包括 `link_goodput`、`ue_goodput`、`effective_sinr`、
+`tbler`、`olla_offset`、`reported_su_snr` 和 `reported_max_su_snr`。
+其中 `baseline_no_interference_upper_bound` 即 baseline 调度在强制无波束间
+干扰条件下得到的 SU 参考曲线。
 
 调度相似度使用完全相同的 `(UE, beam_index)` 二元组。主指标为 Jaccard 相似度，同时输出按较大调度集合归一化的相同比例、overlap coefficient 和完全一致比例。
 
