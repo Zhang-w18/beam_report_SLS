@@ -12,6 +12,7 @@ from .channel import SionnaImportProbe, generate_channel
 from .codebook import ArrayConfig, build_network_tx_beams, dft_codebook_from_array
 from .config import save_config
 from .coverage import compute_coverage_heatmap_standard_sampling, compute_fixed_vertical_beam_cdf
+from .evaluation import EvaluationCase, resolve_evaluation_plan
 from .feedback import make_reports
 from .link import LinkEvalRow, run_tti_loop
 from .link_adaptation import make_link_adapter
@@ -121,6 +122,9 @@ def _schedule_stat_rows(drop: int, scheme: str, sched) -> List[Dict[str, Any]]:
             row = {
                 "drop": int(drop),
                 "scheme": scheme,
+                "case_id": sched.case_id or scheme,
+                "feedback_scheme": sched.feedback_scheme or sched.scheme,
+                "algorithm": sched.algorithm or meta.get("algorithm"),
                 "domain_mode": meta.get("domain_mode", "per_site_joint"),
                 "domain_id": d.get("domain_id", stats.get("domain_id")),
             }
@@ -131,6 +135,9 @@ def _schedule_stat_rows(drop: int, scheme: str, sched) -> List[Dict[str, Any]]:
             row = {
                 "drop": int(drop),
                 "scheme": scheme,
+                "case_id": sched.case_id or scheme,
+                "feedback_scheme": sched.feedback_scheme or sched.scheme,
+                "algorithm": sched.algorithm or meta.get("algorithm"),
                 "domain_mode": meta.get("domain_mode", "per_site_joint"),
                 "domain_id": "all",
             }
@@ -141,6 +148,9 @@ def _schedule_stat_rows(drop: int, scheme: str, sched) -> List[Dict[str, Any]]:
     row = {
         "drop": int(drop),
         "scheme": scheme,
+        "case_id": sched.case_id or scheme,
+        "feedback_scheme": sched.feedback_scheme or sched.scheme,
+        "algorithm": sched.algorithm or meta.get("algorithm"),
         "domain_mode": meta.get("domain_mode", "global"),
         "domain_id": meta.get("domain_id", stats.get("domain_id")),
     }
@@ -261,6 +271,13 @@ def summarize_su_snr(samples: List[Dict[str, Any]], schemes: List[str]) -> Tuple
 
 def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     out_dir = ensure_dir(out_dir)
+    evaluation_plan = resolve_evaluation_plan(cfg)
+    evaluation_cases = evaluation_plan.cases
+    case_ids = evaluation_plan.case_ids
+    feedback_schemes = evaluation_plan.feedback_schemes
+    cases_by_id = evaluation_plan.cases_by_id
+    cfg.setdefault("_resolved", {})["evaluation_cases"] = [case.to_dict() for case in evaluation_cases]
+    cfg["_resolved"]["evaluation_references"] = dict(evaluation_plan.references)
     save_config(out_dir / "resolved_config.yaml", cfg)
 
     if cfg.get("sionna", {}).get("enable_import_probe", True):
@@ -334,16 +351,16 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     scheduled_pair_sets: Dict[Tuple[int, str], set] = {}
     domain_mode = normalize_domain_mode(cfg["scheduler"].get("domain_mode", "global"))
 
-    schemes = list(cfg["feedback"].get("schemes", ["baseline"]))
+    baseline_reference = evaluation_plan.references.get("baseline")
     upper_bound_enabled = bool(
         cfg.get("analysis", {}).get("baseline_no_interference_upper_bound", True)
-        and "baseline" in schemes
+        and baseline_reference is not None
     )
-    analysis_schemes = list(schemes)
+    analysis_schemes = list(case_ids)
     if upper_bound_enabled:
         analysis_schemes.append(BASELINE_NO_INTERFERENCE_SCHEME)
     total_ues = int(cfg["ue_drop"]["num_ut_per_sector"]) * max(1, topo0.num_cells)
-    for s in schemes:
+    for s in case_ids:
         tbar_by_scheme[s] = {u: float(cfg["scheduler"].get("pf_tbar_init_mbps", 1.0))
                              for u in range(total_ues)}
 
@@ -356,7 +373,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     num_drops = int(cfg["system"].get("num_drops", 1))
     num_tti = int(cfg["system"].get("num_tti_per_drop", 1))
     olla_warmup_tti = int(cfg["link_abstraction"].get("olla_warmup_tti", 0))
-    _progress(cfg, f"[run] drops={num_drops}, warmup_tti/drop={olla_warmup_tti}, measured_tti/drop={num_tti}, schemes={','.join(schemes)}, beams={len(beam_ids)}, tx_units/sector={_panels_per_cell(cfg, tx_cfg, rf_arch)}")
+    _progress(cfg, f"[run] drops={num_drops}, warmup_tti/drop={olla_warmup_tti}, measured_tti/drop={num_tti}, cases={','.join(case_ids)}, beams={len(beam_ids)}, tx_units/sector={_panels_per_cell(cfg, tx_cfg, rf_arch)}")
     for drop in range(num_drops):
         _progress(cfg, f"[drop {drop+1}/{num_drops}] topology + channel generation")
         rng = np.random.default_rng(int(rng_master.integers(0, 2**31 - 1)))
@@ -373,7 +390,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
                                          link_adapter=link_adapter,
                                          candidate_beam_indices_by_ue=candidate_beam_indices_by_ue)
         reports_by_scheme = make_reports(
-            meas, beam_ids, schemes=schemes,
+            meas, beam_ids, schemes=feedback_schemes,
             k1=int(cfg["feedback"].get("service_beam_top_k1", 2)),
             oracle_top_k=int(cfg["feedback"].get("oracle_service_beam_top_k", 4)),
             k2=int(cfg["feedback"].get("conflict_top_k2", 3)),
@@ -408,34 +425,54 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
                         "su_snr_db": float(cand.su_snr_db),
                     })
 
-        _progress(cfg, f"[drop {drop+1}/{num_drops}] scheduling {len(schemes)} feedback schemes")
+        _progress(cfg, f"[drop {drop+1}/{num_drops}] scheduling {len(evaluation_cases)} evaluation cases")
         # Drops are independent UE/topology realizations. Keep OLLA state across
         # TTIs within a drop, but do not leak offsets to the next random drop.
         olla_state: Dict[Tuple[str, int], float] = {}
-        for scheme in schemes:
-            sched = schedule(reports_by_scheme[scheme], beam_ids, cfg, tbar_by_scheme.get(scheme), link_adapter=link_adapter)
-            scheduled_pair_sets[(drop, scheme)] = {
+        # Every case starts from the same ACK random stream for cleaner paired
+        # comparisons. OLLA state remains isolated by case_id.
+        common_link_rng_state = copy.deepcopy(rng.bit_generator.state)
+        for case in evaluation_cases:
+            scheme = case.feedback_scheme
+            case_id = case.case_id
+            sched = schedule(
+                reports_by_scheme[scheme], beam_ids, cfg, tbar_by_scheme.get(case_id),
+                link_adapter=link_adapter, algorithm=case.algorithm,
+            )
+            sched.case_id = case_id
+            sched.feedback_scheme = scheme
+            sched.algorithm = case.algorithm
+            sched.metadata["algorithm"] = case.algorithm
+            scheduled_pair_sets[(drop, case_id)] = {
                 (int(link.ue_id), int(link.beam_index)) for link in sched.links
             }
-            schedule_rows.append({"drop": drop, "scheme": scheme,
+            schedule_rows.append({"drop": drop, "scheme": case_id,
+                                  "case_id": case_id,
+                                  "feedback_scheme": scheme,
+                                  "algorithm": case.algorithm,
                                   "objective_value": sched.objective_value,
                                   "num_scheduled": len(sched.links),
                                   "schedule_json": json.dumps(sched.to_dict(beam_ids), ensure_ascii=False)})
-            scheduler_stat_rows.extend(_schedule_stat_rows(drop, scheme, sched))
-            rng_state_before_link_eval = copy.deepcopy(rng.bit_generator.state)
+            scheduler_stat_rows.extend(_schedule_stat_rows(drop, case_id, sched))
+            case_rng = np.random.default_rng()
+            case_rng.bit_generator.state = copy.deepcopy(common_link_rng_state)
+            rng_state_before_link_eval = copy.deepcopy(case_rng.bit_generator.state)
             link_rows, olla_state = run_tti_loop(sched, ch.h_freq, tx_beams, rx_beams, beam_ids, meas,
-                                                 tx_power_w_per_panel, cfg, drop, rng, olla_state,
+                                                 tx_power_w_per_panel, cfg, drop, case_rng, olla_state,
                                                  link_adapter=link_adapter)
             all_link_rows.extend(link_rows)
-            if scheme == "baseline" and upper_bound_enabled:
+            if case_id == baseline_reference and upper_bound_enabled:
                 upper_sched = ScheduleResult(
                     scheme=BASELINE_NO_INTERFERENCE_SCHEME,
                     objective_value=float(sched.objective_value),
                     links=list(sched.links),
                     metadata={
-                        "source_scheme": "baseline",
+                        "source_scheme": case_id,
                         "interference_mode": "forced_zero",
                     },
+                    case_id=BASELINE_NO_INTERFERENCE_SCHEME,
+                    feedback_scheme=BASELINE_NO_INTERFERENCE_SCHEME,
+                    algorithm=case.algorithm,
                 )
                 upper_rng = np.random.default_rng()
                 upper_rng.bit_generator.state = rng_state_before_link_eval
@@ -448,8 +485,8 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             if cfg["scheduler"].get("objective", "sum_rate") == "proportional_fair":
                 alpha = 0.05
                 for r in link_rows:
-                    old = tbar_by_scheme[scheme].get(r.ue_id, float(cfg["scheduler"].get("pf_tbar_init_mbps", 1.0)))
-                    tbar_by_scheme[scheme][r.ue_id] = (1 - alpha) * old + alpha * r.goodput_mbps
+                    old = tbar_by_scheme[case_id].get(r.ue_id, float(cfg["scheduler"].get("pf_tbar_init_mbps", 1.0)))
+                    tbar_by_scheme[case_id][r.ue_id] = (1 - alpha) * old + alpha * r.goodput_mbps
 
         _progress(cfg, f"[drop {drop+1}/{num_drops}] finished")
         drop_rows.append({
@@ -487,16 +524,19 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     )
     write_csv(out_dir / "metrics" / "ue_goodput.csv", ue_goodput_rows)
 
-    similarity_by_drop, similarity_summary = schedule_similarity_rows(scheduled_pair_sets, schemes)
+    similarity_by_drop, similarity_summary = schedule_similarity_rows(scheduled_pair_sets, case_ids)
     write_csv(out_dir / "metrics" / "schedule_similarity_by_drop.csv", similarity_by_drop)
     write_csv(out_dir / "metrics" / "schedule_similarity.csv", similarity_summary)
 
-    su_snr_max_rows, su_snr_summary = summarize_su_snr(su_snr_sample_rows, schemes)
+    su_snr_max_rows, su_snr_summary = summarize_su_snr(su_snr_sample_rows, feedback_schemes)
     write_csv(out_dir / "metrics" / "su_snr_samples.csv", su_snr_sample_rows)
     write_csv(out_dir / "metrics" / "su_snr_max_per_ue.csv", su_snr_max_rows)
     write_csv(out_dir / "metrics" / "su_snr_summary.csv", su_snr_summary)
 
-    summary = summarize_results(link_dict_rows, analysis_schemes, ue_goodput_rows)
+    summary = summarize_results(
+        link_dict_rows, analysis_schemes, ue_goodput_rows,
+        references=evaluation_plan.references, cases_by_id=cases_by_id,
+    )
     summary["_backend"] = {
         "link_adaptation": link_adapter.status.__dict__,
         "channel_backends": channel_backend_rows,
@@ -511,7 +551,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
         ue_goodput_rows=ue_goodput_rows,
         su_snr_samples=su_snr_sample_rows,
         su_snr_max_rows=su_snr_max_rows,
-        feedback_schemes=schemes,
+        feedback_schemes=feedback_schemes,
     )
 
     if cfg.get("coverage_heatmap", {}).get("enabled", True):
@@ -557,7 +597,9 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
 
 def summarize_results(link_rows: List[Dict[str, Any]],
                       schemes: List[str],
-                      ue_goodput_rows: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
+                      ue_goodput_rows: List[Dict[str, Any]] | None = None,
+                      references: Dict[str, str] | None = None,
+                      cases_by_id: Dict[str, EvaluationCase] | None = None) -> Dict[str, Any]:
     summary: Dict[str, Any] = {}
     for scheme in schemes:
         rows = [r for r in link_rows if r.get("scheme") == scheme]
@@ -587,7 +629,11 @@ def summarize_results(link_rows: List[Dict[str, Any]],
                 for r in ue_goodput_rows
                 if r.get("scheme") == scheme
             ]
+        case = (cases_by_id or {}).get(scheme)
         summary[scheme] = {
+            "case_id": scheme,
+            "feedback_scheme": case.feedback_scheme if case is not None else scheme,
+            "algorithm": case.algorithm if case is not None else None,
             "avg_system_goodput_mbps": float(np.mean(list(sys_by_slot.values()))) if sys_by_slot else 0.0,
             "avg_ue_goodput_mbps": float(np.mean(ue_mean)) if ue_mean else 0.0,
             "p05_ue_goodput_mbps": percentile(ue_mean, 5.0),
@@ -596,24 +642,27 @@ def summarize_results(link_rows: List[Dict[str, Any]],
             "ack_rate": float(np.mean([float(r["ack"]) for r in rows])),
             "num_tx": len(rows),
         }
-    if "full_gamma" in summary:
-        oracle = max(float(summary["full_gamma"].get("avg_system_goodput_mbps", 0.0)), 1e-12)
+    refs = references or {}
+    oracle_case = refs.get("oracle", "full_gamma" if "full_gamma" in summary else None)
+    baseline_case = refs.get("baseline", "baseline" if "baseline" in summary else None)
+    if oracle_case in summary:
+        oracle = max(float(summary[oracle_case].get("avg_system_goodput_mbps", 0.0)), 1e-12)
         for scheme in schemes:
             if isinstance(summary.get(scheme), dict):
                 summary[scheme]["oracle_ratio"] = float(summary[scheme].get("avg_system_goodput_mbps", 0.0)) / oracle
-    if "baseline" in summary:
-        base = float(summary["baseline"].get("avg_system_goodput_mbps", 0.0))
-        base_p05 = float(summary["baseline"].get("p05_ue_goodput_mbps", 0.0))
+    if baseline_case in summary:
+        base = float(summary[baseline_case].get("avg_system_goodput_mbps", 0.0))
+        base_p05 = float(summary[baseline_case].get("p05_ue_goodput_mbps", 0.0))
         for scheme in schemes:
             if isinstance(summary.get(scheme), dict):
                 value = float(summary[scheme].get("avg_system_goodput_mbps", 0.0))
                 summary[scheme]["gain_over_baseline"] = (
-                    (value - base) / base if base > 0.0 else (0.0 if scheme == "baseline" else None)
+                    (value - base) / base if base > 0.0 else (0.0 if scheme == baseline_case else None)
                 )
                 p05 = float(summary[scheme].get("p05_ue_goodput_mbps", 0.0))
                 summary[scheme]["p05_gain_over_baseline_mbps"] = p05 - base_p05
                 summary[scheme]["p05_gain_over_baseline"] = (
-                    (p05 - base_p05) / base_p05 if base_p05 > 0.0 else (0.0 if scheme == "baseline" else None)
+                    (p05 - base_p05) / base_p05 if base_p05 > 0.0 else (0.0 if scheme == baseline_case else None)
                 )
     if BASELINE_NO_INTERFERENCE_SCHEME in summary and "baseline" in summary:
         upper = max(float(summary[BASELINE_NO_INTERFERENCE_SCHEME].get("avg_system_goodput_mbps", 0.0)), 1e-12)

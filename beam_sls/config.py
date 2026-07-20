@@ -158,6 +158,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "conflict_top_k2": 3,
         "conflict_sinr_threshold_db": 0.0,
     },
+    # Optional two-dimensional experiment matrix. When matrix is null, the
+    # legacy feedback.schemes + scheduler.algorithm configuration is used.
+    "evaluation": {
+        "matrix": None,
+        "references": {},
+    },
     "scheduler": {
         "domain_mode": "per_site_joint",
         "objective": "sum_rate",
@@ -165,6 +171,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "cap_mu_order_by_rf": True,
         # greedy / exhaustive / hard_conflict_greedy / adaptive_lambda_greedy
         "algorithm": "greedy",
+        # Legacy one-algorithm-per-scheme override. evaluation.matrix should be
+        # used when one report scheme is evaluated with multiple algorithms.
+        "algorithm_by_scheme": {},
         "use_panel_constraint": True,
         "exhaustive_pruning": {
             "enabled": True,

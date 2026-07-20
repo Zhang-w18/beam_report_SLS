@@ -50,7 +50,15 @@ def main() -> None:
             parser.error("--olla-warmup-tti must be >= 0")
         cfg["link_abstraction"]["olla_warmup_tti"] = args.olla_warmup_tti
     if args.algorithm is not None:
-        cfg["scheduler"]["algorithm"] = args.algorithm
+        matrix = cfg.get("evaluation", {}).get("matrix")
+        if isinstance(matrix, dict):
+            # A global CLI override applies to every enabled matrix row. The
+            # capability validator will reject incompatible combinations.
+            cfg["evaluation"]["matrix"] = {
+                str(scheme): [args.algorithm] for scheme in matrix
+            }
+        else:
+            cfg["scheduler"]["algorithm"] = args.algorithm
     if args.domain_mode is not None:
         cfg["scheduler"]["domain_mode"] = args.domain_mode
     if args.layout is not None:

@@ -1,0 +1,37 @@
+metric: ue_goodput
+output: null
+export_data: null
+
+figsize: [8.5, 5.2]
+dpi: 220
+font_size: 12
+title: Evaluation case UE-goodput comparison
+xlabel: Per-UE average goodput [Mbps]
+ylabel: CDF
+ylim: [0.0, 1.0]
+grid: true
+grid_alpha: 0.25
+legend: true
+legend_loc: lower right
+
+curves:
+  - case_id: full_gamma__greedy
+    label: Full Gamma / Greedy
+    color: "#1f77b4"
+    linestyle: "-"
+    linewidth: 2.4
+  - case_id: baseline__greedy
+    label: Baseline / Greedy
+    color: "#7f7f7f"
+    linestyle: "--"
+    linewidth: 2.2
+  - case_id: topk_conflict_id__hard_conflict_greedy
+    label: Top-K / Hard Conflict
+    color: "#d62728"
+    linestyle: "-."
+    linewidth: 2.2
+  - case_id: threshold_conflict_set__hard_conflict_greedy
+    label: Threshold / Hard Conflict
+    color: "#2ca02c"
+    linestyle: ":"
+    linewidth: 2.2

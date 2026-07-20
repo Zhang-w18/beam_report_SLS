@@ -128,17 +128,17 @@ def _curve_specs(config: Dict[str, Any], cli_schemes: Sequence[str] | None,
                  available: Sequence[str]) -> List[Dict[str, Any]]:
     if cli_schemes:
         existing = {
-            str(item.get("scheme")): dict(item)
+            str(item.get("case_id", item.get("scheme"))): dict(item)
             for item in config.get("curves", [])
-            if isinstance(item, dict) and item.get("scheme") is not None
+            if isinstance(item, dict) and item.get("case_id", item.get("scheme")) is not None
         }
-        specs = [existing.get(str(s), {"scheme": str(s)}) for s in cli_schemes]
+        specs = [existing.get(str(s), {"case_id": str(s)}) for s in cli_schemes]
     elif config.get("curves"):
         specs = [dict(item) for item in config["curves"] if isinstance(item, dict)]
     else:
-        specs = [{"scheme": scheme} for scheme in available]
+        specs = [{"case_id": scheme} for scheme in available]
 
-    requested = [str(item.get("scheme", "")) for item in specs]
+    requested = [str(item.get("case_id", item.get("scheme", ""))) for item in specs]
     missing = [scheme for scheme in requested if scheme not in available]
     if missing:
         raise ValueError(
@@ -149,10 +149,10 @@ def _curve_specs(config: Dict[str, Any], cli_schemes: Sequence[str] | None,
 
 
 def _extract_values(rows: Iterable[Dict[str, str]], column: str,
-                    scheme: str) -> np.ndarray:
+                    scheme: str, group_field: str = "scheme") -> np.ndarray:
     vals = []
     for row in rows:
-        if row.get("scheme") != scheme:
+        if row.get(group_field) != scheme:
             continue
         value = _finite_float(row.get(column))
         if value is not None:
@@ -182,13 +182,17 @@ def draw_cdf(run_dir: Path, config: Dict[str, Any], args) -> Tuple[Path, Path | 
         raise ValueError(f"Unknown metric {metric!r}; choose from {', '.join(METRICS)}")
     metric_cfg = METRICS[metric]
     rows = _read_csv(run_dir / "metrics" / metric_cfg["file"])
-    available = list(dict.fromkeys(row.get("scheme", "") for row in rows if row.get("scheme")))
+    report_metric = metric in {"reported_su_snr", "reported_max_su_snr"}
+    preferred_group = "feedback_scheme" if report_metric else "case_id"
+    group_field = preferred_group if rows and preferred_group in rows[0] else "scheme"
+    available = list(dict.fromkeys(row.get(group_field, "") for row in rows if row.get(group_field)))
 
-    if args.list_schemes:
+    if args.list_schemes or getattr(args, "list_cases", False):
         print("\n".join(available))
         raise SystemExit(0)
 
-    specs = _curve_specs(config, args.schemes, available)
+    requested_cases = getattr(args, "cases", None) or args.schemes
+    specs = _curve_specs(config, requested_cases, available)
     font_size = float(args.font_size or config.get("font_size", 12.0))
     figsize = _as_pair(config.get("figsize", [7.5, 5.0]), "figsize")
     dpi = int(config.get("dpi", 180))
@@ -204,8 +208,8 @@ def draw_cdf(run_dir: Path, config: Dict[str, Any], args) -> Tuple[Path, Path | 
     fig, ax = plt.subplots(figsize=figsize)
     exported: List[Tuple[str, str, np.ndarray, np.ndarray]] = []
     for spec in specs:
-        scheme = str(spec["scheme"])
-        x = _extract_values(rows, metric_cfg["column"], scheme)
+        scheme = str(spec.get("case_id", spec.get("scheme")))
+        x = _extract_values(rows, metric_cfg["column"], scheme, group_field=group_field)
         if x.size == 0:
             raise ValueError(f"No finite {metric_cfg['column']} samples for scheme {scheme}")
         y = np.arange(1, x.size + 1, dtype=float) / float(x.size)
@@ -254,14 +258,17 @@ def main() -> int:
     parser.add_argument("run_dir", type=Path, help="Run directory containing metrics/*.csv")
     parser.add_argument("--config", help="Optional YAML plot configuration")
     parser.add_argument("--metric", choices=sorted(METRICS), help="CDF metric")
-    parser.add_argument("--schemes", nargs="+", help="Schemes to draw, in legend order")
+    parser.add_argument("--schemes", nargs="+", help="Legacy scheme/series IDs to draw")
+    parser.add_argument("--cases", nargs="+", help="Evaluation case IDs to draw, in legend order")
     parser.add_argument("--output", help="Output PNG/PDF/SVG path")
     parser.add_argument("--export-data", help="Optional CSV path for the plotted ECDF points")
     parser.add_argument("--font-size", type=float, help="Base font size")
     parser.add_argument("--title", help="Figure title")
     parser.add_argument("--xlabel", help="X-axis label")
     parser.add_argument("--list-schemes", action="store_true",
-                        help="List schemes available for the selected metric and exit")
+                        help="List legacy schemes/series available for the metric and exit")
+    parser.add_argument("--list-cases", action="store_true",
+                        help="List evaluation cases available for the selected metric and exit")
     args = parser.parse_args()
 
     try:

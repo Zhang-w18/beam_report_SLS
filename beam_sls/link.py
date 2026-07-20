@@ -29,6 +29,9 @@ class LinkEvalRow:
     goodput_mbps: float
     olla_offset_db: float
     mcs_selection_sinr_db: float
+    case_id: str | None = None
+    feedback_scheme: str | None = None
+    algorithm: str | None = None
 
 
 def eesm(sinr_lin: np.ndarray, beta_db: float) -> float:
@@ -119,7 +122,7 @@ def run_tti_loop(schedule: ScheduleResult,
     # Measured rows retain the backward-compatible tti range [0, num_tti).
     for tti in range(-warmup_tti, num_tti):
         for link in schedule.links:
-            key = (schedule.scheme, link.ue_id)
+            key = (schedule.case_id or schedule.scheme, link.ue_id)
             off = float(olla.get(key, 0.0))
             sinr_eff_lin = eesm(sinr_grid[link.ue_id], beta_db=beta_db)
             eff_db = float(lin_to_db(sinr_eff_lin))
@@ -156,7 +159,7 @@ def run_tti_loop(schedule: ScheduleResult,
             goodput_mbps = goodput_bits / (slot_ms * 1e-3) / 1e6
             if tti >= 0:
                 rows.append(LinkEvalRow(
-                    scheme=schedule.scheme,
+                    scheme=schedule.case_id or schedule.scheme,
                     drop=drop_idx,
                     tti=tti,
                     ue_id=link.ue_id,
@@ -171,6 +174,9 @@ def run_tti_loop(schedule: ScheduleResult,
                     goodput_mbps=float(goodput_mbps),
                     olla_offset_db=off,
                     mcs_selection_sinr_db=mcs_selection_sinr_db,
+                    case_id=schedule.case_id or schedule.scheme,
+                    feedback_scheme=schedule.feedback_scheme or schedule.scheme,
+                    algorithm=schedule.algorithm or schedule.metadata.get("algorithm"),
                 ))
             if olla_enabled:
                 # off is a backoff subtracted from predicted_sinr_db.

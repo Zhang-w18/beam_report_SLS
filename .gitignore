@@ -18,3 +18,5 @@ runs/
 *.swp
 *.swo
 
+.pytest_cache/
+gain_analysis_report.txt

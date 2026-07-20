@@ -78,10 +78,16 @@ class ScheduleResult:
     objective_value: float
     links: List[ScheduledLink]
     metadata: Dict = field(default_factory=dict)
+    case_id: str | None = None
+    feedback_scheme: str | None = None
+    algorithm: str | None = None
 
     def to_dict(self, beam_ids: Sequence[BeamId]) -> Dict:
         return {
             "scheme": self.scheme,
+            "case_id": self.case_id or self.scheme,
+            "feedback_scheme": self.feedback_scheme or self.scheme,
+            "algorithm": self.algorithm or self.metadata.get("algorithm"),
             "objective_value": self.objective_value,
             "links": [l.to_dict(beam_ids) for l in self.links],
             "metadata": self.metadata,
@@ -92,18 +98,19 @@ def schedule(reports: List[UEReport],
              beam_ids: Sequence[BeamId],
              cfg: Dict,
              tbar_mbps: Dict[int, float] | None = None,
-             link_adapter=None) -> ScheduleResult:
+             link_adapter=None,
+             algorithm: str | None = None) -> ScheduleResult:
     domain_mode = normalize_domain_mode(cfg["scheduler"].get("domain_mode", "global"))
     if domain_mode == "per_site_joint":
         return schedule_grouped_domains(reports, beam_ids, cfg, tbar_mbps, link_adapter,
-                                        domain_mode=domain_mode,
+                                        domain_mode=domain_mode, algorithm=algorithm,
                                         group_key=lambda r: 0 if r.site_id is None else int(r.site_id))
     if domain_mode == "per_sector_independent":
         return schedule_grouped_domains(reports, beam_ids, cfg, tbar_mbps, link_adapter,
-                                        domain_mode=domain_mode,
+                                        domain_mode=domain_mode, algorithm=algorithm,
                                         group_key=lambda r: 0 if r.serving_cell is None else int(r.serving_cell))
     return _schedule_single_domain(reports, beam_ids, cfg, tbar_mbps, link_adapter,
-                                   domain_id=None, domain_mode="global")
+                                   domain_id=None, domain_mode="global", algorithm=algorithm)
 
 
 def _schedule_single_domain(reports: List[UEReport],
@@ -112,8 +119,9 @@ def _schedule_single_domain(reports: List[UEReport],
                             tbar_mbps: Dict[int, float] | None = None,
                             link_adapter=None,
                             domain_id: int | None = None,
-                            domain_mode: str = "global") -> ScheduleResult:
-    alg = cfg["scheduler"].get("algorithm", "exhaustive")
+                            domain_mode: str = "global",
+                            algorithm: str | None = None) -> ScheduleResult:
+    alg = str(algorithm or cfg["scheduler"].get("algorithm", "exhaustive"))
     if alg == "exhaustive":
         return exhaustive_schedule(reports, beam_ids, cfg, tbar_mbps, link_adapter,
                                    domain_id=domain_id, domain_mode=domain_mode)
@@ -139,7 +147,8 @@ def schedule_grouped_domains(reports: List[UEReport],
                              tbar_mbps: Dict[int, float] | None = None,
                              link_adapter=None,
                              domain_mode: str = "per_site_joint",
-                             group_key=None) -> ScheduleResult:
+                             group_key=None,
+                             algorithm: str | None = None) -> ScheduleResult:
     scheme = reports[0].scheme if reports else "unknown"
     key_fn = group_key or (lambda r: 0)
     by_domain: Dict[int, List[UEReport]] = {}
@@ -151,14 +160,15 @@ def schedule_grouped_domains(reports: List[UEReport],
     domains: List[Dict] = []
     for domain_id in sorted(by_domain):
         res = _schedule_single_domain(by_domain[domain_id], beam_ids, cfg, tbar_mbps, link_adapter,
-                                      domain_id=domain_id, domain_mode=domain_mode)
+                                      domain_id=domain_id, domain_mode=domain_mode,
+                                      algorithm=algorithm)
         links.extend(res.links)
         objective += float(res.objective_value)
         domains.append(res.metadata)
 
     metadata = {
         "domain_mode": domain_mode,
-        "algorithm": cfg["scheduler"].get("algorithm", "exhaustive"),
+        "algorithm": str(algorithm or cfg["scheduler"].get("algorithm", "exhaustive")),
         "num_domains": len(domains),
         "domains": domains,
         "aggregate_stats": _aggregate_domain_stats(domains),
