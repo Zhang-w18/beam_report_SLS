@@ -148,6 +148,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "num_freq_points": 24,
         "compute_full_gamma": True,
         "frequency_average": "linear_power",
+        # numpy: CPU (backward-compatible default); cupy: NVIDIA CUDA GPU;
+        # auto: use CuPy when available, otherwise record a NumPy fallback.
+        "gamma_backend": "numpy",
+        # UEs sharing one scheduling-domain beam list are evaluated together.
+        # 0 selects 8 on GPU and 1 on CPU; lower this if GPU memory is limited.
+        "gamma_ue_batch_size": 0,
     },
     "feedback": {
         "schemes": ["full_gamma", "baseline", "topk_conflict_id", "threshold_conflict_set"],

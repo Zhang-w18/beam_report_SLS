@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from itertools import combinations
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -271,6 +272,11 @@ def summarize_su_snr(samples: List[Dict[str, Any]], schemes: List[str]) -> Tuple
 
 def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     out_dir = ensure_dir(out_dir)
+    if str(cfg.get("measurement", {}).get("gamma_backend", "numpy")).lower() in ("cupy", "gpu", "cuda", "auto"):
+        # Sionna/TensorFlow and CuPy may share the same GPU in one process. Ask
+        # TensorFlow to grow its allocation instead of reserving all VRAM before
+        # CuPy starts the Gamma kernels. Respect an explicit user setting.
+        os.environ.setdefault("TF_FORCE_GPU_ALLOW_GROWTH", "true")
     evaluation_plan = resolve_evaluation_plan(cfg)
     evaluation_cases = evaluation_plan.cases
     case_ids = evaluation_plan.case_ids
@@ -348,6 +354,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     scheduler_stat_rows: List[Dict[str, Any]] = []
     tbar_by_scheme: Dict[str, Dict[int, float]] = {}
     channel_backend_rows: List[Dict[str, Any]] = []
+    gamma_backend_rows: List[Dict[str, Any]] = []
     scheduled_pair_sets: Dict[Tuple[int, str], set] = {}
     domain_mode = normalize_domain_mode(cfg["scheduler"].get("domain_mode", "global"))
 
@@ -388,7 +395,18 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
                                          tx_power_w_per_panel=tx_power_w_per_panel,
                                          noise_power_w=noise_w,
                                          link_adapter=link_adapter,
-                                         candidate_beam_indices_by_ue=candidate_beam_indices_by_ue)
+                                         candidate_beam_indices_by_ue=candidate_beam_indices_by_ue,
+                                         compute_backend=cfg["measurement"].get("gamma_backend", "numpy"),
+                                         ue_batch_size=cfg["measurement"].get("gamma_ue_batch_size", 0))
+        gamma_backend_rows.append({
+            "drop": int(drop),
+            "requested_backend": str(cfg["measurement"].get("gamma_backend", "numpy")),
+            "effective_backend": meas.compute_backend,
+            "backend_status": meas.backend_status,
+            "ue_batch_size": int(cfg["measurement"].get("gamma_ue_batch_size", 0)),
+            "elapsed_s": float(meas.elapsed_s),
+        })
+        _progress(cfg, f"[drop {drop+1}/{num_drops}] Gamma backend={meas.compute_backend}, elapsed={meas.elapsed_s:.3f}s; {meas.backend_status}")
         reports_by_scheme = make_reports(
             meas, beam_ids, schemes=feedback_schemes,
             k1=int(cfg["feedback"].get("service_beam_top_k1", 2)),
@@ -519,6 +537,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     write_csv(out_dir / "metrics" / "sites.csv", site_rows_all)
     write_csv(out_dir / "metrics" / "sectors.csv", sector_rows_all)
     write_csv(out_dir / "metrics" / "beams.csv", beam_rows)
+    write_csv(out_dir / "metrics" / "gamma_measurement_backend.csv", gamma_backend_rows)
     write_csv(out_dir / "metrics" / "reports.csv", report_rows)
     write_csv(out_dir / "metrics" / "scheduler_stats.csv", scheduler_stat_rows)
     write_csv(out_dir / "metrics" / "channel_backend.csv", channel_backend_rows)

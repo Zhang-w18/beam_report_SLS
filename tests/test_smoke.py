@@ -287,6 +287,61 @@ def test_domain_limited_measurement_uses_sparse_gamma():
     assert meas.gamma[0, 0, 1] == 0.0
 
 
+def test_gamma_measurement_ue_batching_preserves_dense_result():
+    rng = np.random.default_rng(20260722)
+    beam_ids = [
+        BeamId(cell=i // 2, trp=0, panel=0, beam=i, global_index=i, tx_unit=i // 2)
+        for i in range(4)
+    ]
+    h_freq = rng.normal(size=(3, 2, 3, 2, 3)) + 1j * rng.normal(size=(3, 2, 3, 2, 3))
+    tx_beams = rng.normal(size=(4, 3)) + 1j * rng.normal(size=(4, 3))
+    rx_beams = rng.normal(size=(2, 2)) + 1j * rng.normal(size=(2, 2))
+
+    serial = compute_gamma_measurement(
+        h_freq, tx_beams, rx_beams, beam_ids, 1.5, 0.1,
+        compute_backend="numpy", ue_batch_size=1,
+    )
+    batched = compute_gamma_measurement(
+        h_freq, tx_beams, rx_beams, beam_ids, 1.5, 0.1,
+        compute_backend="numpy", ue_batch_size=3,
+    )
+
+    assert np.allclose(serial.service_power_w, batched.service_power_w)
+    assert np.allclose(serial.gamma, batched.gamma)
+    assert np.array_equal(serial.selected_rx_beam, batched.selected_rx_beam)
+    assert batched.interference_power_w.shape == (0, 0, 0)
+    assert batched.compute_backend == "numpy"
+
+
+def test_gamma_measurement_cupy_matches_numpy_when_cuda_is_available():
+    try:
+        import cupy as cp
+        if int(cp.cuda.runtime.getDeviceCount()) < 1:
+            return
+    except Exception:
+        return
+
+    rng = np.random.default_rng(20260723)
+    beam_ids = [
+        BeamId(cell=0, trp=0, panel=i, beam=i, global_index=i, tx_unit=i)
+        for i in range(2)
+    ]
+    h_freq = rng.normal(size=(2, 2, 2, 2, 3)) + 1j * rng.normal(size=(2, 2, 2, 2, 3))
+    tx_beams = rng.normal(size=(2, 3)) + 1j * rng.normal(size=(2, 3))
+    rx_beams = rng.normal(size=(2, 2)) + 1j * rng.normal(size=(2, 2))
+
+    cpu = compute_gamma_measurement(h_freq, tx_beams, rx_beams, beam_ids, 1.0, 0.1)
+    gpu = compute_gamma_measurement(
+        h_freq, tx_beams, rx_beams, beam_ids, 1.0, 0.1,
+        compute_backend="cupy", ue_batch_size=2,
+    )
+
+    assert np.allclose(cpu.service_power_w, gpu.service_power_w, rtol=1e-11, atol=1e-13)
+    assert np.allclose(cpu.gamma, gpu.gamma, rtol=1e-11, atol=1e-13)
+    assert np.array_equal(cpu.selected_rx_beam, gpu.selected_rx_beam)
+    assert gpu.compute_backend == "cupy"
+
+
 def test_exhaustive_pruning_matches_unpruned_small_case():
     cfg = load_config(None)
     cfg["scheduler"]["algorithm"] = "exhaustive"

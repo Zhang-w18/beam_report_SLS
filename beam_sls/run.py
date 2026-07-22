@@ -34,6 +34,8 @@ def main() -> None:
                         help="Override topology.num_sites")
     parser.add_argument("--objective", type=str, default=None, choices=["sum_rate", "proportional_fair"],
                         help="Override scheduler.objective")
+    parser.add_argument("--gamma-backend", type=str, default=None, choices=["numpy", "cupy", "auto"],
+                        help="Override measurement.gamma_backend (CPU/GPU Gamma computation)")
     parser.add_argument("--skip-heatmap", action="store_true",
                         help="Disable coverage heatmap generation")
     parser.add_argument("--quiet", action="store_true",
@@ -67,6 +69,8 @@ def main() -> None:
         cfg["topology"]["num_sites"] = args.num_sites
     if args.objective is not None:
         cfg["scheduler"]["objective"] = args.objective
+    if args.gamma_backend is not None:
+        cfg["measurement"]["gamma_backend"] = args.gamma_backend
     if args.skip_heatmap:
         cfg["coverage_heatmap"]["enabled"] = False
     if args.quiet:

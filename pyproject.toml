@@ -9,5 +9,11 @@ dependencies = [
   "matplotlib>=3.5",
 ]
 
+[project.optional-dependencies]
+# Install the CuPy wheel matching the server CUDA major version. This extra is
+# the common CUDA 12.x case; CUDA 13.x users should select gpu-cuda13.
+gpu = ["cupy-cuda12x>=13.0"]
+gpu-cuda13 = ["cupy-cuda13x>=14.0"]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]

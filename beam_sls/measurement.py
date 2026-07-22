@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Mapping, Sequence
+from time import perf_counter
+from typing import Any, List, Mapping, Sequence
 
 import numpy as np
 
@@ -65,8 +66,10 @@ class SparseGamma:
 
 @dataclass
 class MeasurementResult:
-    # S[ue, beam], I[ue, service_beam, interferer_beam], Gamma same shape.
+    # S[ue, beam], Gamma[ue, service_beam, interferer_beam].
     service_power_w: np.ndarray
+    # Deprecated compatibility field. Pairwise interference is already encoded
+    # in Gamma and no in-repository consumer reads this duplicate B x B tensor.
     interference_power_w: np.ndarray
     gamma: np.ndarray | SparseGamma
     noise_power_w: float
@@ -74,6 +77,49 @@ class MeasurementResult:
     su_mcs: np.ndarray            # [ue, beam]
     su_snr_db: np.ndarray         # [ue, beam]
     su_outage: np.ndarray | None = None  # [ue, beam], selected MCS misses target BLER
+    compute_backend: str = "numpy"
+    backend_status: str = "OK"
+    elapsed_s: float = 0.0
+
+
+def _resolve_compute_backend(backend: str):
+    """Return (array module, effective name, status) without requiring CuPy on CPU."""
+    requested = str(backend or "numpy").strip().lower()
+    aliases = {
+        "cpu": "numpy",
+        "np": "numpy",
+        "gpu": "cupy",
+        "cuda": "cupy",
+        "cp": "cupy",
+    }
+    requested = aliases.get(requested, requested)
+    if requested not in ("numpy", "cupy", "auto"):
+        raise ValueError("measurement.gamma_backend must be one of: numpy, cupy, auto")
+    if requested == "numpy":
+        return np, "numpy", "OK"
+    try:
+        import cupy as cp
+
+        device_count = int(cp.cuda.runtime.getDeviceCount())
+        if device_count < 1:
+            raise RuntimeError("no CUDA device is visible")
+        # Fail here, with an actionable message, rather than at the first large
+        # allocation after channel generation.
+        cp.cuda.Device().use()
+        return cp, "cupy", f"OK: CUDA devices={device_count}"
+    except Exception as exc:
+        if requested == "auto":
+            return np, "numpy", f"FALLBACK: CuPy unavailable: {type(exc).__name__}: {exc}"
+        raise RuntimeError(
+            "measurement.gamma_backend=cupy requires a working CuPy package "
+            "matching the server CUDA version and a visible NVIDIA GPU"
+        ) from exc
+
+
+def _to_numpy(xp: Any, value) -> np.ndarray:
+    if xp is np:
+        return np.asarray(value)
+    return xp.asnumpy(value)
 
 
 def compute_gamma_measurement(h_freq: np.ndarray,
@@ -83,24 +129,35 @@ def compute_gamma_measurement(h_freq: np.ndarray,
                               tx_power_w_per_panel: float,
                               noise_power_w: float,
                               link_adapter=None,
-                              candidate_beam_indices_by_ue: Mapping[int, Sequence[int]] | None = None) -> MeasurementResult:
-    """Compute S, I, Gamma from channel and DFT beams.
+                              candidate_beam_indices_by_ue: Mapping[int, Sequence[int]] | None = None,
+                              compute_backend: str = "numpy",
+                              ue_batch_size: int | None = None) -> MeasurementResult:
+    """Compute service power, selected RX beams, and Gamma.
 
     h_freq shape: [num_ue, num_tx_unit, num_freq, num_rx_ant, num_tx_ant]
     tx_beams shape: [num_beams_total, num_tx_ant], each beam's tx_unit is in beam_ids
     rx_beams shape: [num_rx_beams, num_rx_ant]
 
-    v2.4 uses a vectorized implementation. For every UE, it first computes the
-    TX-beam effective receive vector h(f)w, then projects the result onto all RX
-    beams. If candidate_beam_indices_by_ue is provided, only those beams are
-    measured for that UE; service/interferer Gamma entries outside the UE's
-    scheduling domain remain zero and are not used by report generation.
+    The implementation groups UEs with the same scheduling-domain beam list and
+    processes each group in batches. ``compute_backend=numpy`` uses the CPU;
+    ``cupy`` performs the same batched einsum/gather operations on CUDA; and
+    ``auto`` uses CuPy when available, otherwise NumPy. Only batch-sized channel
+    slices are copied to the GPU so the full H tensor need not fit in VRAM.
+
+    If candidate_beam_indices_by_ue is provided, only those beams are measured
+    for that UE; service/interferer Gamma entries outside the UE's scheduling
+    domain remain zero and are not used by report generation.
     """
+    started_at = perf_counter()
     num_u = int(h_freq.shape[0])
     num_b = len(beam_ids)
-    num_r = int(rx_beams.shape[0])
     num_f = int(h_freq.shape[2])
     num_rx = int(rx_beams.shape[1])
+    xp, effective_backend, backend_status = _resolve_compute_backend(compute_backend)
+    if ue_batch_size is None or int(ue_batch_size) <= 0:
+        batch_size = 8 if effective_backend == "cupy" else 1
+    else:
+        batch_size = int(ue_batch_size)
 
     allowed_by_ue: List[List[int]] = []
     for u in range(num_u):
@@ -121,7 +178,10 @@ def compute_gamma_measurement(h_freq: np.ndarray,
 
     s = np.zeros((num_u, num_b), dtype=float)
     selected = np.zeros((num_u, num_b), dtype=int)
-    i_pow = np.zeros((0, 0, 0), dtype=float) if use_sparse_gamma else np.zeros((num_u, num_b, num_b), dtype=float)
+    # ``interference_power_w`` duplicated the B x B data represented by Gamma,
+    # was never consumed, and could be one of the largest allocations. Keep an
+    # empty compatibility value instead of materializing it.
+    i_pow = np.zeros((0, 0, 0), dtype=float)
     gamma_dense = None if use_sparse_gamma else np.zeros((num_u, num_b, num_b), dtype=float)
     sparse_blocks: dict[int, tuple[np.ndarray, np.ndarray]] = {}
 
@@ -130,50 +190,81 @@ def compute_gamma_measurement(h_freq: np.ndarray,
     for bi, bid in enumerate(beam_ids):
         unit_to_beams.setdefault(int(bid.tx_unit), []).append(bi)
 
-    rx_conj = np.conjugate(rx_beams).astype(np.complex128)
+    rx_conj = xp.asarray(np.conjugate(rx_beams), dtype=xp.complex128)
+    tx_beams_backend = xp.asarray(tx_beams, dtype=xp.complex128)
 
-    for u in range(num_u):
-        allowed = allowed_by_ue[u]
-        if not allowed:
-            continue
+    # Per-site/per-sector domains naturally create repeated beam lists. Grouping
+    # them lets one CUDA launch process several UEs while preserving global beam
+    # indexing in the returned MeasurementResult.
+    ue_groups: dict[tuple[int, ...], list[int]] = {}
+    for u, allowed in enumerate(allowed_by_ue):
+        if allowed:
+            ue_groups.setdefault(tuple(allowed), []).append(u)
+
+    for allowed_tuple, group_ues in ue_groups.items():
+        allowed = list(allowed_tuple)
+        allowed_arr = np.asarray(allowed, dtype=int)
         allowed_set = set(allowed)
+        local_pos = {int(b): i for i, b in enumerate(allowed)}
         local_unit_to_beams = {
             unit: [bi for bi in inds if bi in allowed_set]
             for unit, inds in unit_to_beams.items()
         }
+        unit_compute_specs = [
+            (
+                unit,
+                inds,
+                xp.asarray([local_pos[int(b)] for b in inds], dtype=xp.int64),
+            )
+            for unit, inds in local_unit_to_beams.items()
+            if inds
+        ]
+        for start in range(0, len(group_ues), batch_size):
+            batch_ues = np.asarray(group_ues[start:start + batch_size], dtype=int)
+            batch_u = len(batch_ues)
+            num_allowed = len(allowed)
+            # hf_allowed[u, b, f, nr] = H[u,txunit(b),f,:,:] @ w[b].
+            hf_allowed = xp.zeros(
+                (batch_u, num_allowed, num_f, num_rx), dtype=xp.complex128
+            )
+            for unit, inds, locs in unit_compute_specs:
+                h = xp.asarray(h_freq[batch_ues, unit], dtype=xp.complex128)
+                fmat = tx_beams_backend[inds]
+                hf_allowed[:, locs, :, :] = xp.einsum(
+                    "ufrt,kt->ukfr", h, fmat, optimize=True
+                )
 
-        # hf_allowed[k, f, nr] = H_u,txunit(allowed[k])[f,:,:] @ w_allowed[k].
-        hf_allowed = np.zeros((len(allowed), num_f, num_rx), dtype=np.complex128)
-        local_pos = {int(b): i for i, b in enumerate(allowed)}
-        for unit, inds in local_unit_to_beams.items():
-            if not inds:
-                continue
-            h = h_freq[u, unit]  # [F, Nr, Nt]
-            fmat = tx_beams[inds]  # [K, Nt]
-            locs = [local_pos[int(b)] for b in inds]
-            hf_allowed[np.asarray(locs, dtype=int), :, :] = np.einsum("frt,kt->kfr", h, fmat, optimize=True)
+            # z_all[u, r, b, f] = q_r^H H_u w_b
+            z_all = xp.einsum("rn,ubfn->urbf", rx_conj, hf_allowed, optimize=True)
+            pwr_rb = xp.mean(xp.abs(z_all) ** 2, axis=3)  # [U_batch, R, B_allowed]
+            selected_batch = xp.argmax(pwr_rb, axis=1)   # [U_batch, B_allowed]
+            u_index = xp.arange(batch_u)[:, None]
+            b_index = xp.arange(num_allowed)[None, :]
+            service_batch = float(tx_power_w_per_panel) * pwr_rb[
+                u_index, selected_batch, b_index
+            ]
 
-        # z_all[r, b, f] = q_r^H H w_b
-        z_all = np.einsum("rn,bfn->rbf", rx_conj, hf_allowed, optimize=True)
-        pwr_rb_allowed = np.mean(np.abs(z_all) ** 2, axis=2)  # [R, B_allowed]
-        selected_allowed = np.argmax(pwr_rb_allowed, axis=0)
-        allowed_arr = np.asarray(allowed, dtype=int)
-        selected[u, allowed_arr] = selected_allowed
-        s[u, allowed_arr] = float(tx_power_w_per_panel) * pwr_rb_allowed[selected_allowed, np.arange(len(allowed))]
+            # Each service beam m uses its selected RX state against every
+            # potential interferer n. Advanced indexing creates [U, m, n].
+            interference_batch = float(tx_power_w_per_panel) * pwr_rb[
+                u_index, selected_batch, :
+            ]
+            gamma_batch = service_batch[:, :, None] / xp.maximum(
+                interference_batch + float(noise_power_w), 1e-30
+            )
+            diag = xp.arange(num_allowed)
+            gamma_batch[:, diag, diag] = service_batch / max(float(noise_power_w), 1e-30)
 
-        gamma_local = np.zeros((len(allowed), len(allowed)), dtype=float)
-        for local_m, m in enumerate(allowed):
-            row = float(tx_power_w_per_panel) * pwr_rb_allowed[int(selected[u, m]), :]
-            gamma_row = s[u, m] / np.maximum(row + float(noise_power_w), 1e-30)
-            gamma_row[local_m] = s[u, m] / max(float(noise_power_w), 1e-30)
-            gamma_local[local_m, :] = gamma_row
-            if gamma_dense is not None:
-                i_pow[u, m, allowed_arr] = row
-                i_pow[u, m, m] = 0.0
-                gamma_dense[u, m, allowed_arr] = gamma_row
-                gamma_dense[u, m, m] = gamma_row[local_m]
-        if use_sparse_gamma:
-            sparse_blocks[int(u)] = (allowed_arr, gamma_local)
+            selected_np = _to_numpy(xp, selected_batch).astype(int, copy=False)
+            service_np = _to_numpy(xp, service_batch).astype(float, copy=False)
+            gamma_np = _to_numpy(xp, gamma_batch).astype(float, copy=False)
+            selected[np.ix_(batch_ues, allowed_arr)] = selected_np
+            s[np.ix_(batch_ues, allowed_arr)] = service_np
+            for local_u, global_u in enumerate(batch_ues):
+                if use_sparse_gamma:
+                    sparse_blocks[int(global_u)] = (allowed_arr, gamma_np[local_u])
+                else:
+                    gamma_dense[int(global_u)][np.ix_(allowed_arr, allowed_arr)] = gamma_np[local_u]
 
     gamma = SparseGamma(num_u, num_b, sparse_blocks) if use_sparse_gamma else gamma_dense
     if use_sparse_gamma:
@@ -207,4 +298,7 @@ def compute_gamma_measurement(h_freq: np.ndarray,
                              selected_rx_beam=selected,
                              su_mcs=su_mcs,
                              su_snr_db=su_snr_db,
-                             su_outage=su_outage)
+                             su_outage=su_outage,
+                             compute_backend=effective_backend,
+                             backend_status=backend_status,
+                             elapsed_s=float(perf_counter() - started_at))

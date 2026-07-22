@@ -125,7 +125,9 @@ def compute_coverage_heatmap_standard_sampling(cfg: Dict,
         meas = compute_gamma_measurement(ch.h_freq, tx_beams, rx_beams, beam_ids,
                                          tx_power_w_per_panel=tx_power_w_per_panel,
                                          noise_power_w=noise_power_w,
-                                         link_adapter=None)
+                                         link_adapter=None,
+                                         compute_backend=cfg.get("measurement", {}).get("gamma_backend", "numpy"),
+                                         ue_batch_size=cfg.get("measurement", {}).get("gamma_ue_batch_size", 0))
         # Best service beam RSRP-like power, independent of scheduler.
         vals = np.max(meas.service_power_w, axis=1)
         bidx = np.argmax(meas.service_power_w, axis=1)
@@ -224,7 +226,9 @@ def compute_fixed_vertical_beam_cdf(cfg: Dict,
             meas = compute_gamma_measurement(ch.h_freq, tx_beams_v, rx_beams, beam_ids_v,
                                              tx_power_w_per_panel=tx_power_w_per_panel,
                                              noise_power_w=noise_power_w,
-                                             link_adapter=None)
+                                             link_adapter=None,
+                                             compute_backend=cfg.get("measurement", {}).get("gamma_backend", "numpy"),
+                                             ue_batch_size=cfg.get("measurement", {}).get("gamma_ue_batch_size", 0))
             # Average over horizontal scan beams within each sector/panel; then
             # choose the best sector/panel group for the grid point.
             group_to_indices: Dict[Tuple[int, int], List[int]] = {}
