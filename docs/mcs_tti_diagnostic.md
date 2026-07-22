@@ -556,3 +556,6 @@ tti  pred_mcs  actual_mcs  mcs_selection_sinr_db  real_effective_sinr_db  tbler 
 - MCS 16 在真实 SINR 8.885 dB 下 TBLER 降到约 0.011，于是 ACK。
 
 这个结果符合“调度器只能按有限信息选 MCS，真实 SINR 只用于链路成败判定”的仿真逻辑。
+# 版本说明
+
+> 本文记录的是 v2.7/v2.8 的历史诊断结论，其中 `actual_mcs` 按调度前预测 SINR 选择。v2.9 已按新的评估要求改为使用调度后实际 EESM SINR重新执行链路适配；当前行为以[更新说明 v2.9](../更新说明v2.9.md)为准。

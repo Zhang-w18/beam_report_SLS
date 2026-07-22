@@ -160,7 +160,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # v2: CQI/MCS selection uses link_abstraction.mode. If Sionna SYS is
         # available, this becomes Sionna InnerLoopLinkAdaptation at target BLER.
         "cqi_mode": "illa_target_bler",
-        "service_beam_top_k1": 2,
+        "service_beam_top_k1": 4,
         "oracle_service_beam_top_k": 4,
         "conflict_top_k2": 3,
         "conflict_sinr_threshold_db": 0.0,

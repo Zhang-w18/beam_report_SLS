@@ -1,0 +1,226 @@
+# Three-site global scheduling configuration for v2.7.
+# Physical scheduling capacity:
+#   3 sites * 3 sector/TRPs per site * 2 TXRUs per TRP = 18 concurrent links.
+#
+# TX array:
+#   (M,N,P,Mg,Ng,Mp,Np) = (8,16,2,1,1,1,1)
+#   256 antenna elements, one physical panel, two polarizations, two TXRUs.
+#
+# RX array:
+#   (M,N,P,Mg,Ng,Mp,Np) = (4,1,2,1,1,1,1)
+#   8 antenna elements, one physical panel, two polarizations.
+#
+# TX beam scanning:
+#   16 horizontal beams * 4 distance-range vertical beams = 64 beams per TXRU.
+#   18 TX units * 64 beams = 1152 network-wide TX beam candidates.
+
+scenario:
+  name: urban_macro_v2_7_three_site_global_18ue_distance_range_v4_5ue_eval_matrix
+  carrier_frequency_ghz: 30.0
+  channel_model: sionna_tr38901_uma
+  min_ue_distance_m: 35.0
+  max_ue_distance_m: 250.0
+  num_clusters: 4
+  delay_spread_ns: 100.0
+  shadow_fading_std_db: 4.0
+  pathloss_exponent: 3.0
+  enable_pathloss: true
+  enable_shadow_fading: true
+  o2i_model: low
+
+topology:
+  layout: three_site_triangle
+  num_sites: 3
+  sectors_per_site: 3
+  sector_azimuths_deg: [30.0, 150.0, 270.0]
+  sector_width_deg: 120.0
+  isd_m: 500.0
+  bs_height_m: 25.0
+  ue_height_m: 1.5
+
+system:
+  bandwidth_mhz: 20.0
+  subcarrier_spacing_khz: 120.0
+  # 42.542 dBm is the network-wide power for 9 TRPs.
+  # It gives approximately 33 dBm per TRP and 30 dBm per TXRU.
+  tx_power_dbm: 42.542
+  num_drops: 1
+  num_tti_per_drop: 10
+  random_seed: 20260714
+  target_bler: 0.1
+
+pdsch:
+  num_prbs: 132
+  num_symbols: 12
+  dmrs_overhead_re_per_prb: 18
+  num_layers_per_ue: 1
+  slot_duration_ms: 0.125
+
+noise:
+  thermal_noise_density_dbm_per_hz: -174.0
+  ue_noise_figure_db: 7.0
+
+ue_drop:
+  # 5 UE/sector * 9 sectors = 45 UEs competing for 18 global TX units.
+  num_ut_per_sector: 5
+  distribution: uniform_in_sector
+  speed_kmh: 3.0
+
+trp:
+  # One sector is one TRP.
+  num_trps_per_sector: 1
+  num_panels_per_sector: 1
+  panel_azimuth_offsets_deg: [0.0]
+  panel_power_mode: per_tx_unit_equal
+
+rf_architecture:
+  txru_connectivity: panel_polarization_subarray
+  allow_independent_polarization_beams: true
+  num_txru: 2
+  max_parallel_beams_per_trp: auto
+
+tx_array:
+  model: tr38901_panel
+  num_txru: 2
+  num_ae: 256
+  M: 8
+  N: 16
+  P: 2
+  Mg: 1
+  Ng: 1
+  Mp: 1
+  Np: 1
+  dH: 0.5
+  dV: 0.5
+  beam_scope: per_panel
+  sampling_mode: uniform
+  # The full spatial DFT grid is 16 horizontal by 8 vertical directions.
+  # This experiment scans all 16 horizontal directions and 4 vertical
+  # distance-range beams.
+  num_beams_h: 16
+  num_beams_v: 4
+  max_beams: 64
+  vertical_beam_mode: distance_range
+  fixed_v_index: null
+  vertical_beam:
+    min_horizontal_distance_m: 35.0
+    max_horizontal_distance_m: 250.0
+    height_difference_m: 23.5
+
+ue_array:
+  model: tr38901_panel
+  num_rxru: 2
+  num_ae: 8
+  M: 4
+  N: 1
+  P: 2
+  Mg: 1
+  Ng: 1
+  Mp: 1
+  Np: 1
+  dH: 0.5
+  dV: 0.5
+  beam_scope: joint
+  sampling_mode: uniform
+  # The UE spatial grid has 1 horizontal and 4 vertical directions.
+  num_beams_h: 1
+  num_beams_v: 4
+  max_beams: 4
+  vertical_beam_mode: scan
+  fixed_v_index: null
+
+beam:
+  tx_codebook: dft_2d
+  rx_codebook: dft_2d
+  one_beam_per_panel: true
+
+measurement:
+  # Use 4 frequency samples first to reduce memory pressure.
+  # Increase only after the strict Sionna run is stable.
+  num_freq_points: 4
+  compute_full_gamma: true
+  frequency_average: linear_power
+  gamma_backend: cupy
+  gamma_ue_batch_size: 4
+
+feedback:
+  schemes:
+    - full_gamma
+    - baseline
+    - topk_conflict_id
+    - threshold_conflict_set
+  cqi_mode: illa_target_bler
+  service_beam_top_k1: 4
+  oracle_service_beam_top_k: 4
+  conflict_top_k2: 3
+  conflict_sinr_threshold_db: 0.0
+
+evaluation:
+  matrix:
+    full_gamma: [greedy]
+    baseline: [greedy]
+    topk_conflict_id: [greedy, hard_conflict_greedy]
+    threshold_conflict_set: [greedy, hard_conflict_greedy]
+  references:
+    oracle: full_gamma__greedy
+    baseline: baseline__greedy
+
+scheduler:
+  domain_mode: global
+  objective: sum_rate
+  # Global aggregate capacity:
+  #   9 TRPs * 2 TXRUs per TRP = 18.
+  max_mu_order: 18
+  # The automatic RF cap is resolved per TRP, so the global limit is
+  # explicitly enforced by max_mu_order and the TX-unit constraint.
+  cap_mu_order_by_rf: false
+  algorithm: greedy
+  use_panel_constraint: true
+  exhaustive_pruning:
+    enabled: true
+    sort_by_upper_bound: true
+    zero_upper_bound: true
+    branch_and_bound: true
+  conflict_penalty_lambda: 0.35
+  conflict_penalty_mode: fixed
+  adaptive_lambda_alpha: 0.20
+  unknown_interference_policy: zero
+  pf_tbar_init_mbps: 1.0
+
+analysis:
+  baseline_no_interference_upper_bound: true
+
+link_abstraction:
+  mode: sionna_sys_precomputed_bler
+  mcs_table_index: 1
+  mcs_category: 1
+  sinr_mapping: eesm
+  eesm_beta_db: 5.0
+  olla_enabled: true
+  olla_warmup_tti: 50
+  olla_step_db: 0.5
+  harq_enabled: true
+  bler_curve_slope: 1.1
+  fallback_snr_min_db: -8.0
+  fallback_snr_max_db: 35.0
+  fallback_snr_step_db: 0.05
+
+coverage_heatmap:
+  enabled: false
+
+progress:
+  enabled: true
+
+sionna:
+  enable_import_probe: true
+  prefer_sionna_sys_phy_abstraction: true
+  # Strict mode: abort if the Sionna channel or link abstraction fails.
+  fallback_to_numpy_if_unavailable: false
+  device: null
+  precision: null
+  bs_polarization: dual
+  bs_polarization_type: cross
+  bs_antenna_pattern: "38.901"
+  ut_polarization: dual
+  ut_polarization_type: cross
+  ut_antenna_pattern: omni

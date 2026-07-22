@@ -42,7 +42,23 @@ def test_eesm_high_sinr_is_finite():
     assert val != float("inf")
 
 
-def test_transmitted_mcs_uses_predicted_sinr_not_realized_sinr():
+def test_actual_mcs_uses_realized_post_scheduling_sinr():
+    class RealizedSinrAdapter:
+        selected_sinr_db = []
+
+        @classmethod
+        def select_mcs_from_sinr_db(cls, sinr_db):
+            cls.selected_sinr_db.append(float(sinr_db))
+            return 7 if sinr_db > 10.0 else 0
+
+        @staticmethod
+        def tbler_from_sinr_db(_sinr_db, _mcs):
+            return 0.0
+
+        @staticmethod
+        def tbs_bits(_mcs):
+            return 1
+
     cfg = load_config(None)
     cfg["system"]["num_tti_per_drop"] = 1
     cfg["link_abstraction"]["olla_enabled"] = True
@@ -75,12 +91,13 @@ def test_transmitted_mcs_uses_predicted_sinr_not_realized_sinr():
     rows, _ = run_tti_loop(
         schedule, h_freq, tx_beams, rx_beams, beam_ids, meas,
         tx_power_w_per_panel=1.0, cfg=cfg, drop_idx=0,
-        rng=np.random.default_rng(1),
+        rng=np.random.default_rng(1), link_adapter=RealizedSinrAdapter(),
     )
 
     assert rows[0].effective_sinr_db > 50.0
-    assert rows[0].mcs_selection_sinr_db == -6.0
-    assert rows[0].actual_mcs == 0
+    assert rows[0].mcs_selection_sinr_db == rows[0].effective_sinr_db
+    assert RealizedSinrAdapter.selected_sinr_db == [rows[0].effective_sinr_db]
+    assert rows[0].actual_mcs == 7
 
 
 def test_olla_warmup_updates_state_but_is_excluded_from_metrics():
@@ -482,27 +499,55 @@ class _OutageAwareFakeAdapter:
         return float(mcs * 10.0)
 
 
-def test_measurement_records_su_outage_separately_from_selected_mcs():
+def test_report_link_adapts_only_top_k_service_beams_once_across_schemes():
+    class CountingAdapter(_OutageAwareFakeAdapter):
+        select_calls = []
+        outage_calls = []
+
+        @classmethod
+        def select_mcs_from_sinr_lin(cls, sinr_lin):
+            cls.select_calls.append(float(sinr_lin))
+            return 3
+
+        @classmethod
+        def is_outage_from_sinr_lin(cls, sinr_lin, _mcs):
+            cls.outage_calls.append(float(sinr_lin))
+            return bool(sinr_lin < 1.0)
+
     beam_ids = [
-        BeamId(cell=0, trp=0, panel=0, beam=0, global_index=0, tx_unit=0),
+        BeamId(cell=0, trp=0, panel=i, beam=0, global_index=i, tx_unit=i)
+        for i in range(6)
     ]
-    meas = compute_gamma_measurement(
-        np.ones((1, 1, 1, 1, 1), dtype=np.complex128),
-        np.ones((1, 1), dtype=np.complex128),
-        np.ones((1, 1), dtype=np.complex128),
-        beam_ids,
-        tx_power_w_per_panel=1.0,
-        noise_power_w=10.0,
-        link_adapter=_OutageAwareFakeAdapter(),
+    su_snr_db = np.asarray([[-5.0, -2.0, 1.0, 4.0, 7.0, 10.0]])
+    gamma = np.zeros((1, 6, 6), dtype=float)
+    gamma[0, np.arange(6), np.arange(6)] = 10.0 ** (su_snr_db[0] / 10.0)
+    meas = MeasurementResult(
+        service_power_w=np.ones((1, 6)),
+        interference_power_w=np.zeros((0, 0, 0)),
+        gamma=gamma,
+        noise_power_w=1.0,
+        selected_rx_beam=np.zeros((1, 6), dtype=int),
+        su_mcs=np.full((1, 6), -1, dtype=int),
+        su_snr_db=su_snr_db,
+        su_outage=np.zeros((1, 6), dtype=bool),
+    )
+    schemes = ["full_gamma", "baseline", "topk_conflict_id", "threshold_conflict_set"]
+    reports = make_reports(
+        meas, beam_ids, schemes=schemes, k1=4, oracle_top_k=4, k2=1,
+        threshold_db=0.0, link_adapter=CountingAdapter(),
     )
 
-    assert meas.su_mcs[0, 0] == 3
-    assert bool(meas.su_outage[0, 0]) is True
+    assert [c.beam_index for c in reports["baseline"][0].candidates] == [5, 4, 3, 2]
+    assert len(CountingAdapter.select_calls) == 4
+    assert len(CountingAdapter.outage_calls) == 4
+    assert np.all(meas.su_mcs[0, 2:] == 3)
+    assert np.all(meas.su_mcs[0, :2] == -1)
 
 
 def test_su_outage_candidate_has_zero_rate_and_is_not_scheduled():
     cfg = load_config(None)
     cfg["scheduler"]["algorithm"] = "greedy"
+    cfg["scheduler"]["domain_mode"] = "global"
     cfg["_resolved"] = {"max_mu_order": 1}
     beam_ids = [
         BeamId(cell=0, trp=0, panel=0, beam=0, global_index=0, tx_unit=0),

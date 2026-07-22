@@ -126,18 +126,21 @@ def run_tti_loop(schedule: ScheduleResult,
             off = float(olla.get(key, 0.0))
             sinr_eff_lin = eesm(sinr_grid[link.ue_id], beta_db=beta_db)
             eff_db = float(lin_to_db(sinr_eff_lin))
-            # MCS selection must be causal: the scheduler only knows its
-            # predicted SINR/CQI, not the realized post-scheduling SINR. The
-            # realized effective SINR is used below only for BLER/ACK sampling.
+            # Re-run link adaptation on the realized post-scheduling SINR. This
+            # is the actual-link evaluation stage; predicted MCS/SINR remain in
+            # the schedule for comparing scheduler expectation with outcome.
             if olla_enabled:
-                mcs_selection_sinr_db = float(link.predicted_sinr_db - off)
+                mcs_selection_sinr_db = float(eff_db - off)
                 if link_adapter is not None:
                     actual_mcs = int(link_adapter.select_mcs_from_sinr_db(mcs_selection_sinr_db))
                 else:
                     actual_mcs = select_mcs_from_sinr_db(mcs_selection_sinr_db).index
             else:
-                mcs_selection_sinr_db = float(link.predicted_sinr_db)
-                actual_mcs = int(link.predicted_mcs)
+                mcs_selection_sinr_db = float(eff_db)
+                if link_adapter is not None:
+                    actual_mcs = int(link_adapter.select_mcs_from_sinr_db(mcs_selection_sinr_db))
+                else:
+                    actual_mcs = select_mcs_from_sinr_db(mcs_selection_sinr_db).index
             if link_adapter is not None:
                 tbler = float(link_adapter.tbler_from_sinr_db(eff_db, actual_mcs))
             else:

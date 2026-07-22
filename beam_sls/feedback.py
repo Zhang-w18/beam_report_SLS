@@ -6,8 +6,8 @@ from typing import Dict, List, Mapping, Sequence, Set
 import numpy as np
 
 from .codebook import BeamId
+from .mcs import bler_from_sinr_db, select_mcs_from_sinr_lin
 from .measurement import MeasurementResult
-from .utils import lin_to_db
 
 
 @dataclass
@@ -85,18 +85,53 @@ def make_reports(meas: MeasurementResult,
                  threshold_db: float,
                  ue_site_ids: Mapping[int, int] | None = None,
                  ue_serving_cells: Mapping[int, int] | None = None,
-                 candidate_beam_indices_by_ue: Mapping[int, Sequence[int]] | None = None) -> Dict[str, List[UEReport]]:
+                 candidate_beam_indices_by_ue: Mapping[int, Sequence[int]] | None = None,
+                 link_adapter=None) -> Dict[str, List[UEReport]]:
     out: Dict[str, List[UEReport]] = {s: [] for s in schemes}
     num_u = meas.service_power_w.shape[0]
     threshold_lin = float(10.0 ** (float(threshold_db) / 10.0))
 
+    valid_schemes = {"full_gamma", "baseline", "topk_conflict_id", "threshold_conflict_set"}
+    unknown = [scheme for scheme in schemes if scheme not in valid_schemes]
+    if unknown:
+        raise ValueError(f"Unknown feedback scheme: {unknown[0]}")
+
+    # Phase 1: choose reportable service beams using SU-SNR only. Build this
+    # once for all schemes so the same (UE, beam) is never link-adapted twice.
+    tops_by_scheme: Dict[str, List[List[int]]] = {scheme: [] for scheme in schemes}
+    selected_for_adaptation: List[Set[int]] = [set() for _ in range(num_u)]
+    for scheme in schemes:
+        top_k = oracle_top_k if scheme == "full_gamma" else k1
+        for u in range(num_u):
+            allowed = None if candidate_beam_indices_by_ue is None else candidate_beam_indices_by_ue.get(u, [])
+            top = _top_service_indices(meas, u, top_k, allowed)
+            tops_by_scheme[scheme].append(top)
+            selected_for_adaptation[u].update(top)
+
+    # Phase 2: call ILLA/MCS and outage only for the union of reportable beams.
+    # In the normal simulation link_adapter is always provided. The fallback
+    # keeps manually constructed MeasurementResult objects/tests compatible.
+    for u, selected_beams in enumerate(selected_for_adaptation):
+        for m in selected_beams:
+            sinr_lin = float(meas.gamma[u, m, m])
+            if link_adapter is not None:
+                mcs = int(link_adapter.select_mcs_from_sinr_lin(sinr_lin))
+                outage = bool(link_adapter.is_outage_from_sinr_lin(sinr_lin, mcs))
+                meas.su_mcs[u, m] = mcs
+                if meas.su_outage is not None:
+                    meas.su_outage[u, m] = outage
+            elif int(meas.su_mcs[u, m]) < 0:
+                mcs = int(select_mcs_from_sinr_lin(sinr_lin).index)
+                meas.su_mcs[u, m] = mcs
+                if meas.su_outage is not None:
+                    meas.su_outage[u, m] = bool(
+                        bler_from_sinr_db(float(meas.su_snr_db[u, m]), mcs) > 0.1
+                    )
+
     for scheme in schemes:
         for u in range(num_u):
             allowed = None if candidate_beam_indices_by_ue is None else candidate_beam_indices_by_ue.get(u, [])
-            if scheme == "full_gamma":
-                top = _top_service_indices(meas, u, oracle_top_k, allowed)
-            else:
-                top = _top_service_indices(meas, u, k1, allowed)
+            top = tops_by_scheme[scheme][u]
             allowed_set = None if allowed is None else {int(i) for i in allowed}
             cands: List[ServiceCandidate] = []
             for m in top:
@@ -121,8 +156,6 @@ def make_reports(meas: MeasurementResult,
                     conflicts = set()
                 elif scheme == "baseline":
                     conflicts = set()
-                else:
-                    raise ValueError(f"Unknown feedback scheme: {scheme}")
                 cands.append(ServiceCandidate(
                     beam_index=int(m),
                     su_snr_db=float(meas.su_snr_db[u, m]),

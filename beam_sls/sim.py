@@ -394,7 +394,6 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
         meas = compute_gamma_measurement(ch.h_freq, tx_beams, rx_beams, beam_ids,
                                          tx_power_w_per_panel=tx_power_w_per_panel,
                                          noise_power_w=noise_w,
-                                         link_adapter=link_adapter,
                                          candidate_beam_indices_by_ue=candidate_beam_indices_by_ue,
                                          compute_backend=cfg["measurement"].get("gamma_backend", "numpy"),
                                          ue_batch_size=cfg["measurement"].get("gamma_ue_batch_size", 0))
@@ -409,13 +408,14 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
         _progress(cfg, f"[drop {drop+1}/{num_drops}] Gamma backend={meas.compute_backend}, elapsed={meas.elapsed_s:.3f}s; {meas.backend_status}")
         reports_by_scheme = make_reports(
             meas, beam_ids, schemes=feedback_schemes,
-            k1=int(cfg["feedback"].get("service_beam_top_k1", 2)),
+            k1=int(cfg["feedback"].get("service_beam_top_k1", 4)),
             oracle_top_k=int(cfg["feedback"].get("oracle_service_beam_top_k", 4)),
             k2=int(cfg["feedback"].get("conflict_top_k2", 3)),
             threshold_db=float(cfg["feedback"].get("conflict_sinr_threshold_db", 0.0)),
             ue_site_ids=ue_site_ids,
             ue_serving_cells=ue_serving_cells,
             candidate_beam_indices_by_ue=candidate_beam_indices_by_ue,
+            link_adapter=link_adapter,
         )
         site_rows, sector_rows = topology_to_rows(topo)
         for r in site_rows:
