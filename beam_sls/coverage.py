@@ -87,7 +87,7 @@ def _topology_for_grid_chunk(cfg: Dict, pts: List[Tuple[int, int, float, float]]
         az = np.rad2deg(np.arctan2(yy, xx))
         diffs = [abs(float(np.rad2deg(np.arctan2(np.sin(np.deg2rad(az-a)), np.cos(np.deg2rad(az-a)))))) for a in azs]
         cell = int(np.argmin(diffs)) if diffs else 0
-        ues.append(UE(uid, xx, yy, z_m=1.5, serving_cell=cell, site_id=0))
+        ues.append(UE(uid, xx, yy, z_m=float(topo_cfg.get("ue_height_m", 1.5)), serving_cell=cell, site_id=0))
     return Topology(ues=ues, sites=sites, sectors=sectors,
                     carrier_frequency_ghz=float(sc["carrier_frequency_ghz"]),
                     isd_m=isd, layout="coverage_grid",

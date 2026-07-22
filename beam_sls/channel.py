@@ -109,6 +109,9 @@ def generate_numpy_geometric_channel(topology: Topology,
             rel_az = _relative_angle_from_site(ue, site, boresight)
             base_tx_az = rel_az
             base_rx_az = np.pi + rel_az
+            horizontal_m = max(ue.distance_to_site_2d_m(site), 1e-9)
+            base_tx_el = float(np.arctan2(ue.z_m - site.z_m, horizontal_m))
+            base_rx_el = -base_tx_el
             delays = rng.exponential(scale=max(delay_spread_s, 1e-12), size=num_l)
             delays = delays - np.min(delays)
             powers = np.exp(-delays / max(delay_spread_s, 1e-12))
@@ -117,8 +120,8 @@ def generate_numpy_geometric_channel(topology: Topology,
             for l in range(num_l):
                 tx_az = base_tx_az + rng.normal(0.0, np.deg2rad(8.0))
                 rx_az = base_rx_az + rng.normal(0.0, np.deg2rad(20.0))
-                tx_el = rng.normal(0.0, np.deg2rad(3.0))
-                rx_el = rng.normal(0.0, np.deg2rad(10.0))
+                tx_el = base_tx_el + rng.normal(0.0, np.deg2rad(3.0))
+                rx_el = base_rx_el + rng.normal(0.0, np.deg2rad(10.0))
                 atx = steering_vector_from_array(tx_array, tx_az, tx_el)
                 arx = steering_vector_from_array(rx_array, rx_az, rx_el)
                 outer = np.outer(arx, np.conjugate(atx))

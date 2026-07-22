@@ -16,6 +16,7 @@ class ServiceCandidate:
     su_snr_db: float
     su_mcs: int
     conflict_beams: Set[int] = field(default_factory=set)
+    su_outage: bool = False
 
     def to_dict(self, beam_ids: Sequence[BeamId]) -> Dict:
         return {
@@ -23,6 +24,7 @@ class ServiceCandidate:
             "beam_id": beam_ids[self.beam_index].short(),
             "su_snr_db": self.su_snr_db,
             "su_mcs": self.su_mcs,
+            "su_outage": self.su_outage,
             "conflict_beams": [beam_ids[i].short() for i in sorted(self.conflict_beams)],
         }
 
@@ -126,6 +128,7 @@ def make_reports(meas: MeasurementResult,
                     su_snr_db=float(meas.su_snr_db[u, m]),
                     su_mcs=int(meas.su_mcs[u, m]),
                     conflict_beams=conflicts,
+                    su_outage=False if meas.su_outage is None else bool(meas.su_outage[u, m]),
                 ))
             rep = UEReport(ue_id=u,
                            scheme=scheme,

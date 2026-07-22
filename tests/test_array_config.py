@@ -1,4 +1,8 @@
-from beam_sls.codebook import ArrayConfig, dft_codebook_from_array, steering_vector_from_array
+import numpy as np
+
+from beam_sls.codebook import (ArrayConfig, build_network_tx_beams,
+                               dft_codebook_from_array, distance_range_vertical_samples,
+                               steering_vector_from_array)
 
 
 def test_requested_trp_array_config():
@@ -151,3 +155,152 @@ def test_three_site_global_36ue_config_exposes_36_tx_units():
     assert cfg["feedback"]["service_beam_top_k1"] == 56
     assert len({b.panel_key() for b in beam_ids}) == 36
     assert len(beam_ids) == 36 * 8
+
+
+def test_distance_range_vertical_codebook_has_downward_mainlobes():
+    cfg = {
+        "num_h": 1,
+        "num_v": 16,
+        "dH": 0.5,
+        "dV": 0.5,
+        "num_beams_h": 1,
+        "num_beams_v": 4,
+        "vertical_beam_mode": "distance_range",
+        "vertical_beam": {
+            "min_horizontal_distance_m": 35.0,
+            "max_horizontal_distance_m": 250.0,
+            "height_difference_m": 23.5,
+        },
+    }
+    array = ArrayConfig.from_dict(cfg)
+    samples = distance_range_vertical_samples(35.0, 250.0, 23.5, 4, 0.5)
+    codebook = dft_codebook_from_array(array, max_beams=4)
+
+    phases = np.asarray([x["vertical_phase_rad"] for x in samples])
+    assert codebook.shape == (4, 16)
+    assert np.all(phases < 0.0)
+    assert np.allclose(np.diff(phases), np.diff(phases)[0])
+    assert np.isclose(samples[0]["horizontal_distance_m"], 35.0)
+    assert np.isclose(samples[-1]["horizontal_distance_m"], 250.0)
+
+    elevation_grid_deg = np.linspace(-60.0, 20.0, 8001)
+    for beam, sample in zip(codebook, samples):
+        responses = np.asarray([
+            abs(np.vdot(steering_vector_from_array(array, 0.0, np.deg2rad(el)), beam))
+            for el in elevation_grid_deg
+        ])
+        peak_elevation_deg = float(elevation_grid_deg[int(np.argmax(responses))])
+        assert sample["elevation_deg"] < 0.0
+        assert sample["downtilt_deg"] > 0.0
+        assert peak_elevation_deg < 0.0
+        assert abs(peak_elevation_deg - sample["elevation_deg"]) < 0.02
+
+
+def test_distance_range_beam_metadata_is_written_to_beam_ids():
+    array = ArrayConfig.from_dict({
+        "num_h": 1,
+        "num_v": 8,
+        "num_beams_h": 1,
+        "num_beams_v": 4,
+        "vertical_beam_mode": "distance_range",
+        "vertical_beam": {
+            "min_horizontal_distance_m": 35.0,
+            "max_horizontal_distance_m": 250.0,
+            "bs_height_m": 25.0,
+            "ue_height_m": 1.5,
+        },
+    })
+    beam_ids, beams = build_network_tx_beams(1, 1, array, 4)
+
+    assert beams.shape == (4, 8)
+    assert all(beam.v_index is None for beam in beam_ids)
+    assert all(beam.vertical_phase_rad < 0.0 for beam in beam_ids)
+    assert all(beam.elevation_deg < 0.0 for beam in beam_ids)
+    assert all(beam.downtilt_deg > 0.0 for beam in beam_ids)
+    assert np.isclose(beam_ids[0].horizontal_distance_m, 35.0)
+    assert np.isclose(beam_ids[-1].horizontal_distance_m, 250.0)
+
+
+def test_distance_range_config_inherits_scenario_and_topology(tmp_path):
+    from beam_sls.config import load_config
+
+    config_path = tmp_path / "distance_range.yaml"
+    config_path.write_text("tx_array:\n  vertical_beam_mode: distance_range\n", encoding="utf-8")
+    cfg = load_config(config_path)
+    array = ArrayConfig.from_dict(cfg["tx_array"])
+
+    assert array.vertical_min_distance_m == cfg["scenario"]["min_ue_distance_m"]
+    assert array.vertical_max_distance_m == cfg["scenario"]["max_ue_distance_m"]
+    assert array.vertical_height_difference_m == cfg["topology"]["bs_height_m"] - cfg["topology"]["ue_height_m"]
+
+
+def test_numpy_geometric_channel_uses_downward_bs_to_ue_elevation():
+    from beam_sls.channel import generate_numpy_geometric_channel
+    from beam_sls.topology import Sector, Site, Topology, UE
+
+    cfg = {
+        "scenario": {
+            "carrier_frequency_ghz": 30.0,
+            "num_clusters": 1,
+            "delay_spread_ns": 1.0,
+            "shadow_fading_std_db": 0.0,
+            "pathloss_exponent": 2.0,
+        },
+        "measurement": {"num_freq_points": 1},
+        "system": {"bandwidth_mhz": 20.0},
+        "trp": {"num_trps_per_sector": 1},
+        "rf_architecture": {"txru_connectivity": "fully_connected", "num_txru": 1},
+    }
+    tx_array = ArrayConfig(num_h=1, num_v=16, num_txru=1)
+    rx_array = ArrayConfig(num_h=1, num_v=1)
+    topology = Topology(
+        ues=[UE(0, 100.0, 0.0, z_m=1.5, serving_cell=0, site_id=0)],
+        sites=[Site(0, 0.0, 0.0, 25.0)],
+        sectors=[Sector(0, 0, 0, 0.0)],
+        carrier_frequency_ghz=30.0,
+        isd_m=500.0,
+    )
+    channel = generate_numpy_geometric_channel(
+        topology, cfg, tx_array, rx_array, np.random.default_rng(4)
+    )
+
+    elevation_grid_deg = np.linspace(-60.0, 20.0, 8001)
+    responses = []
+    for elevation_deg in elevation_grid_deg:
+        beam = steering_vector_from_array(tx_array, 0.0, np.deg2rad(elevation_deg))
+        responses.append(abs(channel.h_freq[0, 0, 0, 0] @ beam))
+    peak_elevation_deg = float(elevation_grid_deg[int(np.argmax(responses))])
+
+    assert peak_elevation_deg < 0.0
+
+
+def test_distance_range_default_rf_path_builds_normalized_downward_beams():
+    from beam_sls.rf import resolve_rf_architecture
+
+    array = ArrayConfig.from_dict({
+        "model": "tr38901_panel",
+        "num_txru": 4,
+        "M": 16, "N": 16, "P": 2, "Mg": 2, "Ng": 1, "Mp": 1, "Np": 1,
+        "dH": 0.5, "dV": 0.5,
+        "beam_scope": "per_panel",
+        "num_beams_h": 4,
+        "num_beams_v": 4,
+        "vertical_beam_mode": "distance_range",
+        "vertical_beam": {
+            "min_horizontal_distance_m": 35.0,
+            "max_horizontal_distance_m": 250.0,
+            "height_difference_m": 23.5,
+        },
+    })
+    cfg = {"rf_architecture": {
+        "txru_connectivity": "panel_polarization_subarray",
+        "allow_independent_polarization_beams": True,
+        "num_txru": 4,
+    }}
+    rf = resolve_rf_architecture(cfg, array)
+    beam_ids, beams = build_network_tx_beams(1, 4, array, 16, [0], rf_architecture=rf)
+
+    assert beams.shape == (64, 1024)
+    assert np.allclose(np.linalg.norm(beams, axis=1), 1.0)
+    assert len({round(beam.vertical_phase_rad, 12) for beam in beam_ids}) == 4
+    assert all(beam.vertical_phase_rad < 0.0 and beam.elevation_deg < 0.0 for beam in beam_ids)

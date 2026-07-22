@@ -47,6 +47,24 @@ class BaseLinkAdapter:
     def tbler_from_sinr_lin(self, sinr_lin: float, mcs_index: int, num_allocated_re: int | None = None) -> float:
         return self.tbler_from_sinr_db(float(lin_to_db(sinr_lin)), mcs_index, num_allocated_re)
 
+    def is_outage_from_sinr_db(self,
+                               sinr_db: float,
+                               mcs_index: int | None = None,
+                               num_allocated_re: int | None = None) -> bool:
+        """Return whether even the ILLA-selected MCS misses the BLER target."""
+        mcs = self.select_mcs_from_sinr_db(sinr_db, num_allocated_re) if mcs_index is None else int(mcs_index)
+        tbler = float(self.tbler_from_sinr_db(sinr_db, mcs, num_allocated_re))
+        return (not np.isfinite(tbler)) or tbler > self.target_bler
+
+    def is_outage_from_sinr_lin(self,
+                                sinr_lin: float,
+                                mcs_index: int | None = None,
+                                num_allocated_re: int | None = None) -> bool:
+        """Return whether the selected MCS misses the target for linear SINR."""
+        mcs = self.select_mcs_from_sinr_lin(sinr_lin, num_allocated_re) if mcs_index is None else int(mcs_index)
+        tbler = float(self.tbler_from_sinr_lin(sinr_lin, mcs, num_allocated_re))
+        return (not np.isfinite(tbler)) or tbler > self.target_bler
+
     def tbs_bits(self, mcs_index: int) -> int:
         pdsch = self.cfg.get("pdsch", {})
         return tbs_bits_from_mcs(mcs_index,

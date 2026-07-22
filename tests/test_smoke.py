@@ -7,7 +7,7 @@ from beam_sls.config import load_config
 from beam_sls.feedback import ServiceCandidate, UEReport, make_reports
 from beam_sls.link import eesm, realized_sinr_grid, run_tti_loop
 from beam_sls.measurement import MeasurementResult, SparseGamma, compute_gamma_measurement
-from beam_sls.scheduler import ScheduledLink, ScheduleResult, exhaustive_schedule, normalize_domain_mode, schedule
+from beam_sls.scheduler import ScheduledLink, ScheduleResult, _evaluate_assignments, exhaustive_schedule, normalize_domain_mode, schedule
 from beam_sls.sim import build_ue_goodput_rows, run_simulation, schedule_similarity_rows, summarize_su_snr
 from beam_sls.topology import make_topology
 
@@ -409,3 +409,83 @@ def test_analysis_helpers_include_zero_ues_and_exact_pair_similarity():
     assert len(maxima) == 2
     assert snr_summary[0]["num_reported_candidate_samples"] == 3
     assert snr_summary[0]["avg_reported_su_snr_db"] == 2.0
+
+
+class _OutageAwareFakeAdapter:
+    target_bler = 0.1
+
+    @staticmethod
+    def select_mcs_from_sinr_lin(_sinr_lin):
+        return 3
+
+    @staticmethod
+    def is_outage_from_sinr_lin(sinr_lin, _mcs):
+        return bool(sinr_lin < 1.0)
+
+    @staticmethod
+    def rate_mbps(mcs):
+        return float(mcs * 10.0)
+
+
+def test_measurement_records_su_outage_separately_from_selected_mcs():
+    beam_ids = [
+        BeamId(cell=0, trp=0, panel=0, beam=0, global_index=0, tx_unit=0),
+    ]
+    meas = compute_gamma_measurement(
+        np.ones((1, 1, 1, 1, 1), dtype=np.complex128),
+        np.ones((1, 1), dtype=np.complex128),
+        np.ones((1, 1), dtype=np.complex128),
+        beam_ids,
+        tx_power_w_per_panel=1.0,
+        noise_power_w=10.0,
+        link_adapter=_OutageAwareFakeAdapter(),
+    )
+
+    assert meas.su_mcs[0, 0] == 3
+    assert bool(meas.su_outage[0, 0]) is True
+
+
+def test_su_outage_candidate_has_zero_rate_and_is_not_scheduled():
+    cfg = load_config(None)
+    cfg["scheduler"]["algorithm"] = "greedy"
+    cfg["_resolved"] = {"max_mu_order": 1}
+    beam_ids = [
+        BeamId(cell=0, trp=0, panel=0, beam=0, global_index=0, tx_unit=0),
+        BeamId(cell=0, trp=0, panel=1, beam=0, global_index=1, tx_unit=1),
+    ]
+    reports = [
+        UEReport(0, "baseline", [ServiceCandidate(0, -10.0, 3, su_outage=True)]),
+        UEReport(1, "baseline", [ServiceCandidate(1, 5.0, 4, su_outage=False)]),
+    ]
+
+    result = schedule(reports, beam_ids, cfg, link_adapter=_OutageAwareFakeAdapter())
+
+    assert [(link.ue_id, link.predicted_rate_mbps) for link in result.links] == [(1, 40.0)]
+    assert result.metadata["stats"]["num_su_outage_candidates"] == 1
+    assert result.metadata["stats"]["num_scheduled_outage"] == 0
+    assert result.links[0].to_dict(beam_ids)["predicted_outage"] is False
+
+
+def test_full_gamma_rechecks_outage_at_predicted_mu_sinr():
+    cfg = load_config(None)
+    beam_ids = [
+        BeamId(cell=0, trp=0, panel=0, beam=0, global_index=0, tx_unit=0),
+    ]
+    report = UEReport(
+        ue_id=0,
+        scheme="full_gamma",
+        candidates=[ServiceCandidate(0, 10.0, 3)],
+        full_gamma=np.asarray([[0.5]], dtype=float),
+        full_service_power_w=np.asarray([0.05], dtype=float),
+        full_noise_power_w=0.1,
+    )
+
+    utility, links = _evaluate_assignments(
+        [(0, 0)], [report], beam_ids, cfg, None,
+        link_adapter=_OutageAwareFakeAdapter(),
+    )
+
+    assert utility == 0.0
+    assert links[0].predicted_mcs == 3
+    assert links[0].predicted_outage is True
+    assert links[0].predicted_rate_mbps == 0.0

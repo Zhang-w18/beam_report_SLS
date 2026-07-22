@@ -8,7 +8,7 @@ import numpy as np
 
 from .codebook import BeamId
 from .feedback import UEReport
-from .mcs import rate_mbps_from_mcs, select_mcs_from_sinr_lin
+from .mcs import bler_from_sinr_db, rate_mbps_from_mcs, select_mcs_from_sinr_lin
 from .utils import lin_to_db
 
 
@@ -60,6 +60,7 @@ class ScheduledLink:
     predicted_sinr_db: float
     predicted_mcs: int
     predicted_rate_mbps: float
+    predicted_outage: bool = False
 
     def to_dict(self, beam_ids: Sequence[BeamId]) -> Dict:
         return {
@@ -69,6 +70,7 @@ class ScheduledLink:
             "predicted_sinr_db": self.predicted_sinr_db,
             "predicted_mcs": self.predicted_mcs,
             "predicted_rate_mbps": self.predicted_rate_mbps,
+            "predicted_outage": self.predicted_outage,
         }
 
 
@@ -201,6 +203,8 @@ def _aggregate_domain_stats(domains: Sequence[Dict]) -> Dict:
         "bound_pruned_count",
         "zero_upper_bound_pruned_reports",
         "num_scheduled",
+        "num_su_outage_candidates",
+        "num_scheduled_outage",
     }
     for d in domains:
         stats = d.get("stats", d)
@@ -280,19 +284,24 @@ def _evaluate_assignments(assignments: Sequence[Tuple[int, int]],
             pred_sinr_lin = s / max(den, 1e-30)
             if link_adapter is not None:
                 mcs = int(link_adapter.select_mcs_from_sinr_lin(float(pred_sinr_lin)))
+                outage = bool(link_adapter.is_outage_from_sinr_lin(float(pred_sinr_lin), mcs))
             else:
                 mcs = select_mcs_from_sinr_lin(pred_sinr_lin).index
+                outage = bool(bler_from_sinr_db(float(lin_to_db(pred_sinr_lin)), mcs) > 0.1)
             pred_sinr_db = float(lin_to_db(pred_sinr_lin))
         else:
             # Limited-feedback scheduler uses SU MCS/rate and an ID-only conflict
             # penalty for proposed reports.
             mcs = int(cand.su_mcs)
             pred_sinr_db = float(cand.su_snr_db)
+            outage = bool(cand.su_outage)
             for other_ue, other_b in assignments:
                 if other_ue != ue_id and other_b in cand.conflict_beams:
                     conflict_penalty += 1.0
 
-        if link_adapter is not None:
+        if outage:
+            r_mbps = 0.0
+        elif link_adapter is not None:
             r_mbps = float(link_adapter.rate_mbps(mcs))
         else:
             r_mbps = rate_mbps_from_mcs(mcs, **rate_kwargs)
@@ -301,7 +310,8 @@ def _evaluate_assignments(assignments: Sequence[Tuple[int, int]],
                                    beam_index=b,
                                    predicted_sinr_db=pred_sinr_db,
                                    predicted_mcs=mcs,
-                                   predicted_rate_mbps=r_mbps))
+                                   predicted_rate_mbps=r_mbps,
+                                   predicted_outage=outage))
     if scheme in ("topk_conflict_id", "threshold_conflict_set"):
         utility -= penalty_lambda * conflict_penalty
     return float(utility), links
@@ -313,6 +323,8 @@ def _candidate_rate_mbps(rep: UEReport,
                          link_adapter=None) -> float:
     cand = rep.candidate_by_beam(beam_index)
     if cand is None:
+        return 0.0
+    if cand.su_outage:
         return 0.0
     if link_adapter is not None:
         return float(link_adapter.rate_mbps(int(cand.su_mcs)))
@@ -420,6 +432,7 @@ def exhaustive_schedule(reports: List[UEReport],
     num_reports_input = len(reports)
     reports = [r for r in reports if r.candidates]
     num_reports_with_candidates = len(reports)
+    num_su_outage_candidates = sum(int(c.su_outage) for r in reports for c in r.candidates)
     best_val = 0.0
     best_links: List[ScheduledLink] = []
     scheme = reports[0].scheme if reports else "unknown"
@@ -460,6 +473,7 @@ def exhaustive_schedule(reports: List[UEReport],
         "domain_id": None if domain_id is None else int(domain_id),
         "num_reports_input": int(num_reports_input),
         "num_reports_with_candidates": int(num_reports_with_candidates),
+        "num_su_outage_candidates": int(num_su_outage_candidates),
         "num_reports_after_pruning": int(len(reports)),
         "max_mu_order": int(max_q),
         "raw_assignment_count": int(raw_assignment_count),
@@ -522,6 +536,7 @@ def exhaustive_schedule(reports: List[UEReport],
     dfs(0, [], set(), 0.0, [])
     stats["best_objective_value"] = float(best_val)
     stats["num_scheduled"] = int(len(best_links))
+    stats["num_scheduled_outage"] = int(sum(link.predicted_outage for link in best_links))
     metadata = {"domain_mode": domain_mode,
                 "domain_id": None if domain_id is None else int(domain_id),
                 "stats": stats}
@@ -541,6 +556,7 @@ def greedy_schedule(reports: List[UEReport],
     num_reports_input = len(reports)
     reports = [r for r in reports if r.candidates]
     scheme = reports[0].scheme if reports else "unknown"
+    num_su_outage_candidates = sum(int(c.su_outage) for r in reports for c in r.candidates)
     current: List[Tuple[int, int]] = []
     current_val = 0.0
     used_ues = set()
@@ -553,6 +569,7 @@ def greedy_schedule(reports: List[UEReport],
         "domain_id": None if domain_id is None else int(domain_id),
         "num_reports_input": int(num_reports_input),
         "num_reports_with_candidates": int(len(reports)),
+        "num_su_outage_candidates": int(num_su_outage_candidates),
         "max_mu_order": int(max_q),
         "evaluated_assignment_count": 0,
         "panel_pruned_count": 0,
@@ -592,6 +609,7 @@ def greedy_schedule(reports: List[UEReport],
     )
     stats["best_objective_value"] = float(final_val)
     stats["num_scheduled"] = int(len(final_links))
+    stats["num_scheduled_outage"] = int(sum(link.predicted_outage for link in final_links))
     metadata = {"domain_mode": domain_mode,
                 "domain_id": None if domain_id is None else int(domain_id),
                 "stats": stats}
@@ -615,11 +633,13 @@ def hard_conflict_greedy_schedule(reports: List[UEReport],
     num_reports_input = len(reports)
     reports = [r for r in reports if r.candidates]
     scheme = reports[0].scheme if reports else "unknown"
+    num_su_outage_candidates = sum(int(c.su_outage) for r in reports for c in r.candidates)
     rep_by_ue = {r.ue_id: r for r in reports}
     pool: Dict[Tuple[int, int], float] = {
         (r.ue_id, c.beam_index): _candidate_rate_mbps(r, c.beam_index, cfg, link_adapter)
         for r in reports
         for c in r.candidates
+        if not c.su_outage
     }
     initial_pool_size = len(pool)
     selected: List[Tuple[int, int]] = []
@@ -665,6 +685,7 @@ def hard_conflict_greedy_schedule(reports: List[UEReport],
         "domain_id": None if domain_id is None else int(domain_id),
         "num_reports_input": int(num_reports_input),
         "num_reports_with_candidates": int(len(reports)),
+        "num_su_outage_candidates": int(num_su_outage_candidates),
         "max_mu_order": int(max_q),
         "initial_candidate_pool_size": int(initial_pool_size),
         "removed_same_ue_candidates": int(removed_same_ue),
@@ -674,6 +695,7 @@ def hard_conflict_greedy_schedule(reports: List[UEReport],
         "node_weight": "su_rate_mbps",
         "best_objective_value": float(final_val),
         "num_scheduled": int(len(final_links)),
+        "num_scheduled_outage": int(sum(link.predicted_outage for link in final_links)),
     }
     metadata = {
         "domain_mode": domain_mode,

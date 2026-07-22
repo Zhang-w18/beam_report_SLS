@@ -37,6 +37,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "sector_width_deg": 120.0,
         "isd_m": 500.0,
         "bs_height_m": 25.0,
+        "ue_height_m": 1.5,
     },
     "system": {
         "bandwidth_mhz": 20.0,
@@ -259,13 +260,36 @@ def deep_update(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
     return out
 
 
+def _resolve_distance_range_vertical_beam(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    tx = cfg.get("tx_array", {})
+    vertical = tx.get("vertical_beam", {}) or {}
+    mode = str(tx.get("vertical_beam_mode", vertical.get("mode", "scan"))).lower()
+    if mode not in ("distance_range", "distance"):
+        return cfg
+
+    vertical = copy.deepcopy(vertical)
+    scenario = cfg.get("scenario", {})
+    topology = cfg.get("topology", {})
+    defaults = {
+        "min_horizontal_distance_m": scenario.get("min_ue_distance_m"),
+        "max_horizontal_distance_m": scenario.get("max_ue_distance_m"),
+        "bs_height_m": topology.get("bs_height_m", 25.0),
+        "ue_height_m": topology.get("ue_height_m", 1.5),
+    }
+    for key, value in defaults.items():
+        if vertical.get(key) is None:
+            vertical[key] = value
+    tx["vertical_beam"] = vertical
+    return cfg
+
+
 def load_config(path: str | Path | None) -> Dict[str, Any]:
     if path is None:
-        return copy.deepcopy(DEFAULT_CONFIG)
+        return _resolve_distance_range_vertical_beam(copy.deepcopy(DEFAULT_CONFIG))
     p = Path(path)
     with p.open("r", encoding="utf-8") as f:
         user_cfg = yaml.safe_load(f) or {}
-    return deep_update(DEFAULT_CONFIG, user_cfg)
+    return _resolve_distance_range_vertical_beam(deep_update(DEFAULT_CONFIG, user_cfg))
 
 
 def save_config(path: str | Path, cfg: Dict[str, Any]) -> None:

@@ -198,7 +198,8 @@ def drop_uniform_sector(num_ues: int,
                         sector: Sector,
                         site: Site,
                         rng: np.random.Generator,
-                        start_ue_id: int = 0) -> List[UE]:
+                        start_ue_id: int = 0,
+                        ue_height_m: float = 1.5) -> List[UE]:
     center = np.deg2rad(float(sector.azimuth_deg))
     half = np.deg2rad(float(sector.width_deg) / 2.0)
     ues: List[UE] = []
@@ -209,7 +210,7 @@ def drop_uniform_sector(num_ues: int,
         ues.append(UE(start_ue_id + k,
                       float(site.x_m + r * np.cos(a)),
                       float(site.y_m + r * np.sin(a)),
-                      z_m=1.5,
+                      z_m=float(ue_height_m),
                       serving_cell=sector.cell_id,
                       site_id=site.site_id))
     return ues
@@ -243,6 +244,7 @@ def make_topology(cfg: Dict, rng: np.random.Generator) -> Topology:
             site=site,
             rng=rng,
             start_ue_id=uid,
+            ue_height_m=float(topo_cfg.get("ue_height_m", 1.5)),
         )
         ues.extend(new_ues)
         uid += len(new_ues)

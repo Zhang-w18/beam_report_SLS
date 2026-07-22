@@ -423,6 +423,8 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
                         "beam_index": int(cand.beam_index),
                         "beam_id": beam_ids[cand.beam_index].short(),
                         "su_snr_db": float(cand.su_snr_db),
+                        "su_mcs": int(cand.su_mcs),
+                        "su_outage": bool(cand.su_outage),
                     })
 
         _progress(cfg, f"[drop {drop+1}/{num_drops}] scheduling {len(evaluation_cases)} evaluation cases")
@@ -452,6 +454,8 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
                                   "algorithm": case.algorithm,
                                   "objective_value": sched.objective_value,
                                   "num_scheduled": len(sched.links),
+                                  "num_outage": int(sum(link.predicted_outage for link in sched.links)),
+                                  "outage_occurred": bool(any(link.predicted_outage for link in sched.links)),
                                   "schedule_json": json.dumps(sched.to_dict(beam_ids), ensure_ascii=False)})
             scheduler_stat_rows.extend(_schedule_stat_rows(drop, case_id, sched))
             case_rng = np.random.default_rng()

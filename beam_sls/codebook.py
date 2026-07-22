@@ -60,6 +60,9 @@ class ArrayConfig:
     sampling_mode: str = "uniform"
     vertical_beam_mode: str = "scan"
     fixed_v_index: int | None = None
+    vertical_min_distance_m: float | None = None
+    vertical_max_distance_m: float | None = None
+    vertical_height_difference_m: float | None = None
     model: str = "legacy_upa"
     M: int | None = None
     N: int | None = None
@@ -133,6 +136,10 @@ class ArrayConfig:
             return None
         return int(self.num_beams_h) * int(self.num_beams_v)
 
+    @property
+    def uses_distance_range_vertical_beams(self) -> bool:
+        return str(self.vertical_beam_mode).lower() in ("distance_range", "distance")
+
     def to_dict(self) -> Dict[str, int | float | str | None]:
         return {
             "model": self.model,
@@ -151,6 +158,9 @@ class ArrayConfig:
             "sampling_mode": self.sampling_mode,
             "vertical_beam_mode": self.vertical_beam_mode,
             "fixed_v_index": self.fixed_v_index,
+            "vertical_min_distance_m": self.vertical_min_distance_m,
+            "vertical_max_distance_m": self.vertical_max_distance_m,
+            "vertical_height_difference_m": self.vertical_height_difference_m,
             "d_h_lambda": float(self.d_h_lambda),
             "d_v_lambda": float(self.d_v_lambda),
             "M": self.M,
@@ -176,6 +186,26 @@ class ArrayConfig:
         fixed_v = cfg.get("fixed_v_index", vertical_cfg.get("fixed_v_index", None))
         fixed_v_index = None if fixed_v is None else int(fixed_v)
         vertical_mode = str(cfg.get("vertical_beam_mode", vertical_cfg.get("mode", "scan"))).lower()
+        min_distance = vertical_cfg.get("min_horizontal_distance_m", cfg.get("vertical_min_distance_m"))
+        max_distance = vertical_cfg.get("max_horizontal_distance_m", cfg.get("vertical_max_distance_m"))
+        height_difference = vertical_cfg.get("height_difference_m", cfg.get("vertical_height_difference_m"))
+        if height_difference is None and vertical_cfg.get("bs_height_m") is not None and vertical_cfg.get("ue_height_m") is not None:
+            height_difference = float(vertical_cfg["bs_height_m"]) - float(vertical_cfg["ue_height_m"])
+        min_distance = None if min_distance is None else float(min_distance)
+        max_distance = None if max_distance is None else float(max_distance)
+        height_difference = None if height_difference is None else float(height_difference)
+        if vertical_mode in ("distance_range", "distance"):
+            if fixed_v_index is not None:
+                raise ValueError("distance_range vertical beams cannot be combined with fixed_v_index")
+            if min_distance is None or max_distance is None or height_difference is None:
+                raise ValueError(
+                    "distance_range vertical beams require min_horizontal_distance_m, "
+                    "max_horizontal_distance_m, and height_difference_m (or bs_height_m/ue_height_m)"
+                )
+            if not (0.0 < min_distance < max_distance):
+                raise ValueError("distance_range requires 0 < min_horizontal_distance_m < max_horizontal_distance_m")
+            if height_difference <= 0.0:
+                raise ValueError("distance_range requires BS height above UE height")
         sampling_mode = str(cfg.get("sampling_mode", cfg.get("codebook_sampling", "uniform"))).lower()
         beam_scope = normalize_beam_scope(cfg.get("beam_scope", "joint"))
         if model in ("tr38901_panel", "3gpp_panel", "trp_3gpp") or any(k in cfg for k in ("M", "N", "P", "Mg", "Ng", "Mp", "Np")):
@@ -201,6 +231,9 @@ class ArrayConfig:
                 sampling_mode=sampling_mode,
                 vertical_beam_mode=vertical_mode,
                 fixed_v_index=fixed_v_index,
+                vertical_min_distance_m=min_distance,
+                vertical_max_distance_m=max_distance,
+                vertical_height_difference_m=height_difference,
                 model="tr38901_panel",
                 M=M,
                 N=N,
@@ -229,6 +262,9 @@ class ArrayConfig:
             sampling_mode=sampling_mode,
             vertical_beam_mode=vertical_mode,
             fixed_v_index=fixed_v_index,
+            vertical_min_distance_m=min_distance,
+            vertical_max_distance_m=max_distance,
+            vertical_height_difference_m=height_difference,
             model="legacy_upa",
         )
 
@@ -316,8 +352,77 @@ def _spatial_dft_vector(num_h: int, num_v: int, h_index: int, v_index: int) -> n
     return np.kron(vv[:, int(v_index)], vh[:, int(h_index)]).astype(np.complex128)
 
 
-def _panel_padded_spatial_vector(array_cfg: ArrayConfig, panel_index: int, h_index: int, v_index: int) -> np.ndarray:
-    local = _spatial_dft_vector(array_cfg.panel_num_h, array_cfg.panel_num_v, h_index, v_index)
+def _spatial_phase_vector(num_h: int, num_v: int, h_index: int, vertical_phase_rad: float) -> np.ndarray:
+    """Spatial beam with a DFT horizontal vector and an arbitrary vertical phase step."""
+    vh = _dft_vectors(int(num_h))
+    v = np.arange(int(num_v))
+    vv = np.exp(1j * float(vertical_phase_rad) * v) / np.sqrt(float(num_v))
+    return np.kron(vv, vh[:, int(h_index)]).astype(np.complex128)
+
+
+def distance_range_vertical_samples(min_horizontal_distance_m: float,
+                                    max_horizontal_distance_m: float,
+                                    height_difference_m: float,
+                                    num_beams: int,
+                                    d_v_lambda: float = 0.5) -> List[Dict[str, float]]:
+    """Uniformly sample down-tilted vertical beams in spatial phase.
+
+    Positive elevation is upward in this module. Therefore positive geometric
+    downtilt maps to negative elevation and a negative vertical phase step.
+    Samples are ordered from the nearest to the farthest horizontal distance.
+    """
+    r_min = float(min_horizontal_distance_m)
+    r_max = float(max_horizontal_distance_m)
+    delta_h = float(height_difference_m)
+    count = int(num_beams)
+    d_v = float(d_v_lambda)
+    if not (0.0 < r_min < r_max):
+        raise ValueError("distance_range requires 0 < min_horizontal_distance_m < max_horizontal_distance_m")
+    if delta_h <= 0.0:
+        raise ValueError("distance_range requires height_difference_m > 0")
+    if count <= 0:
+        raise ValueError("distance_range requires num_beams_v > 0")
+    if d_v <= 0.0:
+        raise ValueError("distance_range requires d_v_lambda > 0")
+
+    near_downtilt = float(np.arctan2(delta_h, r_min))
+    far_downtilt = float(np.arctan2(delta_h, r_max))
+    near_phase = -2.0 * np.pi * d_v * np.sin(near_downtilt)
+    far_phase = -2.0 * np.pi * d_v * np.sin(far_downtilt)
+    phases = np.linspace(near_phase, far_phase, count)
+    out: List[Dict[str, float]] = []
+    for phase in phases:
+        elevation = float(np.arcsin(np.clip(float(phase) / (2.0 * np.pi * d_v), -1.0, 1.0)))
+        downtilt = -elevation
+        distance = float(delta_h / np.tan(downtilt))
+        out.append({
+            "vertical_phase_rad": float(phase),
+            "elevation_deg": float(np.rad2deg(elevation)),
+            "downtilt_deg": float(np.rad2deg(downtilt)),
+            "horizontal_distance_m": distance,
+        })
+    return out
+
+
+def _distance_samples_for_array(array_cfg: ArrayConfig) -> List[Dict[str, float]] | None:
+    if not array_cfg.uses_distance_range_vertical_beams:
+        return None
+    return distance_range_vertical_samples(
+        float(array_cfg.vertical_min_distance_m),
+        float(array_cfg.vertical_max_distance_m),
+        float(array_cfg.vertical_height_difference_m),
+        int(array_cfg.num_beams_v or array_cfg.codebook_num_v),
+        array_cfg.d_v_lambda,
+    )
+
+
+def _panel_padded_spatial_vector(array_cfg: ArrayConfig, panel_index: int, h_index: int,
+                                 v_index: int | None = None,
+                                 vertical_phase_rad: float | None = None) -> np.ndarray:
+    if vertical_phase_rad is None:
+        local = _spatial_dft_vector(array_cfg.panel_num_h, array_cfg.panel_num_v, h_index, int(v_index))
+    else:
+        local = _spatial_phase_vector(array_cfg.panel_num_h, array_cfg.panel_num_v, h_index, vertical_phase_rad)
     full_grid = np.zeros((array_cfg.num_v, array_cfg.num_h), dtype=np.complex128)
     p = int(panel_index)
     panel_cols = int(array_cfg.panel_grid_h)
@@ -337,17 +442,23 @@ def dft_2d_codebook(num_h: int,
                     num_beams_h: int | None = None,
                     num_beams_v: int | None = None,
                     fixed_v_index: int | None = None,
-                    sampling_mode: str = "uniform") -> np.ndarray:
+                    sampling_mode: str = "uniform",
+                    vertical_phases_rad: List[float] | None = None) -> np.ndarray:
     """Return DFT beams shaped [num_beams, num_ant]."""
     h_order = sampled_dft_indices(int(num_h), num_beams_h, sampling_mode)
-    if fixed_v_index is not None:
+    if vertical_phases_rad is not None:
+        v_order = list(vertical_phases_rad)
+    elif fixed_v_index is not None:
         v_order = [int(fixed_v_index) % int(num_v)]
     else:
         v_order = sampled_dft_indices(int(num_v), num_beams_v, sampling_mode)
     beams: List[np.ndarray] = []
     for ih in h_order:
         for iv in v_order:
-            spatial = _spatial_dft_vector(num_h, num_v, ih, iv)
+            if vertical_phases_rad is None:
+                spatial = _spatial_dft_vector(num_h, num_v, ih, int(iv))
+            else:
+                spatial = _spatial_phase_vector(num_h, num_v, ih, float(iv))
             beams.append(_expand_polarization(spatial, polarization_count))
     cb = np.asarray(beams, dtype=np.complex128)
     if max_beams is not None:
@@ -367,6 +478,8 @@ def _fixed_v_for_array(array_cfg: ArrayConfig, fixed_v_index: int | None = None)
 def dft_codebook_from_array(array_cfg: ArrayConfig, max_beams: int | None = None,
                             fixed_v_index: int | None = None) -> np.ndarray:
     scope = array_cfg.normalized_beam_scope
+    distance_samples = None if _fixed_v_for_array(array_cfg, fixed_v_index) is not None else _distance_samples_for_array(array_cfg)
+    vertical_phases = None if distance_samples is None else [x["vertical_phase_rad"] for x in distance_samples]
     if scope == "per_panel":
         # Backward-compatible API returns the local per-panel codebook. Network
         # TX beam construction uses zero-padded vectors via build_network_tx_beams().
@@ -375,13 +488,15 @@ def dft_codebook_from_array(array_cfg: ArrayConfig, max_beams: int | None = None
                                num_beams_h=array_cfg.num_beams_h,
                                num_beams_v=array_cfg.num_beams_v,
                                fixed_v_index=_fixed_v_for_array(array_cfg, fixed_v_index),
-                               sampling_mode=array_cfg.sampling_mode)
+                               sampling_mode=array_cfg.sampling_mode,
+                               vertical_phases_rad=vertical_phases)
     return dft_2d_codebook(array_cfg.num_h, array_cfg.num_v, max_beams=max_beams,
                            polarization_count=array_cfg.polarization_count,
                            num_beams_h=array_cfg.num_beams_h,
                            num_beams_v=array_cfg.num_beams_v,
                            fixed_v_index=_fixed_v_for_array(array_cfg, fixed_v_index),
-                           sampling_mode=array_cfg.sampling_mode)
+                           sampling_mode=array_cfg.sampling_mode,
+                           vertical_phases_rad=vertical_phases)
 
 
 def codebook_entries_from_array(array_cfg: ArrayConfig,
@@ -398,20 +513,25 @@ def codebook_entries_from_array(array_cfg: ArrayConfig,
     single polarization block so that different polarizations can use different beams.
     """
     fixed_v = _fixed_v_for_array(array_cfg, fixed_v_index)
+    distance_samples = None if fixed_v is not None else _distance_samples_for_array(array_cfg)
     entries: List[Dict] = []
     scope = normalize_beam_scope(force_scope) if force_scope is not None else array_cfg.normalized_beam_scope
     if scope in ("per_panel", "panel_polarization_subarray"):
         panels = [int(panel_index)] if panel_index is not None else list(range(array_cfg.num_array_panels))
         for p in panels:
             h_order = sampled_dft_indices(array_cfg.panel_num_h, array_cfg.num_beams_h, array_cfg.sampling_mode)
-            if fixed_v is not None:
-                v_order = [int(fixed_v) % array_cfg.panel_num_v]
+            if distance_samples is not None:
+                v_order = [{"v_index": None, **sample} for sample in distance_samples]
+            elif fixed_v is not None:
+                v_order = [{"v_index": int(fixed_v) % array_cfg.panel_num_v}]
             else:
-                v_order = sampled_dft_indices(array_cfg.panel_num_v, array_cfg.num_beams_v, array_cfg.sampling_mode)
+                v_order = [{"v_index": iv} for iv in sampled_dft_indices(array_cfg.panel_num_v, array_cfg.num_beams_v, array_cfg.sampling_mode)]
             local_count = 0
             for ih in h_order:
-                for iv in v_order:
-                    spatial = _panel_padded_spatial_vector(array_cfg, p, ih, iv)
+                for vertical in v_order:
+                    spatial = _panel_padded_spatial_vector(
+                        array_cfg, p, ih, vertical["v_index"], vertical.get("vertical_phase_rad")
+                    )
                     if scope == "panel_polarization_subarray":
                         vec = _expand_single_polarization(spatial, array_cfg.polarization_count, polarization_index)
                     else:
@@ -421,7 +541,11 @@ def codebook_entries_from_array(array_cfg: ArrayConfig,
                         "vector": vec,
                         "panel_index": p,
                         "h_index": int(ih),
-                        "v_index": int(iv),
+                        "v_index": vertical["v_index"],
+                        "vertical_phase_rad": vertical.get("vertical_phase_rad"),
+                        "elevation_deg": vertical.get("elevation_deg"),
+                        "downtilt_deg": vertical.get("downtilt_deg"),
+                        "horizontal_distance_m": vertical.get("horizontal_distance_m"),
                         "beam_scope": scope,
                         "polarization_index": None if polarization_index is None else int(polarization_index),
                         "codebook_size": int(array_cfg.per_panel_codebook_size),
@@ -434,21 +558,30 @@ def codebook_entries_from_array(array_cfg: ArrayConfig,
         return entries
 
     h_order = sampled_dft_indices(array_cfg.num_h, array_cfg.num_beams_h, array_cfg.sampling_mode)
-    if fixed_v is not None:
-        v_order = [int(fixed_v) % array_cfg.num_v]
+    if distance_samples is not None:
+        v_order = [{"v_index": None, **sample} for sample in distance_samples]
+    elif fixed_v is not None:
+        v_order = [{"v_index": int(fixed_v) % array_cfg.num_v}]
     else:
-        v_order = sampled_dft_indices(array_cfg.num_v, array_cfg.num_beams_v, array_cfg.sampling_mode)
+        v_order = [{"v_index": iv} for iv in sampled_dft_indices(array_cfg.num_v, array_cfg.num_beams_v, array_cfg.sampling_mode)]
     count = 0
     for ih in h_order:
-        for iv in v_order:
-            spatial = _spatial_dft_vector(array_cfg.num_h, array_cfg.num_v, ih, iv)
+        for vertical in v_order:
+            if vertical.get("vertical_phase_rad") is None:
+                spatial = _spatial_dft_vector(array_cfg.num_h, array_cfg.num_v, ih, vertical["v_index"])
+            else:
+                spatial = _spatial_phase_vector(array_cfg.num_h, array_cfg.num_v, ih, vertical["vertical_phase_rad"])
             vec = _expand_polarization(spatial, array_cfg.polarization_count)
             vec = vec / max(np.linalg.norm(vec), 1e-12)
             entries.append({
                 "vector": vec,
                 "panel_index": 0,
                 "h_index": int(ih),
-                "v_index": int(iv),
+                "v_index": vertical["v_index"],
+                "vertical_phase_rad": vertical.get("vertical_phase_rad"),
+                "elevation_deg": vertical.get("elevation_deg"),
+                "downtilt_deg": vertical.get("downtilt_deg"),
+                "horizontal_distance_m": vertical.get("horizontal_distance_m"),
                 "beam_scope": "joint",
                 "polarization_index": None,
                 "codebook_size": int(array_cfg.full_codebook_size),
@@ -503,6 +636,10 @@ class BeamId:
     polarization_index: int | None = None
     txru_index: int | None = None
     rf_connectivity: str | None = None
+    vertical_phase_rad: float | None = None
+    elevation_deg: float | None = None
+    downtilt_deg: float | None = None
+    horizontal_distance_m: float | None = None
 
     def panel_key(self) -> Tuple[int, int, int]:
         return (self.cell, self.trp, self.panel)
@@ -526,6 +663,10 @@ class BeamId:
             "polarization_index": None if self.polarization_index is None else int(self.polarization_index),
             "txru_index": None if self.txru_index is None else int(self.txru_index),
             "rf_connectivity": self.rf_connectivity,
+            "vertical_phase_rad": None if self.vertical_phase_rad is None else float(self.vertical_phase_rad),
+            "elevation_deg": None if self.elevation_deg is None else float(self.elevation_deg),
+            "downtilt_deg": None if self.downtilt_deg is None else float(self.downtilt_deg),
+            "horizontal_distance_m": None if self.horizontal_distance_m is None else float(self.horizontal_distance_m),
         }
 
 
@@ -546,7 +687,11 @@ def build_tx_beams(num_panels: int,
             beam_ids.append(BeamId(cell=0, trp=0, panel=p, beam=k, global_index=gi,
                                    tx_unit=p, h_index=ent["h_index"], v_index=ent["v_index"],
                                    beam_scope=ent["beam_scope"], codebook_size=ent["codebook_size"],
-                                   array_panel_index=ent["panel_index"]))
+                                   array_panel_index=ent["panel_index"],
+                                   vertical_phase_rad=ent.get("vertical_phase_rad"),
+                                   elevation_deg=ent.get("elevation_deg"),
+                                   downtilt_deg=ent.get("downtilt_deg"),
+                                   horizontal_distance_m=ent.get("horizontal_distance_m")))
             beam_vecs.append(ent["vector"])
             gi += 1
     return beam_ids, np.asarray(beam_vecs, dtype=np.complex128)
@@ -607,6 +752,10 @@ def build_network_tx_beams(num_cells: int,
                         polarization_index=ent.get("polarization_index"),
                         txru_index=unit.txru_index,
                         rf_connectivity=rf_architecture.connectivity,
+                        vertical_phase_rad=ent.get("vertical_phase_rad"),
+                        elevation_deg=ent.get("elevation_deg"),
+                        downtilt_deg=ent.get("downtilt_deg"),
+                        horizontal_distance_m=ent.get("horizontal_distance_m"),
                     ))
                     beam_vecs.append(ent["vector"])
                     gi += 1
@@ -627,7 +776,11 @@ def build_network_tx_beams(num_cells: int,
                                        tx_unit=tx_unit, h_index=ent["h_index"], v_index=ent["v_index"],
                                        beam_scope=ent["beam_scope"], codebook_size=ent["codebook_size"],
                                        array_panel_index=ent["panel_index"],
-                                       polarization_index=ent.get("polarization_index")))
+                                       polarization_index=ent.get("polarization_index"),
+                                       vertical_phase_rad=ent.get("vertical_phase_rad"),
+                                       elevation_deg=ent.get("elevation_deg"),
+                                       downtilt_deg=ent.get("downtilt_deg"),
+                                       horizontal_distance_m=ent.get("horizontal_distance_m")))
                 beam_vecs.append(ent["vector"])
                 gi += 1
             tx_unit += 1

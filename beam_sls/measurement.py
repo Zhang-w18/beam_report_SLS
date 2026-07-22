@@ -73,6 +73,7 @@ class MeasurementResult:
     selected_rx_beam: np.ndarray  # [ue, service_beam] rx beam index
     su_mcs: np.ndarray            # [ue, beam]
     su_snr_db: np.ndarray         # [ue, beam]
+    su_outage: np.ndarray | None = None  # [ue, beam], selected MCS misses target BLER
 
 
 def compute_gamma_measurement(h_freq: np.ndarray,
@@ -183,13 +184,21 @@ def compute_gamma_measurement(h_freq: np.ndarray,
     else:
         su_snr_db = lin_to_db(np.diagonal(gamma, axis1=1, axis2=2))
     su_mcs = np.zeros_like(su_snr_db, dtype=int)
+    su_outage = np.zeros_like(su_snr_db, dtype=bool)
     for u in range(num_u):
         for b in allowed_by_ue[u]:
             if link_adapter is not None:
-                su_mcs[u, b] = int(link_adapter.select_mcs_from_sinr_lin(float(gamma[u, b, b])))
+                sinr_lin = float(gamma[u, b, b])
+                su_mcs[u, b] = int(link_adapter.select_mcs_from_sinr_lin(sinr_lin))
+                su_outage[u, b] = bool(link_adapter.is_outage_from_sinr_lin(
+                    sinr_lin, int(su_mcs[u, b])
+                ))
             else:
-                from .mcs import select_mcs_from_sinr_lin
+                from .mcs import bler_from_sinr_db, select_mcs_from_sinr_lin
                 su_mcs[u, b] = select_mcs_from_sinr_lin(gamma[u, b, b]).index
+                su_outage[u, b] = bool(
+                    bler_from_sinr_db(float(su_snr_db[u, b]), int(su_mcs[u, b])) > 0.1
+                )
 
     return MeasurementResult(service_power_w=s,
                              interference_power_w=i_pow,
@@ -197,4 +206,5 @@ def compute_gamma_measurement(h_freq: np.ndarray,
                              noise_power_w=float(noise_power_w),
                              selected_rx_beam=selected,
                              su_mcs=su_mcs,
-                             su_snr_db=su_snr_db)
+                             su_snr_db=su_snr_db,
+                             su_outage=su_outage)

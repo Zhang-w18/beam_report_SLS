@@ -12,3 +12,4 @@ def test_sionna_sys_invalid_low_sinr_treated_as_error_probability_one():
     tbler = adapter.tbler_from_sinr_db(-20.0, 2)
     assert tbler == 1.0
     assert adapter.select_mcs_from_sinr_db(-20.0) >= 3
+    assert adapter.is_outage_from_sinr_db(-20.0) is True
