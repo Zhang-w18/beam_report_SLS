@@ -33,6 +33,8 @@ def test_smoke(tmp_path: Path):
     assert (tmp_path / "out" / "metrics" / "ue_goodput.csv").exists()
     assert (tmp_path / "out" / "metrics" / "schedule_similarity.csv").exists()
     assert (tmp_path / "out" / "metrics" / "su_snr_samples.csv").exists()
+    assert (tmp_path / "out" / "metrics" / "scheduler_iterations.csv").exists()
+    assert (tmp_path / "out" / "metrics" / "runtime_phases.csv").exists()
     assert (tmp_path / "out" / "figures" / "ue_goodput_cdf.png").exists()
 
 

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from itertools import combinations
-from typing import Dict, List, Sequence, Tuple
+from time import perf_counter
+from typing import Callable, Dict, List, Sequence, Tuple
 
 import numpy as np
 
@@ -101,18 +102,22 @@ def schedule(reports: List[UEReport],
              cfg: Dict,
              tbar_mbps: Dict[int, float] | None = None,
              link_adapter=None,
-             algorithm: str | None = None) -> ScheduleResult:
+             algorithm: str | None = None,
+             progress_callback: Callable[[str], None] | None = None) -> ScheduleResult:
     domain_mode = normalize_domain_mode(cfg["scheduler"].get("domain_mode", "global"))
     if domain_mode == "per_site_joint":
         return schedule_grouped_domains(reports, beam_ids, cfg, tbar_mbps, link_adapter,
                                         domain_mode=domain_mode, algorithm=algorithm,
-                                        group_key=lambda r: 0 if r.site_id is None else int(r.site_id))
+                                        group_key=lambda r: 0 if r.site_id is None else int(r.site_id),
+                                        progress_callback=progress_callback)
     if domain_mode == "per_sector_independent":
         return schedule_grouped_domains(reports, beam_ids, cfg, tbar_mbps, link_adapter,
                                         domain_mode=domain_mode, algorithm=algorithm,
-                                        group_key=lambda r: 0 if r.serving_cell is None else int(r.serving_cell))
+                                        group_key=lambda r: 0 if r.serving_cell is None else int(r.serving_cell),
+                                        progress_callback=progress_callback)
     return _schedule_single_domain(reports, beam_ids, cfg, tbar_mbps, link_adapter,
-                                   domain_id=None, domain_mode="global", algorithm=algorithm)
+                                   domain_id=None, domain_mode="global", algorithm=algorithm,
+                                   progress_callback=progress_callback)
 
 
 def _schedule_single_domain(reports: List[UEReport],
@@ -122,23 +127,27 @@ def _schedule_single_domain(reports: List[UEReport],
                             link_adapter=None,
                             domain_id: int | None = None,
                             domain_mode: str = "global",
-                            algorithm: str | None = None) -> ScheduleResult:
+                            algorithm: str | None = None,
+                            progress_callback: Callable[[str], None] | None = None) -> ScheduleResult:
     alg = str(algorithm or cfg["scheduler"].get("algorithm", "exhaustive"))
     if alg == "exhaustive":
         return exhaustive_schedule(reports, beam_ids, cfg, tbar_mbps, link_adapter,
                                    domain_id=domain_id, domain_mode=domain_mode)
     if alg == "greedy":
         return greedy_schedule(reports, beam_ids, cfg, tbar_mbps, link_adapter,
-                               domain_id=domain_id, domain_mode=domain_mode)
+                               domain_id=domain_id, domain_mode=domain_mode,
+                               progress_callback=progress_callback)
     if alg == "adaptive_lambda_greedy":
         return greedy_schedule(reports, beam_ids, cfg, tbar_mbps, link_adapter,
                                domain_id=domain_id, domain_mode=domain_mode,
                                force_adaptive_lambda=True,
-                               algorithm_name="adaptive_lambda_greedy")
+                               algorithm_name="adaptive_lambda_greedy",
+                               progress_callback=progress_callback)
     if alg == "hard_conflict_greedy":
         return hard_conflict_greedy_schedule(
             reports, beam_ids, cfg, tbar_mbps, link_adapter,
             domain_id=domain_id, domain_mode=domain_mode,
+            progress_callback=progress_callback,
         )
     raise ValueError(f"Unknown scheduler.algorithm={alg}")
 
@@ -150,7 +159,8 @@ def schedule_grouped_domains(reports: List[UEReport],
                              link_adapter=None,
                              domain_mode: str = "per_site_joint",
                              group_key=None,
-                             algorithm: str | None = None) -> ScheduleResult:
+                             algorithm: str | None = None,
+                             progress_callback: Callable[[str], None] | None = None) -> ScheduleResult:
     scheme = reports[0].scheme if reports else "unknown"
     key_fn = group_key or (lambda r: 0)
     by_domain: Dict[int, List[UEReport]] = {}
@@ -163,7 +173,8 @@ def schedule_grouped_domains(reports: List[UEReport],
     for domain_id in sorted(by_domain):
         res = _schedule_single_domain(by_domain[domain_id], beam_ids, cfg, tbar_mbps, link_adapter,
                                       domain_id=domain_id, domain_mode=domain_mode,
-                                      algorithm=algorithm)
+                                      algorithm=algorithm,
+                                      progress_callback=progress_callback)
         links.extend(res.links)
         objective += float(res.objective_value)
         domains.append(res.metadata)
@@ -543,6 +554,314 @@ def exhaustive_schedule(reports: List[UEReport],
     return ScheduleResult(scheme=scheme, objective_value=float(best_val), links=best_links, metadata=metadata)
 
 
+def _map_scheduler_sinr_lin(sinr_lin: np.ndarray,
+                            cfg: Dict,
+                            link_adapter=None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    values = np.asarray(sinr_lin, dtype=float)
+    if link_adapter is not None and hasattr(link_adapter, "map_sinr_lin"):
+        mcs, outage, rates = link_adapter.map_sinr_lin(values)
+        return (np.asarray(mcs, dtype=np.int32), np.asarray(outage, dtype=bool),
+                np.asarray(rates, dtype=float))
+
+    flat = values.reshape(-1)
+    mcs = np.empty(flat.size, dtype=np.int32)
+    outage = np.empty(flat.size, dtype=bool)
+    rates = np.empty(flat.size, dtype=float)
+    rate_kwargs = _rate_kwargs(cfg)
+    for i, value in enumerate(flat):
+        if link_adapter is not None:
+            selected = int(link_adapter.select_mcs_from_sinr_lin(float(value)))
+            is_outage = bool(link_adapter.is_outage_from_sinr_lin(float(value), selected))
+            rate = 0.0 if is_outage else float(link_adapter.rate_mbps(selected))
+        else:
+            selected = int(select_mcs_from_sinr_lin(float(value)).index)
+            is_outage = bool(bler_from_sinr_db(float(lin_to_db(value)), selected) > 0.1)
+            rate = 0.0 if is_outage else float(rate_mbps_from_mcs(selected, **rate_kwargs))
+        mcs[i] = selected
+        outage[i] = is_outage
+        rates[i] = rate
+    return mcs.reshape(values.shape), outage.reshape(values.shape), rates.reshape(values.shape)
+
+
+def _node_arrays(reports: Sequence[UEReport],
+                 beam_ids: Sequence[BeamId],
+                 cfg: Dict,
+                 tbar_mbps: Dict[int, float] | None,
+                 link_adapter=None):
+    nodes = [(r, c) for r in reports for c in r.candidates]
+    ue_ids = np.asarray([r.ue_id for r, _ in nodes], dtype=np.int32)
+    beam_indices = np.asarray([c.beam_index for _, c in nodes], dtype=np.int32)
+    panel_keys = [beam_ids[int(b)].panel_key() for b in beam_indices]
+    weights = np.asarray([_pf_weight(r.ue_id, cfg, tbar_mbps) for r, _ in nodes], dtype=float)
+    rates = np.asarray([
+        0.0 if c.su_outage else (
+            float(link_adapter.rate_mbps(int(c.su_mcs))) if link_adapter is not None
+            else float(rate_mbps_from_mcs(int(c.su_mcs), **_rate_kwargs(cfg)))
+        )
+        for _, c in nodes
+    ], dtype=float)
+    return nodes, ue_ids, beam_indices, panel_keys, weights, rates
+
+
+def _round_progress(progress_callback: Callable[[str], None] | None,
+                    domain_id: int | None,
+                    q: int,
+                    max_q: int,
+                    candidates: int,
+                    elapsed_s: float) -> None:
+    if progress_callback is None:
+        return
+    domain = "" if domain_id is None else f"domain={domain_id}, "
+    progress_callback(f"{domain}q={q}/{max_q}, candidates={candidates}, elapsed={elapsed_s:.3f}s")
+
+
+def _optimized_limited_greedy_schedule(reports: List[UEReport],
+                                        beam_ids: Sequence[BeamId],
+                                        cfg: Dict,
+                                        tbar_mbps: Dict[int, float] | None,
+                                        link_adapter,
+                                        domain_id: int | None,
+                                        domain_mode: str,
+                                        force_adaptive_lambda: bool,
+                                        algorithm_name: str,
+                                        progress_callback: Callable[[str], None] | None) -> ScheduleResult:
+    started = perf_counter()
+    max_q = _effective_max_mu_order(cfg)
+    num_reports_input = len(reports)
+    reports = [r for r in reports if r.candidates]
+    scheme = reports[0].scheme if reports else "unknown"
+    nodes, ue_ids, beam_indices, panel_keys, weights, rates = _node_arrays(
+        reports, beam_ids, cfg, tbar_mbps, link_adapter,
+    )
+    count = len(nodes)
+    penalty_info = _resolve_conflict_penalty(
+        reports, cfg, link_adapter, force_adaptive=force_adaptive_lambda,
+    )
+    penalty_lambda = float(penalty_info["conflict_penalty_lambda_mbps"])
+    adjacency = np.zeros((count, count), dtype=np.uint8)
+    if scheme in ("topk_conflict_id", "threshold_conflict_set"):
+        for i, (_, cand) in enumerate(nodes):
+            if not cand.conflict_beams:
+                continue
+            for j in range(count):
+                if ue_ids[j] != ue_ids[i] and int(beam_indices[j]) in cand.conflict_beams:
+                    adjacency[i, j] = 1
+
+    base_utility = weights * rates
+    conflict_increment = np.zeros(count, dtype=float)
+    selected: List[int] = []
+    used_ues: set[int] = set()
+    used_panel_keys: set = set()
+    current_val = 0.0
+    use_panel_constraint = bool(cfg["scheduler"].get("use_panel_constraint", True))
+    rounds: List[Dict] = []
+    evaluated_count = 0
+    panel_pruned_count = 0
+
+    while len(selected) < max_q:
+        q = len(selected) + 1
+        remaining = np.asarray([int(u) not in used_ues for u in ue_ids], dtype=bool)
+        remaining_count = int(np.count_nonzero(remaining))
+        if use_panel_constraint:
+            panel_legal = np.asarray([key not in used_panel_keys for key in panel_keys], dtype=bool)
+            pruned = int(np.count_nonzero(remaining & ~panel_legal))
+        else:
+            panel_legal = np.ones(count, dtype=bool)
+            pruned = 0
+        eligible = remaining & panel_legal
+        eligible_indices = np.flatnonzero(eligible)
+        candidate_count = int(eligible_indices.size)
+        panel_pruned_count += pruned
+        evaluated_count += candidate_count
+        chosen = None
+        best_delta = 0.0
+        if candidate_count:
+            delta = base_utility[eligible_indices] - penalty_lambda * conflict_increment[eligible_indices]
+            local = int(np.argmax(delta))
+            if float(delta[local]) > 0.0:
+                chosen = int(eligible_indices[local])
+                best_delta = float(delta[local])
+        elapsed = float(perf_counter() - started)
+        rounds.append({
+            "q": int(q),
+            "remaining_candidate_count": remaining_count,
+            "evaluated_candidate_count": candidate_count,
+            "panel_pruned_count": pruned,
+            "elapsed_s": elapsed,
+        })
+        _round_progress(progress_callback, domain_id, q, max_q, candidate_count, elapsed)
+        if chosen is None:
+            break
+        selected.append(chosen)
+        used_ues.add(int(ue_ids[chosen]))
+        if use_panel_constraint:
+            used_panel_keys.add(panel_keys[chosen])
+        current_val += best_delta
+        if count:
+            conflict_increment += adjacency[:, chosen].astype(float) + adjacency[chosen, :].astype(float)
+
+    assignments = [(int(ue_ids[i]), int(beam_indices[i])) for i in selected]
+    final_val, final_links = _evaluate_assignments(
+        assignments, reports, beam_ids, cfg, tbar_mbps, link_adapter,
+        penalty_lambda=penalty_lambda,
+    )
+    stats = {
+        "algorithm": algorithm_name,
+        "implementation": "v2.10_incremental_limited_feedback",
+        "domain_id": None if domain_id is None else int(domain_id),
+        "num_reports_input": int(num_reports_input),
+        "num_reports_with_candidates": int(len(reports)),
+        "num_su_outage_candidates": int(sum(int(c.su_outage) for r in reports for c in r.candidates)),
+        "max_mu_order": int(max_q),
+        "evaluated_assignment_count": int(evaluated_count),
+        "panel_pruned_count": int(panel_pruned_count),
+        "candidate_node_count": int(count),
+        "directed_conflict_edge_count": int(np.sum(adjacency)),
+        "rounds": rounds,
+        "scheduler_domain_elapsed_s": float(perf_counter() - started),
+        **penalty_info,
+        "best_objective_value": float(final_val),
+        "num_scheduled": int(len(final_links)),
+        "num_scheduled_outage": int(sum(link.predicted_outage for link in final_links)),
+    }
+    metadata = {"domain_mode": domain_mode,
+                "domain_id": None if domain_id is None else int(domain_id),
+                "stats": stats}
+    return ScheduleResult(scheme=scheme, objective_value=float(final_val), links=final_links, metadata=metadata)
+
+
+def _optimized_full_gamma_greedy_schedule(reports: List[UEReport],
+                                           beam_ids: Sequence[BeamId],
+                                           cfg: Dict,
+                                           tbar_mbps: Dict[int, float] | None,
+                                           link_adapter,
+                                           domain_id: int | None,
+                                           domain_mode: str,
+                                           algorithm_name: str,
+                                           progress_callback: Callable[[str], None] | None) -> ScheduleResult:
+    started = perf_counter()
+    max_q = _effective_max_mu_order(cfg)
+    num_reports_input = len(reports)
+    reports = [r for r in reports if r.candidates]
+    scheme = reports[0].scheme if reports else "unknown"
+    nodes, ue_ids, beam_indices, panel_keys, weights, _ = _node_arrays(
+        reports, beam_ids, cfg, tbar_mbps, link_adapter,
+    )
+    count = len(nodes)
+    signal = np.asarray([
+        float(r.full_service_power_w[int(c.beam_index)]) for r, c in nodes
+    ], dtype=float) if count else np.asarray([], dtype=float)
+    noise = np.asarray([
+        float(r.full_noise_power_w) for r, _ in nodes
+    ], dtype=float) if count else np.asarray([], dtype=float)
+    interference = np.zeros((count, count), dtype=float)
+    for i, (rep, cand) in enumerate(nodes):
+        s = signal[i]
+        n = noise[i]
+        for j in range(count):
+            g = float(rep.full_gamma[int(cand.beam_index), int(beam_indices[j])])
+            interference[i, j] = max(0.0, s / max(g, 1e-30) - n)
+
+    selected: List[int] = []
+    selected_den = np.asarray([], dtype=float)
+    incoming_den = noise.copy()
+    used_ues: set[int] = set()
+    used_panel_keys: set = set()
+    current_val = 0.0
+    use_panel_constraint = bool(cfg["scheduler"].get("use_panel_constraint", True))
+    rounds: List[Dict] = []
+    evaluated_count = 0
+    panel_pruned_count = 0
+
+    while len(selected) < max_q:
+        q = len(selected) + 1
+        remaining = np.asarray([int(u) not in used_ues for u in ue_ids], dtype=bool)
+        remaining_count = int(np.count_nonzero(remaining))
+        if use_panel_constraint:
+            panel_legal = np.asarray([key not in used_panel_keys for key in panel_keys], dtype=bool)
+            pruned = int(np.count_nonzero(remaining & ~panel_legal))
+        else:
+            panel_legal = np.ones(count, dtype=bool)
+            pruned = 0
+        eligible_indices = np.flatnonzero(remaining & panel_legal)
+        candidate_count = int(eligible_indices.size)
+        panel_pruned_count += pruned
+        evaluated_count += candidate_count
+        chosen = None
+        best_val = current_val
+        best_delta = 0.0
+        if candidate_count:
+            new_sinr = signal[eligible_indices] / np.maximum(incoming_den[eligible_indices], 1e-30)
+            if selected:
+                selected_idx = np.asarray(selected, dtype=int)
+                existing_den = selected_den[:, None] + interference[np.ix_(selected_idx, eligible_indices)]
+                existing_sinr = signal[selected_idx, None] / np.maximum(existing_den, 1e-30)
+                trial_sinr = np.vstack((existing_sinr, new_sinr[None, :]))
+                _, _, trial_rates = _map_scheduler_sinr_lin(trial_sinr, cfg, link_adapter)
+                trial_utility = (
+                    np.sum(weights[selected_idx, None] * trial_rates[:-1, :], axis=0)
+                    + weights[eligible_indices] * trial_rates[-1, :]
+                )
+            else:
+                _, _, trial_rates = _map_scheduler_sinr_lin(new_sinr, cfg, link_adapter)
+                trial_utility = weights[eligible_indices] * trial_rates
+            delta = trial_utility - current_val
+            local = int(np.argmax(delta))
+            if float(delta[local]) > 0.0:
+                chosen = int(eligible_indices[local])
+                best_delta = float(delta[local])
+                best_val = float(trial_utility[local])
+        elapsed = float(perf_counter() - started)
+        rounds.append({
+            "q": int(q),
+            "remaining_candidate_count": remaining_count,
+            "evaluated_candidate_count": candidate_count,
+            "panel_pruned_count": pruned,
+            "elapsed_s": elapsed,
+        })
+        _round_progress(progress_callback, domain_id, q, max_q, candidate_count, elapsed)
+        if chosen is None:
+            break
+
+        if selected:
+            selected_idx = np.asarray(selected, dtype=int)
+            selected_den = selected_den + interference[selected_idx, chosen]
+        selected_den = np.append(selected_den, incoming_den[chosen])
+        incoming_den = incoming_den + interference[:, chosen]
+        selected.append(chosen)
+        used_ues.add(int(ue_ids[chosen]))
+        if use_panel_constraint:
+            used_panel_keys.add(panel_keys[chosen])
+        current_val = best_val
+
+    assignments = [(int(ue_ids[i]), int(beam_indices[i])) for i in selected]
+    final_val, final_links = _evaluate_assignments(
+        assignments, reports, beam_ids, cfg, tbar_mbps, link_adapter,
+    )
+    stats = {
+        "algorithm": algorithm_name,
+        "implementation": "v2.10_incremental_vectorized_full_gamma",
+        "domain_id": None if domain_id is None else int(domain_id),
+        "num_reports_input": int(num_reports_input),
+        "num_reports_with_candidates": int(len(reports)),
+        "num_su_outage_candidates": int(sum(int(c.su_outage) for r in reports for c in r.candidates)),
+        "max_mu_order": int(max_q),
+        "evaluated_assignment_count": int(evaluated_count),
+        "panel_pruned_count": int(panel_pruned_count),
+        "candidate_node_count": int(count),
+        "interference_matrix_elements": int(interference.size),
+        "rounds": rounds,
+        "scheduler_domain_elapsed_s": float(perf_counter() - started),
+        "best_objective_value": float(final_val),
+        "num_scheduled": int(len(final_links)),
+        "num_scheduled_outage": int(sum(link.predicted_outage for link in final_links)),
+    }
+    metadata = {"domain_mode": domain_mode,
+                "domain_id": None if domain_id is None else int(domain_id),
+                "stats": stats}
+    return ScheduleResult(scheme=scheme, objective_value=float(final_val), links=final_links, metadata=metadata)
+
+
 def greedy_schedule(reports: List[UEReport],
                     beam_ids: Sequence[BeamId],
                     cfg: Dict,
@@ -551,7 +870,37 @@ def greedy_schedule(reports: List[UEReport],
                     domain_id: int | None = None,
                     domain_mode: str = "global",
                     force_adaptive_lambda: bool = False,
-                    algorithm_name: str = "greedy") -> ScheduleResult:
+                    algorithm_name: str = "greedy",
+                    progress_callback: Callable[[str], None] | None = None) -> ScheduleResult:
+    if not bool(cfg["scheduler"].get("optimized_greedy", True)):
+        return _legacy_greedy_schedule(
+            reports, beam_ids, cfg, tbar_mbps, link_adapter, domain_id, domain_mode,
+            force_adaptive_lambda, algorithm_name, progress_callback,
+        )
+    active_reports = [r for r in reports if r.candidates]
+    scheme = active_reports[0].scheme if active_reports else "unknown"
+    if scheme == "full_gamma":
+        return _optimized_full_gamma_greedy_schedule(
+            reports, beam_ids, cfg, tbar_mbps, link_adapter, domain_id, domain_mode,
+            algorithm_name, progress_callback,
+        )
+    return _optimized_limited_greedy_schedule(
+        reports, beam_ids, cfg, tbar_mbps, link_adapter, domain_id, domain_mode,
+        force_adaptive_lambda, algorithm_name, progress_callback,
+    )
+
+
+def _legacy_greedy_schedule(reports: List[UEReport],
+                            beam_ids: Sequence[BeamId],
+                            cfg: Dict,
+                            tbar_mbps: Dict[int, float] | None = None,
+                            link_adapter=None,
+                            domain_id: int | None = None,
+                            domain_mode: str = "global",
+                            force_adaptive_lambda: bool = False,
+                            algorithm_name: str = "greedy",
+                            progress_callback: Callable[[str], None] | None = None) -> ScheduleResult:
+    started = perf_counter()
     max_q = _effective_max_mu_order(cfg)
     num_reports_input = len(reports)
     reports = [r for r in reports if r.candidates]
@@ -566,6 +915,7 @@ def greedy_schedule(reports: List[UEReport],
     penalty_lambda = float(penalty_info["conflict_penalty_lambda_mbps"])
     stats = {
         "algorithm": algorithm_name,
+        "implementation": "v2.9_reference_greedy",
         "domain_id": None if domain_id is None else int(domain_id),
         "num_reports_input": int(num_reports_input),
         "num_reports_with_candidates": int(len(reports)),
@@ -575,8 +925,13 @@ def greedy_schedule(reports: List[UEReport],
         "panel_pruned_count": 0,
         **penalty_info,
     }
+    rounds: List[Dict] = []
 
     while len(current) < max_q:
+        q = len(current) + 1
+        evaluated_before = int(stats["evaluated_assignment_count"])
+        pruned_before = int(stats["panel_pruned_count"])
+        remaining_count = sum(len(r.candidates) for r in reports if r.ue_id not in used_ues)
         best_delta = 0.0
         best_assignment = None
         best_val = current_val
@@ -598,6 +953,16 @@ def greedy_schedule(reports: List[UEReport],
                     best_delta = delta
                     best_assignment = (r.ue_id, c.beam_index)
                     best_val = val
+        candidate_count = int(stats["evaluated_assignment_count"]) - evaluated_before
+        elapsed = float(perf_counter() - started)
+        rounds.append({
+            "q": int(q),
+            "remaining_candidate_count": int(remaining_count),
+            "evaluated_candidate_count": int(candidate_count),
+            "panel_pruned_count": int(stats["panel_pruned_count"]) - pruned_before,
+            "elapsed_s": elapsed,
+        })
+        _round_progress(progress_callback, domain_id, q, max_q, candidate_count, elapsed)
         if best_assignment is None:
             break
         current.append(best_assignment)
@@ -610,6 +975,8 @@ def greedy_schedule(reports: List[UEReport],
     stats["best_objective_value"] = float(final_val)
     stats["num_scheduled"] = int(len(final_links))
     stats["num_scheduled_outage"] = int(sum(link.predicted_outage for link in final_links))
+    stats["rounds"] = rounds
+    stats["scheduler_domain_elapsed_s"] = float(perf_counter() - started)
     metadata = {"domain_mode": domain_mode,
                 "domain_id": None if domain_id is None else int(domain_id),
                 "stats": stats}
@@ -622,13 +989,15 @@ def hard_conflict_greedy_schedule(reports: List[UEReport],
                                   tbar_mbps: Dict[int, float] | None = None,
                                   link_adapter=None,
                                   domain_id: int | None = None,
-                                  domain_mode: str = "global") -> ScheduleResult:
+                                  domain_mode: str = "global",
+                                  progress_callback: Callable[[str], None] | None = None) -> ScheduleResult:
     """Greedy maximum-weight independent set over reported (UE, beam) nodes.
 
     Selecting one node removes the selected UE's other nodes and only the
     conflicting candidate nodes of other UEs. It never removes an entire UE
     merely because one of that UE's candidate beams conflicts.
     """
+    started = perf_counter()
     max_q = _effective_max_mu_order(cfg)
     num_reports_input = len(reports)
     reports = [r for r in reports if r.candidates]
@@ -647,6 +1016,7 @@ def hard_conflict_greedy_schedule(reports: List[UEReport],
     removed_conflict = 0
     removed_panel = 0
     use_panel_constraint = bool(cfg["scheduler"].get("use_panel_constraint", True))
+    rounds: List[Dict] = []
 
     def conflicts(a: Tuple[int, int], b: Tuple[int, int]) -> bool:
         ua, ba = a
@@ -659,6 +1029,9 @@ def hard_conflict_greedy_schedule(reports: List[UEReport],
         )
 
     while pool and len(selected) < max_q:
+        q = len(selected) + 1
+        candidate_count = len(pool)
+        removed_panel_before = removed_panel
         # The tuple suffix gives deterministic tie-breaking across runs.
         chosen = min(pool, key=lambda node: (-pool[node], node[0], node[1]))
         selected.append(chosen)
@@ -676,12 +1049,22 @@ def hard_conflict_greedy_schedule(reports: List[UEReport],
             elif use_panel_constraint and beam_ids[node[1]].panel_key() == chosen_panel:
                 del pool[node]
                 removed_panel += 1
+        elapsed = float(perf_counter() - started)
+        rounds.append({
+            "q": int(q),
+            "remaining_candidate_count": int(candidate_count),
+            "evaluated_candidate_count": int(candidate_count),
+            "panel_pruned_count": int(removed_panel - removed_panel_before),
+            "elapsed_s": elapsed,
+        })
+        _round_progress(progress_callback, domain_id, q, max_q, candidate_count, elapsed)
 
     final_val, final_links = _evaluate_assignments(
         selected, reports, beam_ids, cfg, tbar_mbps, link_adapter, penalty_lambda=0.0,
     )
     stats = {
         "algorithm": "hard_conflict_greedy",
+        "implementation": "v2.10_candidate_pool_hard_conflict",
         "domain_id": None if domain_id is None else int(domain_id),
         "num_reports_input": int(num_reports_input),
         "num_reports_with_candidates": int(len(reports)),
@@ -696,6 +1079,8 @@ def hard_conflict_greedy_schedule(reports: List[UEReport],
         "best_objective_value": float(final_val),
         "num_scheduled": int(len(final_links)),
         "num_scheduled_outage": int(sum(link.predicted_outage for link in final_links)),
+        "rounds": rounds,
+        "scheduler_domain_elapsed_s": float(perf_counter() - started),
     }
     metadata = {
         "domain_mode": domain_mode,

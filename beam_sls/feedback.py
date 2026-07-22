@@ -40,15 +40,16 @@ class UEReport:
     full_gamma: np.ndarray | None = None
     full_service_power_w: np.ndarray | None = None
     full_noise_power_w: float | None = None
+    _candidate_by_beam_map: Dict[int, ServiceCandidate] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._candidate_by_beam_map = {int(c.beam_index): c for c in self.candidates}
 
     def candidate_indices(self) -> List[int]:
         return [c.beam_index for c in self.candidates]
 
     def candidate_by_beam(self, b: int) -> ServiceCandidate | None:
-        for c in self.candidates:
-            if c.beam_index == b:
-                return c
-        return None
+        return self._candidate_by_beam_map.get(int(b))
 
     def to_dict(self, beam_ids: Sequence[BeamId]) -> Dict:
         return {
@@ -112,21 +113,31 @@ def make_reports(meas: MeasurementResult,
     # In the normal simulation link_adapter is always provided. The fallback
     # keeps manually constructed MeasurementResult objects/tests compatible.
     for u, selected_beams in enumerate(selected_for_adaptation):
-        for m in selected_beams:
-            sinr_lin = float(meas.gamma[u, m, m])
-            if link_adapter is not None:
-                mcs = int(link_adapter.select_mcs_from_sinr_lin(sinr_lin))
-                outage = bool(link_adapter.is_outage_from_sinr_lin(sinr_lin, mcs))
-                meas.su_mcs[u, m] = mcs
+        beams = sorted(selected_beams)
+        if not beams:
+            continue
+        sinr_values = np.asarray([float(meas.gamma[u, m, m]) for m in beams], dtype=float)
+        if link_adapter is not None and hasattr(link_adapter, "map_sinr_lin"):
+            mcs_values, outage_values, _ = link_adapter.map_sinr_lin(sinr_values)
+            for m, mcs, outage in zip(beams, np.asarray(mcs_values), np.asarray(outage_values)):
+                meas.su_mcs[u, m] = int(mcs)
                 if meas.su_outage is not None:
-                    meas.su_outage[u, m] = outage
-            elif int(meas.su_mcs[u, m]) < 0:
-                mcs = int(select_mcs_from_sinr_lin(sinr_lin).index)
-                meas.su_mcs[u, m] = mcs
-                if meas.su_outage is not None:
-                    meas.su_outage[u, m] = bool(
-                        bler_from_sinr_db(float(meas.su_snr_db[u, m]), mcs) > 0.1
-                    )
+                    meas.su_outage[u, m] = bool(outage)
+        else:
+            for m, sinr_lin in zip(beams, sinr_values):
+                if link_adapter is not None:
+                    mcs = int(link_adapter.select_mcs_from_sinr_lin(float(sinr_lin)))
+                    outage = bool(link_adapter.is_outage_from_sinr_lin(float(sinr_lin), mcs))
+                    meas.su_mcs[u, m] = mcs
+                    if meas.su_outage is not None:
+                        meas.su_outage[u, m] = outage
+                elif int(meas.su_mcs[u, m]) < 0:
+                    mcs = int(select_mcs_from_sinr_lin(float(sinr_lin)).index)
+                    meas.su_mcs[u, m] = mcs
+                    if meas.su_outage is not None:
+                        meas.su_outage[u, m] = bool(
+                            bler_from_sinr_db(float(meas.su_snr_db[u, m]), mcs) > 0.1
+                        )
 
     for scheme in schemes:
         for u in range(num_u):

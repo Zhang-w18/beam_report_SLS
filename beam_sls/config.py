@@ -182,6 +182,20 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # used when one report scheme is evaluated with multiple algorithms.
         "algorithm_by_scheme": {},
         "use_panel_constraint": True,
+        # v2.10 optimized greedy keeps the v2.9 implementation available as a
+        # reference path for regression checks.
+        "optimized_greedy": True,
+        # Scheduler-only SINR decision lookup. Actual TTI link evaluation keeps
+        # using the original link-abstraction backend.
+        "link_lookup": {
+            "enabled": True,
+            "sinr_min_db": -40.0,
+            "sinr_max_db": 80.0,
+            "scan_step_db": 0.01,
+            "refine_tolerance_db": 1e-6,
+            "boundary_guard_db": 1e-5,
+            "validation_points": 257,
+        },
         "exhaustive_pruning": {
             "enabled": True,
             "sort_by_upper_bound": True,

@@ -5,6 +5,7 @@ import json
 import os
 from itertools import combinations
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
@@ -16,7 +17,7 @@ from .coverage import compute_coverage_heatmap_standard_sampling, compute_fixed_
 from .evaluation import EvaluationCase, resolve_evaluation_plan
 from .feedback import make_reports
 from .link import LinkEvalRow, run_tti_loop
-from .link_adaptation import make_link_adapter
+from .link_adaptation import make_link_adapter, make_scheduler_link_adapter
 from .measurement import compute_gamma_measurement
 from .rf import resolve_rf_architecture, resolved_max_mu_order, tx_units_per_sector
 from .plotting import plot_bar, plot_best_beam_heatmap, plot_cdf, plot_heatmap, plot_topology
@@ -120,6 +121,7 @@ def _schedule_stat_rows(drop: int, scheme: str, sched) -> List[Dict[str, Any]]:
     if domains:
         for d in domains:
             stats = dict(d.get("stats", {}))
+            stats.pop("rounds", None)
             row = {
                 "drop": int(drop),
                 "scheme": scheme,
@@ -146,6 +148,7 @@ def _schedule_stat_rows(drop: int, scheme: str, sched) -> List[Dict[str, Any]]:
             rows.append(row)
         return rows
     stats = dict(meta.get("stats", {}))
+    stats.pop("rounds", None)
     row = {
         "drop": int(drop),
         "scheme": scheme,
@@ -157,6 +160,45 @@ def _schedule_stat_rows(drop: int, scheme: str, sched) -> List[Dict[str, Any]]:
     }
     row.update(stats)
     rows.append(row)
+    return rows
+
+
+def _counter_snapshot(adapter) -> Dict[str, int]:
+    if adapter is None or not hasattr(adapter, "snapshot_counters"):
+        return {}
+    return {k: int(v) for k, v in adapter.snapshot_counters().items()}
+
+
+def _counter_delta(before: Dict[str, int], after: Dict[str, int], prefix: str = "") -> Dict[str, int]:
+    keys = set(before) | set(after)
+    return {f"{prefix}{key}": int(after.get(key, 0) - before.get(key, 0)) for key in sorted(keys)}
+
+
+def _attach_case_scheduler_metrics(sched, metrics: Dict[str, Any]) -> None:
+    meta = getattr(sched, "metadata", {}) or {}
+    if meta.get("domains"):
+        meta.setdefault("aggregate_stats", {}).update(metrics)
+    else:
+        meta.setdefault("stats", {}).update(metrics)
+
+
+def _schedule_iteration_rows(drop: int, case_id: str, sched) -> List[Dict[str, Any]]:
+    meta = getattr(sched, "metadata", {}) or {}
+    domains = meta.get("domains") or [meta]
+    rows: List[Dict[str, Any]] = []
+    for domain in domains:
+        stats = domain.get("stats", {})
+        domain_id = domain.get("domain_id", stats.get("domain_id"))
+        for round_row in stats.get("rounds", []) or []:
+            rows.append({
+                "drop": int(drop),
+                "case_id": case_id,
+                "feedback_scheme": sched.feedback_scheme or sched.scheme,
+                "algorithm": sched.algorithm or meta.get("algorithm"),
+                "domain_mode": meta.get("domain_mode", "global"),
+                "domain_id": domain_id,
+                **dict(round_row),
+            })
     return rows
 
 
@@ -290,7 +332,19 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
         write_json(out_dir / "sionna_import_probe.json", SionnaImportProbe().run())
 
     link_adapter = make_link_adapter(cfg)
-    write_json(out_dir / "link_abstraction_status.json", link_adapter.status.__dict__)
+    scheduler_link_adapter = make_scheduler_link_adapter(link_adapter, cfg)
+    link_status = dict(link_adapter.status.__dict__)
+    if scheduler_link_adapter is not link_adapter and hasattr(scheduler_link_adapter, "status"):
+        link_status["scheduler_lookup"] = dict(scheduler_link_adapter.status)
+    write_json(out_dir / "link_abstraction_status.json", link_status)
+    if scheduler_link_adapter is not link_adapter:
+        lookup_status = scheduler_link_adapter.status
+        _progress(
+            cfg,
+            "[init] scheduler link lookup ready, "
+            f"regions={lookup_status['num_decision_regions']}, "
+            f"elapsed={lookup_status['build_elapsed_s']:.3f}s",
+        )
 
     rng_master = np.random.default_rng(int(cfg["system"].get("random_seed", 1)))
     tx_cfg = ArrayConfig.from_dict(cfg["tx_array"])
@@ -352,6 +406,16 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     report_rows: List[Dict[str, Any]] = []
     su_snr_sample_rows: List[Dict[str, Any]] = []
     scheduler_stat_rows: List[Dict[str, Any]] = []
+    scheduler_iteration_rows: List[Dict[str, Any]] = []
+    runtime_phase_rows: List[Dict[str, Any]] = []
+    if scheduler_link_adapter is not link_adapter:
+        runtime_phase_rows.append({
+            "drop": -1,
+            "case_id": "all",
+            "phase": "scheduler_link_lookup_build",
+            "elapsed_s": float(scheduler_link_adapter.status["build_elapsed_s"]),
+            **_counter_snapshot(scheduler_link_adapter),
+        })
     tbar_by_scheme: Dict[str, Dict[int, float]] = {}
     channel_backend_rows: List[Dict[str, Any]] = []
     gamma_backend_rows: List[Dict[str, Any]] = []
@@ -406,6 +470,8 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             "elapsed_s": float(meas.elapsed_s),
         })
         _progress(cfg, f"[drop {drop+1}/{num_drops}] Gamma backend={meas.compute_backend}, elapsed={meas.elapsed_s:.3f}s; {meas.backend_status}")
+        feedback_started = perf_counter()
+        feedback_counters_before = _counter_snapshot(scheduler_link_adapter)
         reports_by_scheme = make_reports(
             meas, beam_ids, schemes=feedback_schemes,
             k1=int(cfg["feedback"].get("service_beam_top_k1", 4)),
@@ -415,8 +481,19 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             ue_site_ids=ue_site_ids,
             ue_serving_cells=ue_serving_cells,
             candidate_beam_indices_by_ue=candidate_beam_indices_by_ue,
-            link_adapter=link_adapter,
+            link_adapter=scheduler_link_adapter,
         )
+        feedback_elapsed_s = float(perf_counter() - feedback_started)
+        feedback_counter_delta = _counter_delta(
+            feedback_counters_before, _counter_snapshot(scheduler_link_adapter), prefix="",
+        )
+        runtime_phase_rows.append({
+            "drop": int(drop),
+            "case_id": "all",
+            "phase": "feedback_generation",
+            "elapsed_s": feedback_elapsed_s,
+            **feedback_counter_delta,
+        })
         site_rows, sector_rows = topology_to_rows(topo)
         for r in site_rows:
             rr = dict(r); rr["drop"] = drop; site_rows_all.append(rr)
@@ -452,17 +529,41 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
         # Every case starts from the same ACK random stream for cleaner paired
         # comparisons. OLLA state remains isolated by case_id.
         common_link_rng_state = copy.deepcopy(rng.bit_generator.state)
-        for case in evaluation_cases:
+        for case_index, case in enumerate(evaluation_cases, start=1):
             scheme = case.feedback_scheme
             case_id = case.case_id
+            case_prefix = f"[drop {drop+1}/{num_drops}][case {case_index}/{len(evaluation_cases)}] {case_id}"
+            _progress(cfg, f"{case_prefix} started")
+            scheduler_started = perf_counter()
+            scheduler_counters_before = _counter_snapshot(scheduler_link_adapter)
             sched = schedule(
                 reports_by_scheme[scheme], beam_ids, cfg, tbar_by_scheme.get(case_id),
-                link_adapter=link_adapter, algorithm=case.algorithm,
+                link_adapter=scheduler_link_adapter, algorithm=case.algorithm,
+                progress_callback=lambda message, prefix=case_prefix: _progress(cfg, f"{prefix} {message}"),
+            )
+            scheduler_elapsed_s = float(perf_counter() - scheduler_started)
+            scheduler_counter_delta = _counter_delta(
+                scheduler_counters_before, _counter_snapshot(scheduler_link_adapter),
+                prefix="scheduler_",
             )
             sched.case_id = case_id
             sched.feedback_scheme = scheme
             sched.algorithm = case.algorithm
             sched.metadata["algorithm"] = case.algorithm
+            case_metrics = {
+                "scheduler_elapsed_s": scheduler_elapsed_s,
+                **scheduler_counter_delta,
+            }
+            _attach_case_scheduler_metrics(sched, case_metrics)
+            _progress(cfg, f"{case_prefix} scheduler finished, elapsed={scheduler_elapsed_s:.3f}s")
+            scheduler_iteration_rows.extend(_schedule_iteration_rows(drop, case_id, sched))
+            runtime_phase_rows.append({
+                "drop": int(drop),
+                "case_id": case_id,
+                "phase": "scheduler",
+                "elapsed_s": scheduler_elapsed_s,
+                **scheduler_counter_delta,
+            })
             scheduled_pair_sets[(drop, case_id)] = {
                 (int(link.ue_id), int(link.beam_index)) for link in sched.links
             }
@@ -475,13 +576,31 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
                                   "num_outage": int(sum(link.predicted_outage for link in sched.links)),
                                   "outage_occurred": bool(any(link.predicted_outage for link in sched.links)),
                                   "schedule_json": json.dumps(sched.to_dict(beam_ids), ensure_ascii=False)})
-            scheduler_stat_rows.extend(_schedule_stat_rows(drop, case_id, sched))
             case_rng = np.random.default_rng()
             case_rng.bit_generator.state = copy.deepcopy(common_link_rng_state)
             rng_state_before_link_eval = copy.deepcopy(case_rng.bit_generator.state)
+            link_eval_started = perf_counter()
+            link_counters_before = _counter_snapshot(link_adapter)
             link_rows, olla_state = run_tti_loop(sched, ch.h_freq, tx_beams, rx_beams, beam_ids, meas,
                                                  tx_power_w_per_panel, cfg, drop, case_rng, olla_state,
                                                  link_adapter=link_adapter)
+            link_eval_elapsed_s = float(perf_counter() - link_eval_started)
+            link_counter_delta = _counter_delta(
+                link_counters_before, _counter_snapshot(link_adapter), prefix="link_evaluation_",
+            )
+            _attach_case_scheduler_metrics(sched, {
+                "link_evaluation_elapsed_s": link_eval_elapsed_s,
+                **link_counter_delta,
+            })
+            scheduler_stat_rows.extend(_schedule_stat_rows(drop, case_id, sched))
+            runtime_phase_rows.append({
+                "drop": int(drop),
+                "case_id": case_id,
+                "phase": "link_evaluation",
+                "elapsed_s": link_eval_elapsed_s,
+                **link_counter_delta,
+            })
+            _progress(cfg, f"{case_prefix} finished, link_eval_elapsed={link_eval_elapsed_s:.3f}s")
             all_link_rows.extend(link_rows)
             if case_id == baseline_reference and upper_bound_enabled:
                 upper_sched = ScheduleResult(
@@ -540,6 +659,8 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     write_csv(out_dir / "metrics" / "gamma_measurement_backend.csv", gamma_backend_rows)
     write_csv(out_dir / "metrics" / "reports.csv", report_rows)
     write_csv(out_dir / "metrics" / "scheduler_stats.csv", scheduler_stat_rows)
+    write_csv(out_dir / "metrics" / "scheduler_iterations.csv", scheduler_iteration_rows)
+    write_csv(out_dir / "metrics" / "runtime_phases.csv", runtime_phase_rows)
     write_csv(out_dir / "metrics" / "channel_backend.csv", channel_backend_rows)
 
     ue_goodput_rows = build_ue_goodput_rows(
