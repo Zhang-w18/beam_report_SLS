@@ -26,7 +26,6 @@ topology:
   bs_height_m: 25.0
 
 system:
-  bandwidth_mhz: 20.0
   subcarrier_spacing_khz: 120.0
   # The simulator divides this network-wide power over 36 TX units.
   # 42.542 dBm network total gives approximately 33 dBm per TRP and 27 dBm/TXRU.

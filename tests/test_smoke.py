@@ -13,6 +13,7 @@ from beam_sls.sim import (build_paired_case_debug_lines,
                           run_simulation, schedule_similarity_rows,
                           summarize_scheduled_ue_su_throughput, summarize_su_snr)
 from beam_sls.topology import make_topology
+from beam_sls.utils import occupied_bandwidth_hz
 
 
 def test_smoke(tmp_path: Path):
@@ -130,6 +131,14 @@ def test_eesm_high_sinr_is_finite():
     val = eesm([1e12, 1e12, 1e12], beta_db=5.0)
     assert val == val
     assert val != float("inf")
+
+
+def test_occupied_bandwidth_is_derived_from_prbs_and_scs():
+    cfg = {
+        "system": {"subcarrier_spacing_khz": 120.0},
+        "pdsch": {"num_prbs": 132},
+    }
+    assert occupied_bandwidth_hz(cfg) == 190.08e6
 
 
 def test_actual_mcs_uses_realized_post_scheduling_sinr():

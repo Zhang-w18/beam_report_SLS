@@ -1,21 +1,21 @@
-# Three-site global scheduling configuration for v2.7.
+# Three-site global scheduling configuration for v2.10/v2.11 diagnostics.
 # Physical scheduling capacity:
-#   3 sites * 3 sector/TRPs per site * 2 TXRUs per TRP = 18 concurrent links.
+# 3 sites * 3 sector/TRPs per site * 2 TXRUs per TRP = 18 concurrent links.
 #
 # TX array:
-#   (M,N,P,Mg,Ng,Mp,Np) = (8,16,2,1,1,1,1)
-#   256 antenna elements, one physical panel, two polarizations, two TXRUs.
+# (M,N,P,Mg,Ng,Mp,Np) = (8,16,2,1,1,1,1)
+# 256 antenna elements, one physical panel, two polarizations, two TXRUs.
 #
 # RX array:
-#   (M,N,P,Mg,Ng,Mp,Np) = (4,1,2,1,1,1,1)
-#   8 antenna elements, one physical panel, two polarizations.
+# (M,N,P,Mg,Ng,Mp,Np) = (4,1,2,1,1,1,1)
+# 8 antenna elements, one physical panel, two polarizations.
 #
 # TX beam scanning:
-#   16 horizontal beams * 4 distance-range vertical beams = 64 beams per TXRU.
-#   18 TX units * 64 beams = 1152 network-wide TX beam candidates.
+# 16 horizontal beams * 4 distance-range vertical beams = 64 beams per TXRU.
+# 18 TX units * 64 beams = 1152 network-wide TX beam candidates.
 
 scenario:
-  name: urban_macro_v2_7_three_site_global_18ue_distance_range_v4_5ue_eval_matrix
+  name: urban_macro_v2_10_three_site_global_18ue_distance_range_v4_5ue_eval_matrix
   carrier_frequency_ghz: 30.0
   channel_model: sionna_tr38901_uma
   min_ue_distance_m: 35.0
@@ -134,9 +134,9 @@ beam:
   one_beam_per_panel: true
 
 measurement:
-  # Use 4 frequency samples first to reduce memory pressure.
-  # Increase only after the strict Sionna run is stable.
-  num_freq_points: 4
+  # Use 16 frequency samples as the current wideband accuracy/memory tradeoff.
+  # Increase further only after the strict Sionna run is stable.
+  num_freq_points: 16
   compute_full_gamma: true
   frequency_average: linear_power
   gamma_backend: cupy
@@ -168,7 +168,7 @@ scheduler:
   domain_mode: global
   objective: sum_rate
   # Global aggregate capacity:
-  #   9 TRPs * 2 TXRUs per TRP = 18.
+  # 9 TRPs * 2 TXRUs per TRP = 18.
   max_mu_order: 18
   # The automatic RF cap is resolved per TRP, so the global limit is
   # explicitly enforced by max_mu_order and the TX-unit constraint.
@@ -181,13 +181,21 @@ scheduler:
     zero_upper_bound: true
     branch_and_bound: true
   conflict_penalty_lambda: 0.35
-  conflict_penalty_mode: fixed
+  conflict_penalty_mode: adaptive
   adaptive_lambda_alpha: 0.20
   unknown_interference_policy: zero
   pf_tbar_init_mbps: 1.0
 
 analysis:
   baseline_no_interference_upper_bound: true
+  # Compare only the two case pairs under investigation. The compact report is
+  # written to metrics/paired_case_debug.txt; link_tti.csv also records
+  # ack_random_uniform and link_position.
+  paired_case_debug:
+    enabled: true
+    pairs:
+      - [baseline__greedy, threshold_conflict_set__greedy]
+      - [topk_conflict_id__hard_conflict_greedy, threshold_conflict_set__hard_conflict_greedy]
 
 link_abstraction:
   mode: sionna_sys_precomputed_bler
@@ -197,7 +205,7 @@ link_abstraction:
   eesm_beta_db: 5.0
   olla_enabled: true
   olla_warmup_tti: 50
-  olla_step_db: 0.5
+  olla_step_db: 0.1
   harq_enabled: true
   bler_curve_slope: 1.1
   fallback_snr_min_db: -8.0

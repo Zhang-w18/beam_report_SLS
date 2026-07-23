@@ -23,7 +23,8 @@ from .rf import resolve_rf_architecture, resolved_max_mu_order, tx_units_per_sec
 from .plotting import plot_bar, plot_best_beam_heatmap, plot_cdf, plot_heatmap, plot_topology
 from .scheduler import ScheduleResult, is_sector_domain_mode, is_site_domain_mode, normalize_domain_mode, schedule
 from .topology import make_topology, topology_to_rows
-from .utils import dbm_to_watt, ensure_dir, percentile, thermal_noise_watt, watt_to_dbm, write_csv, write_json
+from .utils import (dbm_to_watt, ensure_dir, occupied_bandwidth_hz, percentile,
+                    thermal_noise_watt, watt_to_dbm, write_csv, write_json)
 
 
 BASELINE_NO_INTERFERENCE_SCHEME = "baseline_no_interference_upper_bound"
@@ -511,7 +512,16 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     cases_by_id = evaluation_plan.cases_by_id
     cfg.setdefault("_resolved", {})["evaluation_cases"] = [case.to_dict() for case in evaluation_cases]
     cfg["_resolved"]["evaluation_references"] = dict(evaluation_plan.references)
+    noise_bw_hz = occupied_bandwidth_hz(cfg)
+    cfg["_resolved"]["occupied_bandwidth_hz"] = noise_bw_hz
+    cfg["_resolved"]["occupied_bandwidth_mhz"] = noise_bw_hz / 1e6
     save_config(out_dir / "resolved_config.yaml", cfg)
+    _progress(
+        cfg,
+        "[init] occupied bandwidth="
+        f"{noise_bw_hz / 1e6:.3f} MHz "
+        "(derived from pdsch.num_prbs and system.subcarrier_spacing_khz)",
+    )
 
     if cfg.get("sionna", {}).get("enable_import_probe", True):
         write_json(out_dir / "sionna_import_probe.json", SionnaImportProbe().run())
@@ -576,7 +586,6 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
         tx_power_w_per_panel = total_tx_power_w / num_tx_units
     else:
         tx_power_w_per_panel = total_tx_power_w
-    noise_bw_hz = int(cfg["pdsch"]["num_prbs"]) * 12.0 * float(cfg["system"].get("subcarrier_spacing_khz", 120.0)) * 1e3
     noise_w = thermal_noise_watt(noise_bw_hz,
                                  noise_density_dbm_per_hz=float(cfg["noise"].get("thermal_noise_density_dbm_per_hz", -174.0)),
                                  noise_figure_db=float(cfg["noise"].get("ue_noise_figure_db", 7.0)))
@@ -835,6 +844,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             "olla_warmup_tti": olla_warmup_tti,
             "num_measured_tti": num_tti,
             "scheduler_domain_mode": domain_mode,
+            "occupied_bandwidth_mhz": float(noise_bw_hz / 1e6),
             "noise_dbm": float(watt_to_dbm(noise_w)),
             "tx_power_per_tx_unit_dbm": float(watt_to_dbm(tx_power_w_per_panel)),
             "avg_su_snr_db": _domain_metric(meas.su_snr_db, candidate_beam_indices_by_ue, np.mean),

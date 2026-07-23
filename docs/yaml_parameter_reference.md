@@ -43,8 +43,7 @@
 
 | 参数 | 含义 | 典型取值 / 范围 | 说明 |
 |---|---|---|---|
-| `bandwidth_mhz` | 系统带宽 | 正数 | 用于频点采样范围和噪声带宽近似。 |
-| `subcarrier_spacing_khz` | SCS | `15/30/60/120` 等 | 用于噪声带宽近似。 |
+| `subcarrier_spacing_khz` | SCS | `15/30/60/120` 等 | 与 `pdsch.num_prbs` 一起唯一确定有效占用带宽。 |
 | `tx_power_dbm` | 发射功率 | dBm | 默认按 TX unit 平均分配。 |
 | `num_drops` | 随机 drop 数 | 正整数 | 越大统计越稳定，仿真越慢。 |
 | `num_tti_per_drop` | 每个 drop 的 TTI 数 | 正整数 | OLLA/HARQ 风格随机 ACK 统计使用。 |
@@ -57,11 +56,23 @@
 
 | 参数 | 含义 | 典型取值 / 范围 | 说明 |
 |---|---|---|---|
-| `num_prbs` | PRB 数 | 正整数 | 用于 TBS/goodput 近似。 |
+| `num_prbs` | PRB 数 | 正整数 | 用于 TBS/goodput，并与 SCS 一起确定信道频率跨度和噪声带宽。 |
 | `num_symbols` | PDSCH OFDM symbols | `1~14` | 默认 `12`。 |
 | `dmrs_overhead_re_per_prb` | 每 PRB DMRS 开销 RE | 非负整数 | 用于 TBS 近似。 |
 | `num_layers_per_ue` | 每 UE 层数 | 正整数 | 当前主流程默认 single-layer。 |
 | `slot_duration_ms` | slot 时长 | 正数，单位 ms | 用于 Mbps 换算。 |
+
+有效占用带宽不再单独配置，而是统一计算为：
+
+\[
+B_{\mathrm{occupied}} =
+\mathrm{num\_prbs}\times 12\times
+\mathrm{subcarrier\_spacing\_khz}\times 10^3.
+\]
+
+例如 `132 PRB × 12 × 120 kHz = 190.08 MHz`。该值同时用于信道频率采样跨度和
+热噪声积分带宽，并写入 `resolved_config.yaml` 的
+`_resolved.occupied_bandwidth_mhz` 以及 `metrics/drops.csv`。
 
 ---
 

@@ -2219,7 +2219,6 @@ scenario:
   statistics_region: center_site
 
 system:
-  bandwidth_mhz: 20
   subcarrier_spacing_khz: 120
   tx_power_dbm: 33
   num_drops: 100
@@ -2229,7 +2228,7 @@ system:
 
 pdsch:
   allocation_mode: full_bandwidth
-  num_prbs: auto_from_bandwidth
+  num_prbs: 132
   num_symbols: 12
   start_symbol: 2
   dmrs_overhead_re_per_prb: configurable

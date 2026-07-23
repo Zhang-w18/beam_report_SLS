@@ -8,7 +8,7 @@ import numpy as np
 from .codebook import ArrayConfig, steering_vector_from_array
 from .rf import resolve_rf_architecture, trps_per_sector
 from .topology import Sector, Site, Topology, UE
-from .utils import db_to_lin
+from .utils import db_to_lin, occupied_bandwidth_hz
 
 
 class ChannelBackendError(RuntimeError):
@@ -86,7 +86,7 @@ def generate_numpy_geometric_channel(topology: Topology,
     tx_units = _tx_units_from_topology(topology, cfg, tx_array)
 
     num_f = int(meas["num_freq_points"])
-    bw_hz = float(cfg["system"]["bandwidth_mhz"]) * 1e6
+    bw_hz = occupied_bandwidth_hz(cfg)
     freqs = np.linspace(-bw_hz / 2.0, bw_hz / 2.0, num_f, endpoint=False)
     num_l = int(sc.get("num_clusters", 8))
     delay_spread_s = float(sc.get("delay_spread_ns", 100.0)) * 1e-9
@@ -259,7 +259,7 @@ class SionnaTR38901Adapter:
                                    T(ut_vel[None, ...], tf.float32),
                                    T(in_state[None, ...], tf.bool))
 
-        bw_hz = float(self.cfg["system"]["bandwidth_mhz"]) * 1e6
+        bw_hz = occupied_bandwidth_hz(self.cfg)
         num_f = int(meas["num_freq_points"])
         freqs = np.linspace(-bw_hz / 2.0, bw_hz / 2.0, num_f, endpoint=False)
         a, tau = channel_model(num_time_samples=1, sampling_frequency=bw_hz)

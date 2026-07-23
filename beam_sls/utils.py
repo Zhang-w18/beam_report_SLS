@@ -17,6 +17,17 @@ def ensure_dir(path: str | os.PathLike[str]) -> Path:
     return p
 
 
+def occupied_bandwidth_hz(cfg: Mapping[str, Any]) -> float:
+    """Return active PDSCH bandwidth derived from PRBs and subcarrier spacing."""
+    num_prbs = int(cfg.get("pdsch", {}).get("num_prbs", 0))
+    scs_khz = float(cfg.get("system", {}).get("subcarrier_spacing_khz", 0.0))
+    if num_prbs <= 0:
+        raise ValueError("pdsch.num_prbs must be > 0")
+    if scs_khz <= 0.0:
+        raise ValueError("system.subcarrier_spacing_khz must be > 0")
+    return float(num_prbs * 12.0 * scs_khz * 1e3)
+
+
 def db_to_lin(x_db: float | np.ndarray) -> float | np.ndarray:
     return np.power(10.0, np.asarray(x_db) / 10.0)
 

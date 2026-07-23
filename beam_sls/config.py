@@ -40,7 +40,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "ue_height_m": 1.5,
     },
     "system": {
-        "bandwidth_mhz": 20.0,
         "subcarrier_spacing_khz": 120.0,
         "tx_power_dbm": 33.0,
         "num_drops": 10,

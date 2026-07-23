@@ -247,7 +247,8 @@ def test_numpy_geometric_channel_uses_downward_bs_to_ue_elevation():
             "pathloss_exponent": 2.0,
         },
         "measurement": {"num_freq_points": 1},
-        "system": {"bandwidth_mhz": 20.0},
+        "system": {"subcarrier_spacing_khz": 120.0},
+        "pdsch": {"num_prbs": 132},
         "trp": {"num_trps_per_sector": 1},
         "rf_architecture": {"txru_connectivity": "fully_connected", "num_txru": 1},
     }
