@@ -8,7 +8,10 @@ from beam_sls.feedback import ServiceCandidate, UEReport, make_reports
 from beam_sls.link import eesm, realized_sinr_grid, run_tti_loop
 from beam_sls.measurement import MeasurementResult, SparseGamma, compute_gamma_measurement
 from beam_sls.scheduler import ScheduledLink, ScheduleResult, _evaluate_assignments, exhaustive_schedule, normalize_domain_mode, schedule
-from beam_sls.sim import build_ue_goodput_rows, run_simulation, schedule_similarity_rows, summarize_su_snr
+from beam_sls.sim import (build_paired_case_debug_lines,
+                          build_scheduled_ue_su_throughput_rows, build_ue_goodput_rows,
+                          run_simulation, schedule_similarity_rows,
+                          summarize_scheduled_ue_su_throughput, summarize_su_snr)
 from beam_sls.topology import make_topology
 
 
@@ -33,9 +36,94 @@ def test_smoke(tmp_path: Path):
     assert (tmp_path / "out" / "metrics" / "ue_goodput.csv").exists()
     assert (tmp_path / "out" / "metrics" / "schedule_similarity.csv").exists()
     assert (tmp_path / "out" / "metrics" / "su_snr_samples.csv").exists()
+    assert (tmp_path / "out" / "metrics" / "scheduled_ue_su_throughput.csv").exists()
+    assert (tmp_path / "out" / "metrics" / "scheduled_ue_su_throughput_summary.csv").exists()
     assert (tmp_path / "out" / "metrics" / "scheduler_iterations.csv").exists()
     assert (tmp_path / "out" / "metrics" / "runtime_phases.csv").exists()
     assert (tmp_path / "out" / "figures" / "ue_goodput_cdf.png").exists()
+    assert (tmp_path / "out" / "figures" / "scheduled_ue_su_throughput_cdf.png").exists()
+
+
+def test_scheduled_ue_su_throughput_uses_selected_beam_standalone_mcs():
+    class RateAdapter:
+        @staticmethod
+        def rate_mbps(mcs_index):
+            return float(mcs_index * 10)
+
+    beam_ids = [BeamId(0, 0, 0, 0, 0), BeamId(0, 0, 0, 1, 1)]
+    reports = [
+        UEReport(
+            7, "full_gamma",
+            [
+                ServiceCandidate(0, 4.0, 2),
+                ServiceCandidate(1, 11.0, 5),
+            ],
+        ),
+        UEReport(8, "full_gamma", [ServiceCandidate(0, -9.0, 0, su_outage=True)]),
+    ]
+    sched = ScheduleResult(
+        scheme="full_gamma",
+        objective_value=1.0,
+        links=[
+            ScheduledLink(7, 1, 1.0, 1, 10.0),
+            ScheduledLink(8, 0, -9.0, 0, 0.0, predicted_outage=True),
+        ],
+        case_id="oracle",
+        feedback_scheme="full_gamma",
+        algorithm="greedy",
+    )
+
+    rows = build_scheduled_ue_su_throughput_rows(
+        3, "oracle", sched, reports, beam_ids, RateAdapter(),
+    )
+
+    assert [row["su_throughput_mbps"] for row in rows] == [50.0, 0.0]
+    assert rows[0]["su_snr_db"] == 11.0
+    assert rows[0]["su_mcs"] == 5
+    assert rows[1]["su_outage"] is True
+    summary = summarize_scheduled_ue_su_throughput(rows, ["oracle"])
+    assert summary[0]["num_scheduled_ue_samples"] == 2
+    assert summary[0]["avg_su_throughput_mbps"] == 25.0
+    assert summary[0]["p50_su_throughput_mbps"] == 25.0
+
+
+def test_paired_case_debug_reports_order_and_ack_random_mismatch():
+    schedules = {
+        (0, "a"): [(1, 10), (2, 20)],
+        (0, "b"): [(2, 20), (1, 10)],
+    }
+
+    def row(scheme, ue_id, beam_index, position, ack_random):
+        return {
+            "scheme": scheme,
+            "drop": 0,
+            "tti": 0,
+            "ue_id": ue_id,
+            "beam_index": beam_index,
+            "link_position": position,
+            "actual_mcs": 5,
+            "ack": 1,
+            "goodput_bits": 100,
+            "effective_sinr_db": 10.0,
+            "olla_offset_db": 0.0,
+            "mcs_selection_sinr_db": 10.0,
+            "tbler": 0.1,
+            "ack_random_uniform": ack_random,
+        }
+
+    rows = [
+        row("a", 1, 10, 0, 0.2),
+        row("a", 2, 20, 1, 0.8),
+        row("b", 2, 20, 0, 0.2),
+        row("b", 1, 10, 1, 0.8),
+    ]
+    text = "\n".join(build_paired_case_debug_lines(schedules, rows, [["a", "b"]]))
+
+    assert "schedule_set_equal=1 schedule_order_equal=0" in text
+    assert "schedule_first_diff drop=0 pos=0" in text
+    assert "link_position=2" in text
+    assert "ack_random_uniform=2" in text
+    assert "first_row_diff drop=0 tti=0 ue=1 field=link_position" in text
 
 
 def test_eesm_high_sinr_is_finite():

@@ -214,6 +214,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # Re-evaluate the baseline schedule with inter-beam interference forced
         # to zero, using common ACK random numbers for a clean comparison.
         "baseline_no_interference_upper_bound": True,
+        # Optional compact comparison of case pairs. When enabled, link_tti.csv
+        # also records ACK random draws and schedule-link positions.
+        "paired_case_debug": {
+            "enabled": False,
+            "pairs": [],
+        },
     },
     "link_abstraction": {
         # v2 preferred path: Sionna SYS PHYAbstraction + ILLA. If sionna.sys or

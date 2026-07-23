@@ -453,6 +453,29 @@ metrics/schedule_similarity_by_drop.csv
 metrics/su_snr_samples.csv
 metrics/su_snr_max_per_ue.csv
 metrics/su_snr_summary.csv
+metrics/scheduled_ue_su_throughput.csv
+metrics/scheduled_ue_su_throughput_summary.csv
+figures/scheduled_ue_su_throughput_cdf.png
+metrics/paired_case_debug.txt
 ```
 
 `rf_architecture_summary.json` 是确认 MU order 与射频架构是否按预期解析的核心文件。
+
+`scheduled_ue_su_throughput.csv` 只包含最终被调度的 UE。每个样本使用所选 service
+beam 的 standalone SNR/MCS 换算 SU 吞吐，SU outage 记为 0 Mbps；它不等同于
+调度器预测的 MU rate，也不等同于 `link_tti.csv` 中含真实多用户干扰和 ACK/NACK
+后的 goodput。
+
+需要核对“相同 schedule 为什么得到不同 goodput”时，可配置：
+
+```yaml
+analysis:
+  paired_case_debug:
+    enabled: true
+    pairs:
+      - [baseline__greedy, threshold_conflict_set__greedy]
+```
+
+终端只需复制从 `[paired-debug] begin` 到 `[paired-debug] end` 的内容。
+`link_tti.csv` 会同时记录 `ack_random_uniform` 和 `link_position`，用于判断共同随机数
+是否因 link 遍历顺序不同而分配给了不同 UE。

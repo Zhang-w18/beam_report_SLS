@@ -27,6 +27,8 @@ class LinkEvalRow:
     ack: int
     goodput_bits: int
     goodput_mbps: float
+    ack_random_uniform: float
+    link_position: int
     olla_offset_db: float
     mcs_selection_sinr_db: float
     case_id: str | None = None
@@ -121,7 +123,7 @@ def run_tti_loop(schedule: ScheduleResult,
     # update OLLA exactly like measured TTIs, but are not written to link_tti.csv.
     # Measured rows retain the backward-compatible tti range [0, num_tti).
     for tti in range(-warmup_tti, num_tti):
-        for link in schedule.links:
+        for link_position, link in enumerate(schedule.links):
             key = (schedule.case_id or schedule.scheme, link.ue_id)
             off = float(olla.get(key, 0.0))
             sinr_eff_lin = eesm(sinr_grid[link.ue_id], beta_db=beta_db)
@@ -145,7 +147,8 @@ def run_tti_loop(schedule: ScheduleResult,
                 tbler = float(link_adapter.tbler_from_sinr_db(eff_db, actual_mcs))
             else:
                 tbler = bler_from_sinr_db(eff_db, actual_mcs, slope=slope)
-            ack = int(rng.uniform() > tbler)
+            ack_random_uniform = float(rng.uniform())
+            ack = int(ack_random_uniform > tbler)
             if ack:
                 if link_adapter is not None:
                     goodput_bits = int(link_adapter.tbs_bits(actual_mcs))
@@ -175,6 +178,8 @@ def run_tti_loop(schedule: ScheduleResult,
                     ack=ack,
                     goodput_bits=int(goodput_bits),
                     goodput_mbps=float(goodput_mbps),
+                    ack_random_uniform=ack_random_uniform,
+                    link_position=int(link_position),
                     olla_offset_db=off,
                     mcs_selection_sinr_db=mcs_selection_sinr_db,
                     case_id=schedule.case_id or schedule.scheme,

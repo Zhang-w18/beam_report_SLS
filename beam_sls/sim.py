@@ -235,6 +235,191 @@ def build_ue_goodput_rows(link_rows: List[Dict[str, Any]],
     ]
 
 
+def build_scheduled_ue_su_throughput_rows(drop: int,
+                                          case_id: str,
+                                          sched,
+                                          reports,
+                                          beam_ids,
+                                          link_adapter) -> List[Dict[str, Any]]:
+    """Build standalone-throughput samples for UEs selected by a schedule.
+
+    Each sample uses the selected service beam's standalone SNR/MCS before
+    adding interference from any co-scheduled UE.  It is intentionally
+    different from predicted MU rate and realized TTI goodput.
+    """
+    reports_by_ue = {int(report.ue_id): report for report in reports}
+    rows: List[Dict[str, Any]] = []
+    for link in sched.links:
+        report = reports_by_ue.get(int(link.ue_id))
+        candidate = None if report is None else report.candidate_by_beam(int(link.beam_index))
+        if candidate is None:
+            raise ValueError(
+                f"Scheduled UE {link.ue_id} beam {link.beam_index} is absent from its report"
+            )
+        su_outage = bool(candidate.su_outage)
+        rows.append({
+            "drop": int(drop),
+            "scheme": case_id,
+            "case_id": case_id,
+            "feedback_scheme": sched.feedback_scheme or sched.scheme,
+            "algorithm": sched.algorithm or sched.metadata.get("algorithm"),
+            "ue_id": int(link.ue_id),
+            "beam_index": int(link.beam_index),
+            "beam_id": beam_ids[int(link.beam_index)].short(),
+            "su_snr_db": float(candidate.su_snr_db),
+            "su_mcs": int(candidate.su_mcs),
+            "su_outage": su_outage,
+            "su_throughput_mbps": (
+                0.0 if su_outage else float(link_adapter.rate_mbps(int(candidate.su_mcs)))
+            ),
+        })
+    return rows
+
+
+def summarize_scheduled_ue_su_throughput(
+        rows: List[Dict[str, Any]],
+        schemes: List[str]) -> List[Dict[str, Any]]:
+    """Summarize scheduled-UE SU-throughput samples."""
+    summary: List[Dict[str, Any]] = []
+    for scheme in schemes:
+        scheme_rows = [row for row in rows if row.get("scheme") == scheme]
+        values = [float(row["su_throughput_mbps"]) for row in scheme_rows]
+        summary.append({
+            "scheme": scheme,
+            "num_scheduled_ue_samples": int(len(values)),
+            "avg_su_throughput_mbps": float(np.mean(values)) if values else 0.0,
+            "p05_su_throughput_mbps": percentile(values, 5.0),
+            "p50_su_throughput_mbps": percentile(values, 50.0),
+            "p95_su_throughput_mbps": percentile(values, 95.0),
+            "su_outage_ratio": (
+                float(np.mean([bool(row["su_outage"]) for row in scheme_rows]))
+                if scheme_rows else 0.0
+            ),
+        })
+    return summary
+
+
+def build_paired_case_debug_lines(
+        scheduled_pair_lists: Dict[Tuple[int, str], List[Tuple[int, int]]],
+        link_rows: List[Dict[str, Any]],
+        pairs: List[List[str]]) -> List[str]:
+    """Return compact diagnostics for paired cases that should be identical."""
+    lines = ["[paired-debug] begin"]
+    float_fields = (
+        "effective_sinr_db",
+        "olla_offset_db",
+        "mcs_selection_sinr_db",
+        "tbler",
+        "ack_random_uniform",
+    )
+    exact_fields = ("beam_index", "link_position", "actual_mcs", "ack", "goodput_bits")
+    comparison_fields = (
+        "beam_index",
+        "link_position",
+        "effective_sinr_db",
+        "olla_offset_db",
+        "mcs_selection_sinr_db",
+        "actual_mcs",
+        "tbler",
+        "ack_random_uniform",
+        "ack",
+        "goodput_bits",
+    )
+    row_key = lambda row: (int(row["drop"]), int(row["tti"]), int(row["ue_id"]))
+
+    for raw_pair in pairs:
+        if len(raw_pair) != 2:
+            lines.append(f"[paired-debug] invalid_pair={raw_pair!r}")
+            continue
+        case_a, case_b = str(raw_pair[0]), str(raw_pair[1])
+        drops = sorted({
+            drop for drop, case_id in scheduled_pair_lists
+            if case_id in (case_a, case_b)
+        })
+        set_same = True
+        order_same = True
+        first_schedule_diff = None
+        for drop in drops:
+            a = scheduled_pair_lists.get((drop, case_a), [])
+            b = scheduled_pair_lists.get((drop, case_b), [])
+            if set(a) != set(b):
+                set_same = False
+            if a != b:
+                order_same = False
+                if first_schedule_diff is None:
+                    pos = next(
+                        (i for i in range(max(len(a), len(b)))
+                         if i >= len(a) or i >= len(b) or a[i] != b[i]),
+                        0,
+                    )
+                    first_schedule_diff = (
+                        int(drop), int(pos),
+                        None if pos >= len(a) else a[pos],
+                        None if pos >= len(b) else b[pos],
+                    )
+
+        rows_a = {row_key(row): row for row in link_rows if row.get("scheme") == case_a}
+        rows_b = {row_key(row): row for row in link_rows if row.get("scheme") == case_b}
+        keys_a, keys_b = set(rows_a), set(rows_b)
+        common_keys = sorted(keys_a & keys_b)
+        mismatch_counts = {field: 0 for field in (*float_fields, *exact_fields)}
+        max_abs_diff = {field: 0.0 for field in float_fields}
+        first_row_diff = None
+        for key in common_keys:
+            a, b = rows_a[key], rows_b[key]
+            for field in comparison_fields:
+                if field in float_fields:
+                    av, bv = float(a[field]), float(b[field])
+                    delta = abs(av - bv)
+                    max_abs_diff[field] = max(max_abs_diff[field], delta)
+                    differs = not np.isclose(av, bv, rtol=1e-12, atol=1e-12, equal_nan=True)
+                else:
+                    av, bv = a[field], b[field]
+                    differs = av != bv
+                if differs:
+                    mismatch_counts[field] += 1
+                    if first_row_diff is None:
+                        first_row_diff = (key, field, av, bv, a, b)
+
+        lines.append(
+            f"[paired-debug] pair={case_a}|{case_b} drops={len(drops)} "
+            f"schedule_set_equal={int(set_same)} schedule_order_equal={int(order_same)} "
+            f"rows_a={len(rows_a)} rows_b={len(rows_b)} aligned_rows={len(common_keys)} "
+            f"missing_keys_a={len(keys_b - keys_a)} missing_keys_b={len(keys_a - keys_b)}"
+        )
+        if first_schedule_diff is not None:
+            drop, pos, a_link, b_link = first_schedule_diff
+            lines.append(
+                f"[paired-debug] schedule_first_diff drop={drop} pos={pos} "
+                f"A={a_link} B={b_link}"
+            )
+        lines.append(
+            "[paired-debug] mismatch_counts "
+            + " ".join(f"{field}={mismatch_counts[field]}" for field in comparison_fields)
+        )
+        lines.append(
+            "[paired-debug] max_abs_diff "
+            + " ".join(f"{field}={max_abs_diff[field]:.12g}" for field in float_fields)
+        )
+        if not common_keys:
+            lines.append("[paired-debug] result=NO_ALIGNED_ROWS")
+        elif first_row_diff is None and keys_a == keys_b:
+            lines.append("[paired-debug] result=EXACT_MATCH")
+        elif first_row_diff is not None:
+            (drop, tti, ue_id), field, av, bv, a, b = first_row_diff
+            lines.append(
+                f"[paired-debug] first_row_diff drop={drop} tti={tti} ue={ue_id} "
+                f"field={field} A={av} B={bv} "
+                f"posA={a.get('link_position')} posB={b.get('link_position')} "
+                f"rngA={float(a.get('ack_random_uniform', float('nan'))):.12g} "
+                f"rngB={float(b.get('ack_random_uniform', float('nan'))):.12g}"
+            )
+        else:
+            lines.append("[paired-debug] result=ROW_KEYS_DIFFER")
+    lines.append("[paired-debug] end")
+    return lines
+
+
 def schedule_similarity_rows(pair_sets: Dict[Tuple[int, str], set],
                              schemes: List[str]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     per_drop: List[Dict[str, Any]] = []
@@ -405,6 +590,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     beam_rows: List[Dict[str, Any]] = [b.to_dict() for b in beam_ids]
     report_rows: List[Dict[str, Any]] = []
     su_snr_sample_rows: List[Dict[str, Any]] = []
+    scheduled_ue_su_throughput_rows: List[Dict[str, Any]] = []
     scheduler_stat_rows: List[Dict[str, Any]] = []
     scheduler_iteration_rows: List[Dict[str, Any]] = []
     runtime_phase_rows: List[Dict[str, Any]] = []
@@ -420,6 +606,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     channel_backend_rows: List[Dict[str, Any]] = []
     gamma_backend_rows: List[Dict[str, Any]] = []
     scheduled_pair_sets: Dict[Tuple[int, str], set] = {}
+    scheduled_pair_lists: Dict[Tuple[int, str], List[Tuple[int, int]]] = {}
     domain_mode = normalize_domain_mode(cfg["scheduler"].get("domain_mode", "global"))
 
     baseline_reference = evaluation_plan.references.get("baseline")
@@ -567,6 +754,9 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             scheduled_pair_sets[(drop, case_id)] = {
                 (int(link.ue_id), int(link.beam_index)) for link in sched.links
             }
+            scheduled_pair_lists[(drop, case_id)] = [
+                (int(link.ue_id), int(link.beam_index)) for link in sched.links
+            ]
             schedule_rows.append({"drop": drop, "scheme": case_id,
                                   "case_id": case_id,
                                   "feedback_scheme": scheme,
@@ -576,6 +766,12 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
                                   "num_outage": int(sum(link.predicted_outage for link in sched.links)),
                                   "outage_occurred": bool(any(link.predicted_outage for link in sched.links)),
                                   "schedule_json": json.dumps(sched.to_dict(beam_ids), ensure_ascii=False)})
+            scheduled_ue_su_throughput_rows.extend(
+                build_scheduled_ue_su_throughput_rows(
+                    drop, case_id, sched, reports_by_scheme[scheme], beam_ids,
+                    scheduler_link_adapter,
+                )
+            )
             case_rng = np.random.default_rng()
             case_rng.bit_generator.state = copy.deepcopy(common_link_rng_state)
             rng_state_before_link_eval = copy.deepcopy(case_rng.bit_generator.state)
@@ -649,6 +845,19 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
         })
 
     link_dict_rows = _asdict_rows(all_link_rows)
+    paired_debug_cfg = cfg.get("analysis", {}).get("paired_case_debug", {}) or {}
+    if bool(paired_debug_cfg.get("enabled", False)):
+        configured_pairs = paired_debug_cfg.get("pairs", []) or []
+        debug_lines = build_paired_case_debug_lines(
+            scheduled_pair_lists, link_dict_rows,
+            [[str(value) for value in pair] for pair in configured_pairs],
+        )
+        debug_text = "\n".join(debug_lines) + "\n"
+        debug_path = ensure_dir(out_dir / "metrics") / "paired_case_debug.txt"
+        debug_path.write_text(
+            debug_text, encoding="utf-8",
+        )
+        print(debug_text, end="", flush=True)
     write_csv(out_dir / "metrics" / "link_tti.csv", link_dict_rows)
     write_csv(out_dir / "metrics" / "schedules.csv", schedule_rows)
     write_csv(out_dir / "metrics" / "drops.csv", drop_rows)
@@ -676,6 +885,17 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     write_csv(out_dir / "metrics" / "su_snr_samples.csv", su_snr_sample_rows)
     write_csv(out_dir / "metrics" / "su_snr_max_per_ue.csv", su_snr_max_rows)
     write_csv(out_dir / "metrics" / "su_snr_summary.csv", su_snr_summary)
+    scheduled_ue_su_throughput_summary = summarize_scheduled_ue_su_throughput(
+        scheduled_ue_su_throughput_rows, case_ids,
+    )
+    write_csv(
+        out_dir / "metrics" / "scheduled_ue_su_throughput.csv",
+        scheduled_ue_su_throughput_rows,
+    )
+    write_csv(
+        out_dir / "metrics" / "scheduled_ue_su_throughput_summary.csv",
+        scheduled_ue_su_throughput_summary,
+    )
 
     summary = summarize_results(
         link_dict_rows, analysis_schemes, ue_goodput_rows,
@@ -687,6 +907,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     }
     summary["_schedule_similarity"] = similarity_summary
     summary["_su_snr"] = su_snr_summary
+    summary["_scheduled_ue_su_throughput"] = scheduled_ue_su_throughput_summary
     write_json(out_dir / "metrics" / "summary.json", summary)
     write_csv(out_dir / "metrics" / "summary.csv", [{"scheme": k, **v} for k, v in summary.items() if isinstance(v, dict) and not k.startswith("_")])
 
@@ -695,6 +916,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
         ue_goodput_rows=ue_goodput_rows,
         su_snr_samples=su_snr_sample_rows,
         su_snr_max_rows=su_snr_max_rows,
+        scheduled_ue_su_throughput_rows=scheduled_ue_su_throughput_rows,
         feedback_schemes=feedback_schemes,
     )
 
@@ -825,6 +1047,7 @@ def make_plots(out_dir: Path,
                ue_goodput_rows: List[Dict[str, Any]] | None = None,
                su_snr_samples: List[Dict[str, Any]] | None = None,
                su_snr_max_rows: List[Dict[str, Any]] | None = None,
+               scheduled_ue_su_throughput_rows: List[Dict[str, Any]] | None = None,
                feedback_schemes: List[str] | None = None) -> None:
     sinr_by_scheme = {s: [float(r["effective_sinr_db"]) for r in link_rows if r.get("scheme") == s] for s in schemes}
     goodput_by_scheme = {s: [float(r["goodput_mbps"]) for r in link_rows if r.get("scheme") == s] for s in schemes}
@@ -861,6 +1084,20 @@ def make_plots(out_dir: Path,
             "Maximum reported standalone SNR per UE [dB]",
             "Per-UE maximum SU SNR CDF",
             out_dir / "figures" / "reported_max_su_snr_per_ue_cdf.png",
+        )
+    if scheduled_ue_su_throughput_rows is not None:
+        plot_cdf(
+            {
+                s: [
+                    float(r["su_throughput_mbps"])
+                    for r in scheduled_ue_su_throughput_rows
+                    if r.get("scheme") == s
+                ]
+                for s in schemes
+            },
+            "Scheduled-UE SU throughput [Mbps]",
+            "Scheduled-UE standalone throughput CDF",
+            out_dir / "figures" / "scheduled_ue_su_throughput_cdf.png",
         )
     bar = {s: float(summary[s]["avg_system_goodput_mbps"]) for s in schemes if s in summary}
     plot_bar(bar, "Average system goodput [Mbps]", "Average system goodput", out_dir / "figures" / "avg_system_goodput.png")
