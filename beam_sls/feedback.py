@@ -36,6 +36,8 @@ class UEReport:
     candidates: List[ServiceCandidate]
     site_id: int | None = None
     serving_cell: int | None = None
+    scheduling_cluster: int | None = None
+    measured_interference_beams: Set[int] | None = None
     # For oracle only; scheduler uses these if available.
     full_gamma: np.ndarray | None = None
     full_service_power_w: np.ndarray | None = None
@@ -56,7 +58,16 @@ class UEReport:
             "ue_id": self.ue_id,
             "site_id": self.site_id,
             "serving_cell": self.serving_cell,
+            "scheduling_cluster": self.scheduling_cluster,
             "scheme": self.scheme,
+            "measured_interference_beams": [
+                beam_ids[i].short()
+                for i in sorted(
+                    range(len(beam_ids))
+                    if self.measured_interference_beams is None
+                    else self.measured_interference_beams
+                )
+            ],
             "candidates": [c.to_dict(beam_ids) for c in self.candidates],
         }
 
@@ -87,7 +98,10 @@ def make_reports(meas: MeasurementResult,
                  ue_site_ids: Mapping[int, int] | None = None,
                  ue_serving_cells: Mapping[int, int] | None = None,
                  candidate_beam_indices_by_ue: Mapping[int, Sequence[int]] | None = None,
-                 link_adapter=None) -> Dict[str, List[UEReport]]:
+                 link_adapter=None,
+                 service_beam_indices_by_ue: Mapping[int, Sequence[int]] | None = None,
+                 measured_beam_indices_by_ue: Mapping[int, Sequence[int]] | None = None,
+                 ue_scheduling_clusters: Mapping[int, int] | None = None) -> Dict[str, List[UEReport]]:
     out: Dict[str, List[UEReport]] = {s: [] for s in schemes}
     num_u = meas.service_power_w.shape[0]
     threshold_lin = float(10.0 ** (float(threshold_db) / 10.0))
@@ -96,6 +110,14 @@ def make_reports(meas: MeasurementResult,
     unknown = [scheme for scheme in schemes if scheme not in valid_schemes]
     if unknown:
         raise ValueError(f"Unknown feedback scheme: {unknown[0]}")
+    if candidate_beam_indices_by_ue is not None:
+        if service_beam_indices_by_ue is not None or measured_beam_indices_by_ue is not None:
+            raise ValueError(
+                "Use candidate_beam_indices_by_ue or the separate service/"
+                "measured mappings, not both"
+            )
+        service_beam_indices_by_ue = candidate_beam_indices_by_ue
+        measured_beam_indices_by_ue = candidate_beam_indices_by_ue
 
     # Phase 1: choose reportable service beams using SU-SNR only. Build this
     # once for all schemes so the same (UE, beam) is never link-adapted twice.
@@ -104,7 +126,10 @@ def make_reports(meas: MeasurementResult,
     for scheme in schemes:
         top_k = oracle_top_k if scheme == "full_gamma" else k1
         for u in range(num_u):
-            allowed = None if candidate_beam_indices_by_ue is None else candidate_beam_indices_by_ue.get(u, [])
+            allowed = (
+                None if service_beam_indices_by_ue is None
+                else service_beam_indices_by_ue.get(u, [])
+            )
             top = _top_service_indices(meas, u, top_k, allowed)
             tops_by_scheme[scheme].append(top)
             selected_for_adaptation[u].update(top)
@@ -141,27 +166,32 @@ def make_reports(meas: MeasurementResult,
 
     for scheme in schemes:
         for u in range(num_u):
-            allowed = None if candidate_beam_indices_by_ue is None else candidate_beam_indices_by_ue.get(u, [])
+            measured = (
+                None if measured_beam_indices_by_ue is None
+                else measured_beam_indices_by_ue.get(u, [])
+            )
             top = tops_by_scheme[scheme][u]
-            allowed_set = None if allowed is None else {int(i) for i in allowed}
+            measured_set = (
+                None if measured is None else {int(i) for i in measured}
+            )
             cands: List[ServiceCandidate] = []
             for m in top:
                 conflicts: Set[int] = set()
                 if scheme == "topk_conflict_id":
                     row = meas.gamma[u, m, :].copy()
                     row[m] = np.inf
-                    if allowed_set is None:
+                    if measured_set is None:
                         candidates = [int(i) for i in np.argsort(row) if int(i) != int(m)]
                     else:
-                        candidates = sorted((int(i) for i in allowed_set if int(i) != int(m)),
+                        candidates = sorted((int(i) for i in measured_set if int(i) != int(m)),
                                             key=lambda i: float(row[i]))
                     conflicts = set(candidates[:int(k2)])
                 elif scheme == "threshold_conflict_set":
                     row = meas.gamma[u, m, :]
-                    if allowed_set is None:
+                    if measured_set is None:
                         conflicts = set(int(i) for i in np.where(row < threshold_lin)[0] if int(i) != m)
                     else:
-                        conflicts = set(int(i) for i in allowed_set if int(i) != m and float(row[int(i)]) < threshold_lin)
+                        conflicts = set(int(i) for i in measured_set if int(i) != m and float(row[int(i)]) < threshold_lin)
                 elif scheme == "full_gamma":
                     # Oracle does not need ID-only conflict sets.
                     conflicts = set()
@@ -178,7 +208,15 @@ def make_reports(meas: MeasurementResult,
                            scheme=scheme,
                            candidates=cands,
                            site_id=None if ue_site_ids is None else int(ue_site_ids.get(u, 0)),
-                           serving_cell=None if ue_serving_cells is None else int(ue_serving_cells.get(u, 0)))
+                           serving_cell=None if ue_serving_cells is None else int(ue_serving_cells.get(u, 0)),
+                           scheduling_cluster=(
+                               None if ue_scheduling_clusters is None
+                               else int(ue_scheduling_clusters.get(u, 0))
+                           ),
+                           measured_interference_beams=(
+                               set(range(len(beam_ids)))
+                               if measured_set is None else measured_set
+                           ))
             if scheme == "full_gamma":
                 rep.full_gamma = meas.gamma[u].copy()
                 rep.full_service_power_w = meas.service_power_w[u].copy()

@@ -16,9 +16,10 @@ def main() -> None:
     parser.add_argument("--num-drops", type=int, default=None,
                         help="Override system.num_drops for quick tests")
     parser.add_argument("--num-tti", type=int, default=None,
-                        help="Override system.num_tti_per_drop")
-    parser.add_argument("--olla-warmup-tti", type=int, default=None,
-                        help="Override link_abstraction.olla_warmup_tti")
+                        help="Override measured TTI count per drop in either TTI mode")
+    parser.add_argument("--warmup-tti", "--olla-warmup-tti",
+                        dest="warmup_tti", type=int, default=None,
+                        help="Override warmup TTI count per drop")
     parser.add_argument("--algorithm", type=str, default=None, choices=[
         "exhaustive",
         "greedy",
@@ -27,7 +28,10 @@ def main() -> None:
     ],
                         help="Override scheduler.algorithm")
     parser.add_argument("--domain-mode", type=str, default=None,
-                        help="Override scheduler.domain_mode, e.g. per_site_joint or global")
+                        help="Deprecated alias for scheduler.cluster_mode")
+    parser.add_argument("--cluster-mode", type=str, default=None,
+                        choices=["per_cell", "per_site", "global", "custom"],
+                        help="Override scheduler.cluster_mode")
     parser.add_argument("--layout", type=str, default=None,
                         help="Override topology.layout, e.g. three_site_triangle or seven_site_hex")
     parser.add_argument("--num-sites", type=int, default=None,
@@ -46,11 +50,17 @@ def main() -> None:
     if args.num_drops is not None:
         cfg["system"]["num_drops"] = args.num_drops
     if args.num_tti is not None:
+        if args.num_tti <= 0:
+            parser.error("--num-tti must be > 0")
         cfg["system"]["num_tti_per_drop"] = args.num_tti
-    if args.olla_warmup_tti is not None:
-        if args.olla_warmup_tti < 0:
-            parser.error("--olla-warmup-tti must be >= 0")
-        cfg["link_abstraction"]["olla_warmup_tti"] = args.olla_warmup_tti
+        if bool(cfg["system"].get("continuous_tti", {}).get("enabled", False)):
+            cfg["system"]["continuous_tti"]["num_tti"] = args.num_tti
+    if args.warmup_tti is not None:
+        if args.warmup_tti < 0:
+            parser.error("--warmup-tti must be >= 0")
+        cfg["link_abstraction"]["olla_warmup_tti"] = args.warmup_tti
+        if bool(cfg["system"].get("continuous_tti", {}).get("enabled", False)):
+            cfg["system"]["continuous_tti"]["warmup_tti"] = args.warmup_tti
     if args.algorithm is not None:
         matrix = cfg.get("evaluation", {}).get("matrix")
         if isinstance(matrix, dict):
@@ -62,7 +72,16 @@ def main() -> None:
         else:
             cfg["scheduler"]["algorithm"] = args.algorithm
     if args.domain_mode is not None:
-        cfg["scheduler"]["domain_mode"] = args.domain_mode
+        aliases = {
+            "per_sector_independent": "per_cell",
+            "per_site_joint": "per_site",
+            "global": "global",
+        }
+        cfg["scheduler"]["cluster_mode"] = aliases.get(
+            args.domain_mode, args.domain_mode
+        )
+    if args.cluster_mode is not None:
+        cfg["scheduler"]["cluster_mode"] = args.cluster_mode
     if args.layout is not None:
         cfg["topology"]["layout"] = args.layout
     if args.num_sites is not None:

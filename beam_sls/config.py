@@ -46,6 +46,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "num_tti_per_drop": 50,
         "random_seed": 20260610,
         "target_bler": 0.1,
+        # When enabled, the channel is instantiated once per drop, then
+        # advanced by Doppler. num_tti takes precedence over duration_ms.
+        "continuous_tti": {
+            "enabled": False,
+            "duration_ms": 2.0,
+            "num_tti": None,
+            # None keeps the backward-compatible olla_warmup_tti value.
+            "warmup_tti": None,
+        },
     },
     "pdsch": {
         "num_prbs": 132,
@@ -76,7 +85,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # case 1: panel_polarization_subarray/sub-connected;
         # case 2: fully_connected hybrid beamforming.
         "txru_connectivity": "panel_polarization_subarray",
-        "allow_independent_polarization_beams": True,
+        "allow_independent_polarization_beams": False,
         "num_txru": 4,
         # auto means scheduler.max_mu_order is derived from the RF architecture.
         "max_parallel_beams_per_trp": "auto",
@@ -96,12 +105,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "Np": 1,
         "dH": 0.5,
         "dV": 0.5,
-        # SLS candidate beam grid for each independently schedulable sector-panel.
-        # The full spatial DFT grid would be num_h*num_v=16*32=512 beams;
-        # default SLS uses 4*4=16 candidate beams over the full 1024-AE array.
+        # The default shared TX codebook is defined on one 16x16 physical panel:
+        # 256 full DFT directions. SLS uniformly samples 4x4=16 candidates.
         # tx_array.beam_scope is retained as a manual override/legacy field.
         # With rf_architecture enabled, the effective beam scope is resolved from
-        # rf_architecture.txru_connectivity.
+        # rf_architecture and measurement.tx_panel_index.
         "beam_scope": "per_panel",
         # Codebook size is N*Ng*Np*M*Mg*Mp. num_beams_h*num_beams_v is the
         # uniformly sampled SLS subset. In per_panel mode these counts apply
@@ -144,9 +152,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "one_beam_per_panel": True,
     },
     "measurement": {
+        # The measurement domain is the UE's static scheduling cluster.
+        # Legacy measurement.domain_mode is no longer used.
         "num_freq_points": 24,
         "compute_full_gamma": True,
         "frequency_average": "linear_power",
+        # Reference physical panel used to sweep the shared single-panel TX
+        # codebook during SLS. It does not bind a codeword to a TXRU.
+        "tx_panel_index": 0,
+        # Keep only the selected panel's M*N*P TX dimensions for measurement,
+        # Gamma, and realized-link calculations.
+        "use_panel_channel_views": True,
         # numpy: CPU (backward-compatible default); cupy: NVIDIA CUDA GPU;
         # auto: use CuPy when available, otherwise record a NumPy fallback.
         "gamma_backend": "numpy",
@@ -171,6 +187,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "references": {},
     },
     "scheduler": {
+        # Static, complete, non-overlapping cell partition. custom uses
+        # static_clusters: [{cluster_id: 0, cell_ids: [0, 1, 2]}, ...].
+        "cluster_mode": None,
+        "static_clusters": [],
+        # Deprecated compatibility key used only when cluster_mode is absent.
         "domain_mode": "per_site_joint",
         "objective": "sum_rate",
         "max_mu_order": "auto",
@@ -208,6 +229,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "adaptive_lambda_alpha": 0.2,
         "unknown_interference_policy": "zero",
         "pf_tbar_init_mbps": 1.0,
+        # Exponential PF throughput averaging: alpha=1/window_tti.
+        "pf_averaging_window_tti": 100,
     },
     "analysis": {
         # Re-evaluate the baseline schedule with inter-beam interference forced

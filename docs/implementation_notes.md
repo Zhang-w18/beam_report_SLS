@@ -29,7 +29,7 @@ After scheduling, the simulator computes the realized SINR with the true channel
 
 ## v2 backend convention
 
-`scenario.channel_model` selects the channel backend. For `sionna_tr38901_uma/umi/rma`, the simulator tries to instantiate the corresponding Sionna PHY TR 38.901 channel and converts CIR coefficients to `H[ue, tx_unit, freq, nrx, ntx]`. `tx_unit` is the global sector-panel index stored in `BeamId.tx_unit`.
+`scenario.channel_model` selects the channel backend. For `sionna_tr38901_uma/umi/rma`, the simulator tries to instantiate the corresponding Sionna PHY TR 38.901 channel and converts CIR coefficients to `H[ue, tx_unit, freq, nrx, ntx]`. In the default shared-codebook mode, `tx_unit` identifies the TRP channel axis and is not a TXRU binding; every codeword of that TRP references the same axis. The legacy independent-polarization mode still uses a separate axis for each fixed subarray.
 
 If `sionna.fallback_to_numpy_if_unavailable=true`, backend construction failures are recorded and the simulator falls back to the v1 geometric channel. This keeps quick runs usable on hosts where Sionna SYS/PHY optional dependencies are not fully installed.
 
@@ -70,4 +70,19 @@ $$
 \end{aligned}
 $$
 
-The numpy fallback channel and DFT codebook now expand the polarization dimension, so TX beam vectors have length 1024 for the requested TRP. The Sionna TR38901 adapter also uses M/N and Mg/Ng/Mp/Np when attempting to construct `PanelArray`.
+The numpy fallback channel and DFT codebook use the project ordering
+`[pol0 full-spatial, pol1 full-spatial, ...]`. Every channel backend retains the
+complete TRP tensor `H[UE,TX_UNIT,FREQ,RX_AE,TX_AE]`, so the default TX dimension
+remains 1024. With `measurement.use_panel_channel_views: true`, SLS extracts the
+configured reference panel across all polarization blocks and computes with a
+temporary `M*N*P=512` array. Actual-link evaluation independently extracts the
+physical panel dynamically assigned to each scheduled beam. The full channel is
+never overwritten or discarded.
+
+Sionna CIR axes are consumed as
+`a[B,RX,RX_AE,TX,TX_AE,PATH,TIME]` and `tau[B,RX,TX,PATH]`. The static drop model
+requests one time sample and explicitly selects `TIME=0`; each configured
+frequency sample is evaluated with `sum_path a*exp(-j*2*pi*f*tau)`. Sionna
+`PanelArray` antenna indices are explicitly permuted into project codebook order.
+An antenna-count mismatch is an error rather than a request to repeat or average
+polarization dimensions.

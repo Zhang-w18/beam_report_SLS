@@ -74,6 +74,9 @@ class RFArchitecture:
     polarization_count: int
     tx_units_per_trp: int
     max_parallel_beams_per_trp: int
+    dynamic_beam_assignment: bool
+    measurement_panel_index: Optional[int]
+    compact_panel_channel: bool
     effective_beam_scope: str
     tx_units: List[TxUnitDescriptor]
     explanation: str
@@ -87,6 +90,12 @@ class RFArchitecture:
             "polarization_count": int(self.polarization_count),
             "tx_units_per_trp": int(self.tx_units_per_trp),
             "max_parallel_beams_per_trp": int(self.max_parallel_beams_per_trp),
+            "dynamic_beam_assignment": bool(self.dynamic_beam_assignment),
+            "measurement_panel_index": (
+                None if self.measurement_panel_index is None
+                else int(self.measurement_panel_index)
+            ),
+            "compact_panel_channel": bool(self.compact_panel_channel),
             "effective_beam_scope": self.effective_beam_scope,
             "tx_units": [u.to_dict() for u in self.tx_units],
             "explanation": self.explanation,
@@ -98,18 +107,19 @@ def resolve_rf_architecture(cfg: Dict[str, Any], tx_array: ArrayConfig) -> RFArc
 
     Two modes are supported:
 
-    1. panel_polarization_subarray: each TXRU controls one panel-polarization
-       subarray. If independent polarization beams are enabled, one panel with
-       dual polarization exposes two independent TXRUs/beams. If disabled, the
-       two polarizations of a panel share one beam, so the parallel-beam limit is
-       the number of physical panels.
+    1. panel_polarization_subarray: when independent polarization beams are
+       enabled, each TXRU controls one panel-polarization subarray. When
+       disabled (the default), the TRP exposes a shared full-array codebook;
+       both polarizations share weights and selected codewords are dynamically
+       assigned to panel resources. The parallel-beam limit is then the number
+       of physical panels.
     2. fully_connected: each TXRU can apply independent analog weights over the
        whole TRP array. Every TXRU can form one full-array beam.
     """
 
     rf_cfg = cfg.get("rf_architecture", {}) or {}
     conn = normalize_connectivity(rf_cfg.get("txru_connectivity", "panel_polarization_subarray"))
-    allow_pol = bool(rf_cfg.get("allow_independent_polarization_beams", True))
+    allow_pol = bool(rf_cfg.get("allow_independent_polarization_beams", False))
     p = max(1, int(tx_array.polarization_count))
     panels = max(1, int(tx_array.num_array_panels))
     requested_txru = tx_array.num_txru
@@ -119,6 +129,9 @@ def resolve_rf_architecture(cfg: Dict[str, Any], tx_array: ArrayConfig) -> RFArc
         raise ValueError("rf_architecture.num_txru must be positive")
 
     tx_units: List[TxUnitDescriptor] = []
+    dynamic_beam_assignment = False
+    measurement_panel_index: Optional[int] = None
+    compact_panel_channel = False
     if conn == "panel_polarization_subarray":
         if allow_pol:
             # Each physical panel-polarization pair is an independent subarray.
@@ -147,22 +160,41 @@ def resolve_rf_architecture(cfg: Dict[str, Any], tx_array: ArrayConfig) -> RFArc
                 "therefore max_parallel_beams_per_trp equals num_txru."
             )
         else:
-            # One independent spatial beam per physical panel; polarizations share it.
-            candidates = list(range(panels))
-            n_units = min(num_txru, panels)
-            for i, panel_idx in enumerate(candidates[:n_units]):
-                tx_units.append(TxUnitDescriptor(
-                    local_tx_unit=i,
-                    beam_scope="per_panel",
-                    array_panel_index=int(panel_idx),
-                    polarization_index=None,
-                    txru_index=i,
-                ))
+            # Build one shared single-panel codebook on a configurable reference
+            # panel for SLS measurement. The panel index is a measurement
+            # reference only; selected codewords are assigned to free panel/TXRU
+            # resources after scheduling.
+            measurement_panel_index = int(
+                cfg.get("measurement", {}).get("tx_panel_index", 0)
+            )
+            if not 0 <= measurement_panel_index < panels:
+                raise ValueError(
+                    "measurement.tx_panel_index must be in "
+                    f"[0, {panels - 1}], got {measurement_panel_index}"
+                )
+            measurement_cfg = cfg.get("measurement", {})
+            compact_panel_channel = bool(
+                measurement_cfg.get(
+                    "use_panel_channel_views",
+                    measurement_cfg.get("compact_tx_panel_channel", True),
+                )
+            )
+            tx_units.append(TxUnitDescriptor(
+                local_tx_unit=0,
+                beam_scope="per_panel",
+                array_panel_index=measurement_panel_index,
+                polarization_index=None,
+                txru_index=None,
+            ))
             effective_scope = "per_panel"
+            dynamic_beam_assignment = True
             explanation = (
-                "sub-connected panel-polarization architecture: polarizations on the same "
-                "panel share one beam; therefore max_parallel_beams_per_trp is limited by "
-                "the number of physical panels, not by panel*polarization."
+                "shared single-panel codebook with dynamic beam-to-TXRU assignment: "
+                f"panel {measurement_panel_index} is used only as the SLS measurement "
+                "reference, both polarizations use the same spatial weights, codewords "
+                "are not bound to a TXRU, and simultaneous beams equal physical panels. "
+                "The full TRP channel is retained; "
+                f"panel-only compute views are {compact_panel_channel}."
             )
     else:
         # Fully-connected hybrid: every TXRU can form a full-array beam.
@@ -180,7 +212,7 @@ def resolve_rf_architecture(cfg: Dict[str, Any], tx_array: ArrayConfig) -> RFArc
             "and can form one full-array DFT beam; therefore max_parallel_beams_per_trp equals num_txru."
         )
 
-    max_parallel = len(tx_units)
+    max_parallel = panels if dynamic_beam_assignment else len(tx_units)
     return RFArchitecture(
         connectivity=conn,
         allow_independent_polarization_beams=allow_pol,
@@ -189,6 +221,9 @@ def resolve_rf_architecture(cfg: Dict[str, Any], tx_array: ArrayConfig) -> RFArc
         polarization_count=p,
         tx_units_per_trp=max_parallel,
         max_parallel_beams_per_trp=max_parallel,
+        dynamic_beam_assignment=dynamic_beam_assignment,
+        measurement_panel_index=measurement_panel_index,
+        compact_panel_channel=compact_panel_channel,
         effective_beam_scope=effective_scope,
         tx_units=tx_units,
         explanation=explanation,
@@ -208,7 +243,37 @@ def tx_units_per_sector(cfg: Dict[str, Any], rf: RFArchitecture) -> int:
 
 def resolved_max_mu_order(cfg: Dict[str, Any], rf: RFArchitecture) -> int:
     raw = cfg.get("scheduler", {}).get("max_mu_order", "auto")
-    physical_cap = int(rf.max_parallel_beams_per_trp) * max(1, trps_per_sector(cfg))
+    topology = cfg.get("topology", {}) or {}
+    scheduler = cfg.get("scheduler", {}) or {}
+    cluster_mode = str(scheduler.get("cluster_mode") or "").lower()
+    domain_mode = str(scheduler.get("domain_mode", "global")).lower()
+    sectors_per_site = max(1, int(topology.get("sectors_per_site", 3)))
+    num_sites = max(1, int(topology.get("num_sites", 1)))
+    if cluster_mode in ("per_cell", "cell", "sector") or (
+        not cluster_mode
+        and domain_mode in ("per_sector_independent", "per_sector", "sector")
+    ):
+        trps_in_domain = 1
+    elif cluster_mode in ("per_site", "site") or (
+        not cluster_mode
+        and domain_mode in ("per_site_joint", "per_site", "site")
+    ):
+        trps_in_domain = sectors_per_site
+    elif cluster_mode in ("custom", "manual"):
+        groups = scheduler.get("static_clusters", []) or []
+        sizes = [
+            len(group.get("cell_ids", [])) if isinstance(group, dict)
+            else len(group)
+            for group in groups
+        ]
+        trps_in_domain = max(sizes, default=1)
+    else:
+        trps_in_domain = num_sites * sectors_per_site
+    physical_cap = (
+        int(rf.max_parallel_beams_per_trp)
+        * max(1, trps_per_sector(cfg))
+        * trps_in_domain
+    )
     if raw is None or str(raw).lower() == "auto":
         return max(1, physical_cap)
     requested = int(raw)

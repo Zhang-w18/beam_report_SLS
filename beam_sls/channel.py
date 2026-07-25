@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import pi
 from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 
-from .codebook import ArrayConfig, steering_vector_from_array
+from .codebook import (
+    ArrayConfig,
+    sionna_panelarray_source_indices,
+    steering_vector_from_array,
+)
 from .rf import resolve_rf_architecture, trps_per_sector
 from .topology import Sector, Site, Topology, UE
 from .utils import db_to_lin, occupied_bandwidth_hz
@@ -24,6 +29,83 @@ class ChannelRealization:
     shadow_db: np.ndarray    # [ue]
     backend: str = "numpy_geometric_uma"
     backend_status: str = "OK"
+    pathloss_db_by_site: np.ndarray | None = None
+    shadow_db_by_site: np.ndarray | None = None
+
+
+def _bessel_j0(x: float) -> float:
+    """Bessel J0 without adding a SciPy dependency."""
+    xx = 0.25 * float(x) * float(x)
+    term = 1.0
+    total = 1.0
+    for k in range(1, 64):
+        term *= -xx / float(k * k)
+        total += term
+        if abs(term) <= 1e-15 * max(1.0, abs(total)):
+            break
+    return float(total)
+
+
+@dataclass
+class DopplerChannelEvolver:
+    """Advance only small-scale fading while retaining one drop's large scale.
+
+    A link-wise first-order complex Gauss-Markov process uses the Clarke/Jakes
+    correlation rho=J0(2*pi*f_D*delta_t). One scalar fading state per
+    (UE, TX unit) keeps the update small even when H has many antennas, while
+    path loss, shadow fading, delay profile, and spatial signature stay fixed.
+    """
+
+    h_freq: np.ndarray
+    rho: float
+    fading_by_link: np.ndarray
+    rng: np.random.Generator
+    tti_index: int = 0
+
+    @classmethod
+    def from_drop(cls,
+                  h_freq: np.ndarray,
+                  cfg: Dict,
+                  rng: np.random.Generator) -> "DopplerChannelEvolver":
+        fc_hz = float(cfg["scenario"]["carrier_frequency_ghz"]) * 1e9
+        speed_mps = float(cfg.get("ue_drop", {}).get("speed_kmh", 0.0)) / 3.6
+        tti_s = float(cfg["pdsch"].get("slot_duration_ms", 0.125)) * 1e-3
+        max_doppler_hz = speed_mps * fc_hz / 299_792_458.0
+        rho = _bessel_j0(2.0 * pi * max_doppler_hz * tti_s)
+        # A negative J0 is valid, but numerical roundoff must not make |rho|>1.
+        # Preserve rho=1 exactly so zero-speed UEs remain static.
+        rho = float(np.clip(rho, -1.0, 1.0))
+        base = np.asarray(h_freq, dtype=np.complex128)
+        fading = np.ones(base.shape[:2] + (1, 1, 1), dtype=np.complex128)
+        return cls(h_freq=base.copy(), rho=rho, fading_by_link=fading, rng=rng)
+
+    def current(self) -> np.ndarray:
+        return self.h_freq
+
+    def advance(self) -> np.ndarray:
+        if abs(self.rho) >= 1.0 - 1e-12:
+            self.tti_index += 1
+            return self.h_freq
+        innovation = (
+            self.rng.standard_normal(self.fading_by_link.shape)
+            + 1j * self.rng.standard_normal(self.fading_by_link.shape)
+        ) / np.sqrt(2.0)
+        next_fading = (
+            self.rho * self.fading_by_link
+            + np.sqrt(max(0.0, 1.0 - self.rho * self.rho)) * innovation
+        )
+        # Maintain H_t = H_0*g_t without retaining another full H tensor.
+        # Exact zeros have probability zero; the guard only avoids a numerical
+        # division fault in pathological injected test data.
+        denominator = np.where(
+            np.abs(self.fading_by_link) > 1e-15,
+            self.fading_by_link,
+            1e-15 + 0.0j,
+        )
+        self.h_freq *= next_fading / denominator
+        self.fading_by_link = next_fading
+        self.tti_index += 1
+        return self.h_freq
 
 
 def uma_like_pathloss_db(distance_2d_m: float, fc_ghz: float, exponent: float = 3.0) -> float:
@@ -35,12 +117,11 @@ def uma_like_pathloss_db(distance_2d_m: float, fc_ghz: float, exponent: float = 
 def _tx_units_from_topology(topology: Topology, cfg: Dict, tx_array: ArrayConfig | None = None) -> List[Tuple[int, Site, Sector, int, float]]:
     """Return list of (tx_unit, site, sector, local_unit, unit_boresight_deg).
 
-    v2.4 uses the resolved RF architecture so that the channel tensor's TX-unit
-    axis matches the beam generator exactly. In the default sub-connected mode,
-    each TX unit is one panel-polarization subarray; TX units sharing the same
-    physical panel also share the same boresight. In fully-connected mode, each
-    TXRU is a full-array TX unit and uses the sector boresight unless offsets are
-    explicitly configured.
+    The resolved RF architecture keeps the channel tensor axis aligned with the
+    beam generator. In shared-codebook mode there is one channel axis per TRP
+    and selected codewords are not bound to TXRUs. The legacy independent-
+    polarization mode retains one axis per panel-polarization subarray. In
+    fully-connected mode, each TXRU is a full-array TX unit.
     """
     trp = cfg.get("trp", {})
     if tx_array is not None:
@@ -93,19 +174,35 @@ def generate_numpy_geometric_channel(topology: Topology,
     fc_ghz = float(sc["carrier_frequency_ghz"])
     shadow_std = float(sc.get("shadow_fading_std_db", 4.0))
     exponent = float(sc.get("pathloss_exponent", 3.0))
-
     num_u = len(topology.ues)
     num_tx = len(tx_units)
-    h = np.zeros((num_u, num_tx, num_f, rx_array.num_ant, tx_array.num_ant), dtype=np.complex128)
+    h = np.zeros(
+        (num_u, num_tx, num_f, rx_array.num_ant, tx_array.num_ant),
+        dtype=np.complex128,
+    )
     pl_db = np.zeros(num_u, dtype=float)
     shadow_db = np.zeros(num_u, dtype=float)
+    num_sites = len(topology.sites)
+    pl_db_by_site = np.zeros((num_u, num_sites), dtype=float)
+    shadow_db_by_site = np.zeros((num_u, num_sites), dtype=float)
 
     for ui, ue in enumerate(topology.ues):
-        serving_site = topology.site_by_id(ue.site_id)
-        pl_db[ui] = uma_like_pathloss_db(ue.distance_to_site_2d_m(serving_site), fc_ghz, exponent)
-        shadow_db[ui] = rng.normal(0.0, shadow_std)
-        gain_lin = float(db_to_lin(-(pl_db[ui] + shadow_db[ui])))
+        # One large-scale state per UE-site link. Reusing it across sectors at
+        # the same site avoids artificial sector-specific shadowing while
+        # allowing RSRP-based association across sites.
+        site_large_scale = {}
+        for site in topology.sites:
+            pathloss = uma_like_pathloss_db(
+                ue.distance_to_site_2d_m(site), fc_ghz, exponent
+            )
+            shadow = float(rng.normal(0.0, shadow_std))
+            site_large_scale[int(site.site_id)] = (pathloss, shadow)
+            pl_db_by_site[ui, int(site.site_id)] = pathloss
+            shadow_db_by_site[ui, int(site.site_id)] = shadow
+        pl_db[ui], shadow_db[ui] = site_large_scale[int(ue.site_id)]
         for tx_unit, site, sec, local_panel, boresight in tx_units:
+            link_pathloss_db, link_shadow_db = site_large_scale[int(site.site_id)]
+            gain_lin = float(db_to_lin(-(link_pathloss_db + link_shadow_db)))
             rel_az = _relative_angle_from_site(ue, site, boresight)
             base_tx_az = rel_az
             base_rx_az = np.pi + rel_az
@@ -127,8 +224,16 @@ def generate_numpy_geometric_channel(topology: Topology,
                 outer = np.outer(arx, np.conjugate(atx))
                 phase = np.exp(-1j * 2.0 * np.pi * freqs * delays[l])
                 h[ui, tx_unit, :, :, :] += (np.sqrt(gain_lin * powers[l]) * coeffs[l] * phase)[:, None, None] * outer[None, :, :]
-    return ChannelRealization(h_freq=h, freqs_hz=freqs, pathloss_db=pl_db, shadow_db=shadow_db,
-                              backend=backend_name, backend_status="OK")
+    return ChannelRealization(
+        h_freq=h,
+        freqs_hz=freqs,
+        pathloss_db=pl_db,
+        shadow_db=shadow_db,
+        backend=backend_name,
+        backend_status="OK",
+        pathloss_db_by_site=pl_db_by_site,
+        shadow_db_by_site=shadow_db_by_site,
+    )
 
 
 def _to_numpy(x):
@@ -137,6 +242,69 @@ def _to_numpy(x):
     if hasattr(x, "numpy"):
         return x.numpy()
     return np.asarray(x)
+
+
+def sionna_cir_to_internal_frequency_response(
+    a: np.ndarray,
+    tau: np.ndarray,
+    freqs_hz: np.ndarray,
+    tx_array: ArrayConfig,
+    rx_array: ArrayConfig,
+    time_index: int = 0,
+) -> np.ndarray:
+    """Convert official Sionna CIR axes to ``H[U,TX,F,Nr,Nt]``.
+
+    Expected Sionna axes are
+    ``a[B,RX,RX_ANT,TX,TX_ANT,PATH,TIME]`` and
+    ``tau[B,RX,TX,PATH]``. The antenna axes are then explicitly permuted from
+    Sionna ``PanelArray`` ordering to this project's codebook ordering.
+    """
+    a_np = np.asarray(a)
+    tau_np = np.asarray(tau)
+    if a_np.ndim != 7 or tau_np.ndim != 4:
+        raise ChannelBackendError(
+            f"Unexpected Sionna CIR shapes a={a_np.shape}, tau={tau_np.shape}"
+        )
+    if a_np.shape[0] != 1 or tau_np.shape[0] != 1:
+        raise ChannelBackendError("The simulator expects one Sionna batch per drop")
+    if not 0 <= int(time_index) < int(a_np.shape[-1]):
+        raise ChannelBackendError(
+            f"Sionna time_index={time_index} outside TIME axis {a_np.shape[-1]}"
+        )
+    a0 = a_np[0, :, :, :, :, :, int(time_index)]  # [U,Nr,TX,Nt,L]
+    t0 = tau_np[0]                                  # [U,TX,L]
+    if (
+        a0.shape[0] != t0.shape[0]
+        or a0.shape[2] != t0.shape[1]
+        or a0.shape[4] != t0.shape[2]
+    ):
+        raise ChannelBackendError(
+            f"Incompatible Sionna CIR axes a={a_np.shape}, tau={tau_np.shape}"
+        )
+    if int(a0.shape[1]) != int(rx_array.num_ant):
+        raise ChannelBackendError(
+            f"Sionna RX antenna dimension {a0.shape[1]} != configured {rx_array.num_ant}"
+        )
+    if int(a0.shape[3]) != int(tx_array.num_ant):
+        raise ChannelBackendError(
+            f"Sionna TX antenna dimension {a0.shape[3]} != configured {tx_array.num_ant}"
+        )
+
+    phase = np.exp(
+        -1j
+        * 2.0
+        * np.pi
+        * np.asarray(freqs_hz, dtype=float)[None, None, :, None]
+        * t0[:, :, None, :]
+    )  # [U,TX,F,L]
+    h_sionna = np.einsum("urtnl,utfl->utfrn", a0, phase, optimize=True)
+    rx_source = sionna_panelarray_source_indices(rx_array)
+    tx_source = sionna_panelarray_source_indices(tx_array)
+    return np.take(
+        np.take(h_sionna, rx_source, axis=3),
+        tx_source,
+        axis=4,
+    )
 
 
 class SionnaTR38901Adapter:
@@ -192,15 +360,27 @@ class SionnaTR38901Adapter:
             polarization = sionna_cfg.get(f"{role}_polarization", pol_default)
             polarization_type = sionna_cfg.get(f"{role}_polarization_type", pol_type_default)
             antenna_pattern = sionna_cfg.get(f"{role}_antenna_pattern", "38.901" if role == "bs" else "omni")
-            base = dict(polarization=polarization,
-                        polarization_type=polarization_type,
-                        antenna_pattern=antenna_pattern,
-                        carrier_frequency=fc_hz)
+            base = dict(
+                polarization=polarization,
+                polarization_type=polarization_type,
+                antenna_pattern=antenna_pattern,
+                carrier_frequency=fc_hz,
+                element_vertical_spacing=float(array_cfg.d_v_lambda),
+                element_horizontal_spacing=float(array_cfg.d_h_lambda),
+                panel_vertical_spacing=float(rows_per_panel)
+                * float(array_cfg.d_v_lambda),
+                panel_horizontal_spacing=float(cols_per_panel)
+                * float(array_cfg.d_h_lambda),
+            )
             return [
+                # Official Sionna 1.2+ names: num_rows/num_cols are panel-grid
+                # dimensions, not total antenna-element dimensions.
+                dict(base, num_rows_per_panel=rows_per_panel,
+                     num_cols_per_panel=cols_per_panel,
+                     num_rows=rows_panels, num_cols=cols_panels),
+                # Compatibility with releases that used explicit panel suffixes.
                 dict(base, num_rows_per_panel=rows_per_panel, num_cols_per_panel=cols_per_panel,
                      num_rows_panels=rows_panels, num_cols_panels=cols_panels),
-                dict(base, num_rows_per_panel=rows_per_panel, num_cols_per_panel=cols_per_panel),
-                dict(base, num_rows=rows_per_panel * rows_panels, num_cols=cols_per_panel * cols_panels),
             ]
 
         def _make_panel_array(array_cfg: ArrayConfig, role: str):
@@ -265,61 +445,14 @@ class SionnaTR38901Adapter:
         a, tau = channel_model(num_time_samples=1, sampling_frequency=bw_hz)
         a_np = _to_numpy(a)
         tau_np = _to_numpy(tau)
-        # Documented shape for Sionna 1.0.2 in this environment:
-        #   a   [B, num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths, T]
-        #   tau [B, num_rx, num_tx, num_paths]
-        # Convert to the simulator-internal shape H[U, TX, F, Nr, Nt].
-        if a_np.ndim != 7 or tau_np.ndim != 4:
-            raise ChannelBackendError(f"Unexpected Sionna CIR shapes a={a_np.shape}, tau={tau_np.shape}")
-        a0 = a_np[0, :, :, :, :, :, 0]  # [U, Nr, TX, Nt, L]
-        t0 = tau_np[0]                  # [U, TX, L]
-        num_u, nrx_sionna, num_tx, ntx_sionna, num_path = a0.shape
-        h = np.zeros((num_u, num_tx, num_f, nrx_sionna, ntx_sionna), dtype=np.complex128)
-        for fi, f in enumerate(freqs):
-            ph = np.exp(-1j * 2.0 * np.pi * f * t0)  # [U, TX, L]
-            # a0 indices are u,r,t,n,l. The previous v2.4.1 hotfix used
-            # u,r,n,t,l, which swaps TX-unit and TX-antenna axes and fails
-            # for multi-sector/multi-TXRU topologies.
-            h[:, :, fi, :, :] = np.einsum("urtnl,utl->utrn", a0, ph, optimize=True)
-
-        def _match_antenna_axis(x: np.ndarray, axis: int, target: int, role: str) -> np.ndarray:
-            """Match Sionna PanelArray antenna count to the simulator AE vector.
-
-            Sionna PanelArray reports one antenna dimension per spatial element for
-            the dual-polarized panel configuration used here, while the simulator
-            explicitly represents the 3GPP P dimension in the beam vector. If the
-            simulator target dimension is an integer multiple of the Sionna
-            dimension, duplicate the channel over the polarization blocks and
-            scale by sqrt(factor) so unit-norm single-polarization DFT beams keep
-            the expected per-port power normalization.
-            """
-            cur = int(x.shape[axis])
-            tgt = int(target)
-            if cur == tgt:
-                return x
-            if tgt > cur and tgt % cur == 0:
-                rep = tgt // cur
-                return np.repeat(x, rep, axis=axis) / np.sqrt(float(rep))
-            if cur > tgt and cur % tgt == 0:
-                # Conservative fallback for APIs that already expand polarization
-                # more than the simulator vector. Average groups rather than silently
-                # truncating.
-                rep = cur // tgt
-                new_shape = list(x.shape)
-                new_shape[axis] = tgt
-                new_shape.insert(axis + 1, rep)
-                return x.reshape(new_shape).mean(axis=axis + 1) * np.sqrt(float(rep))
-            raise ChannelBackendError(
-                f"Sionna {role} antenna dimension {cur} is incompatible with simulator target {tgt}. "
-                f"Check tx_array/ue_array P/M/N/Mg/Ng/Mp/Np and Sionna PanelArray polarization settings."
-            )
-
-        h = _match_antenna_axis(h, axis=3, target=self.rx_array.num_ant, role="RX")
-        h = _match_antenna_axis(h, axis=4, target=self.tx_array.num_ant, role="TX")
+        h = sionna_cir_to_internal_frequency_response(
+            a_np, tau_np, freqs, self.tx_array, self.rx_array, time_index=0
+        )
+        num_u = int(h.shape[0])
         # Pathloss is already included by Sionna. Fill diagnostic arrays with NaN.
         status = (
             f"OK: Sionna CIR a={a_np.shape}, tau={tau_np.shape}, "
-            f"internal_h={h.shape}, sionna_rx_ant={nrx_sionna}, sionna_tx_ant={ntx_sionna}"
+            f"internal_h={h.shape}, time_index=0, antenna_order=explicitly_mapped"
         )
         return ChannelRealization(h_freq=h, freqs_hz=freqs,
                                   pathloss_db=np.full(num_u, np.nan),
@@ -336,17 +469,21 @@ def generate_channel(topology: Topology,
     model = str(cfg.get("scenario", {}).get("channel_model", "numpy_geometric_uma")).lower()
     if model.startswith("sionna_tr38901_"):
         try:
-            return SionnaTR38901Adapter(model, cfg, tx_array, rx_array).generate(topology, rng)
+            channel = SionnaTR38901Adapter(model, cfg, tx_array, rx_array).generate(topology, rng)
         except Exception as e:
             if bool(cfg.get("sionna", {}).get("fallback_to_numpy_if_unavailable", True)):
-                ch = generate_numpy_geometric_channel(topology, cfg, tx_array, rx_array, rng,
-                                                      backend_name=f"fallback_numpy_for_{model}")
-                ch.backend_status = f"FALLBACK: {type(e).__name__}: {e}"
-                return ch
-            raise
-    if model in ("numpy_geometric_uma", "numpy_geometric"):
-        return generate_numpy_geometric_channel(topology, cfg, tx_array, rx_array, rng)
-    raise ValueError(f"Unsupported scenario.channel_model={model}")
+                channel = generate_numpy_geometric_channel(
+                    topology, cfg, tx_array, rx_array, rng,
+                    backend_name=f"fallback_numpy_for_{model}",
+                )
+                channel.backend_status = f"FALLBACK: {type(e).__name__}: {e}"
+            else:
+                raise
+    elif model in ("numpy_geometric_uma", "numpy_geometric"):
+        channel = generate_numpy_geometric_channel(topology, cfg, tx_array, rx_array, rng)
+    else:
+        raise ValueError(f"Unsupported scenario.channel_model={model}")
+    return channel
 
 
 class SionnaImportProbe:

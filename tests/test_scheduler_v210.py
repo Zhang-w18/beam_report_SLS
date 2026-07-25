@@ -6,7 +6,7 @@ from beam_sls.codebook import BeamId
 from beam_sls.config import load_config
 from beam_sls.feedback import ServiceCandidate, UEReport
 from beam_sls.link_adaptation import BaseLinkAdapter, SchedulerLinkLookup
-from beam_sls.scheduler import schedule
+from beam_sls.scheduler import _panel_constraint_ok, schedule
 
 
 class _PiecewiseAdapter:
@@ -57,6 +57,21 @@ def _beam_ids(count):
         BeamId(cell=0, trp=0, panel=i, beam=0, global_index=i, tx_unit=i)
         for i in range(count)
     ]
+
+
+def test_dynamic_beam_pool_allows_any_n_codewords_per_trp():
+    cfg = load_config(None)
+    cfg["_resolved"] = {
+        "dynamic_beam_assignment": True,
+        "max_parallel_beams_per_trp": 2,
+    }
+    beams = [
+        BeamId(cell=0, trp=0, panel=0, beam=i, global_index=i, tx_unit=0)
+        for i in range(3)
+    ]
+
+    assert _panel_constraint_ok([(0, 0), (1, 1)], [], beams, cfg)
+    assert not _panel_constraint_ok([(0, 0), (1, 1), (2, 2)], [], beams, cfg)
 
 
 def test_scheduler_lookup_matches_reference_across_decision_boundaries():
@@ -164,3 +179,66 @@ def test_incremental_full_gamma_matches_v29_reference_greedy():
     assert optimized.objective_value == reference.objective_value
     assert optimized.metadata["stats"]["interference_matrix_elements"] == 64
     assert optimized.metadata["stats"]["implementation"] == "v2.10_incremental_vectorized_full_gamma"
+
+
+def test_all_scheduler_algorithms_apply_proportional_fair_weights():
+    beams = _beam_ids(2)
+    reports = [
+        UEReport(0, "topk_conflict_id", [ServiceCandidate(0, 10.0, 3)]),
+        UEReport(1, "topk_conflict_id", [ServiceCandidate(1, 5.0, 1)]),
+    ]
+    algorithms = [
+        "greedy",
+        "exhaustive",
+        "hard_conflict_greedy",
+        "adaptive_lambda_greedy",
+    ]
+
+    for algorithm in algorithms:
+        cfg = load_config(None)
+        cfg["scheduler"].update({
+            "algorithm": algorithm,
+            "domain_mode": "global",
+            "objective": "proportional_fair",
+            "use_panel_constraint": True,
+        })
+        cfg["_resolved"] = {"max_mu_order": 1}
+        result = schedule(
+            reports, beams, cfg,
+            tbar_mbps={0: 100.0, 1: 1.0},
+            link_adapter=_PiecewiseAdapter(),
+        )
+        assert [link.ue_id for link in result.links] == [1], algorithm
+        if algorithm == "hard_conflict_greedy":
+            assert result.metadata["stats"]["node_weight"] == "pf_weighted_su_rate"
+
+
+def test_all_scheduler_algorithms_keep_raw_rate_order_for_sum_rate():
+    beams = _beam_ids(2)
+    reports = [
+        UEReport(0, "topk_conflict_id", [ServiceCandidate(0, 10.0, 3)]),
+        UEReport(1, "topk_conflict_id", [ServiceCandidate(1, 5.0, 1)]),
+    ]
+
+    for algorithm in [
+        "greedy",
+        "exhaustive",
+        "hard_conflict_greedy",
+        "adaptive_lambda_greedy",
+    ]:
+        cfg = load_config(None)
+        cfg["scheduler"].update({
+            "algorithm": algorithm,
+            "domain_mode": "global",
+            "objective": "sum_rate",
+            "use_panel_constraint": True,
+        })
+        cfg["_resolved"] = {"max_mu_order": 1}
+        result = schedule(
+            reports, beams, cfg,
+            tbar_mbps={0: 100.0, 1: 1.0},
+            link_adapter=_PiecewiseAdapter(),
+        )
+        assert [link.ue_id for link in result.links] == [0], algorithm
+        if algorithm == "hard_conflict_greedy":
+            assert result.metadata["stats"]["node_weight"] == "su_rate_mbps"

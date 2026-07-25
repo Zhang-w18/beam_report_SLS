@@ -100,8 +100,11 @@ def plot_topology(topology, cfg: Dict, path: str | Path) -> None:
     topo_cfg = cfg.get("topology", {})
     max_d = float(cfg.get("coverage_heatmap", {}).get("max_distance_m", cfg.get("scenario", {}).get("max_ue_distance_m", 300.0)))
     isd = float(topo_cfg.get("isd_m", cfg.get("scenario", {}).get("isd_m", 500.0)))
-    fig = plt.figure(figsize=(7, 6))
+    is_dense_multisite = len(topology.sites) > 3
+    fig = plt.figure(figsize=(10, 8) if is_dense_multisite else (7, 6))
     ax = plt.gca()
+    extent_x = [float(site.x_m) for site in topology.sites]
+    extent_y = [float(site.y_m) for site in topology.sites]
 
     for site in topology.sites:
         ax.scatter([site.x_m], [site.y_m], marker="^", s=90, label=f"Site {site.site_id}")
@@ -116,20 +119,41 @@ def plot_topology(topology, cfg: Dict, path: str | Path) -> None:
         ax.plot([site.x_m, site.x_m + radius * np.cos(az)],
                 [site.y_m, site.y_m + radius * np.sin(az)],
                 linewidth=1.8)
+        extent_x.append(float(site.x_m + radius * np.cos(az)))
+        extent_y.append(float(site.y_m + radius * np.sin(az)))
         for edge in (az - half, az + half):
             ax.plot([site.x_m, site.x_m + radius * np.cos(edge)],
                     [site.y_m, site.y_m + radius * np.sin(edge)],
                     linestyle="--", linewidth=0.9)
-        tx = site.x_m + (radius * 0.58) * np.cos(az)
-        ty = site.y_m + (radius * 0.58) * np.sin(az)
-        ax.text(tx, ty, f"Sector {sec.sector_id}\ncell {sec.cell_id}\naz={sec.azimuth_deg:.0f}°",
-                ha="center", va="center", fontsize=8)
+            extent_x.append(float(site.x_m + radius * np.cos(edge)))
+            extent_y.append(float(site.y_m + radius * np.sin(edge)))
+        label_radius = radius * (0.82 if is_dense_multisite else 0.58)
+        tx = site.x_m + label_radius * np.cos(az)
+        ty = site.y_m + label_radius * np.sin(az)
+        label = (
+            f"cell {sec.cell_id}\nS{sec.sector_id} {sec.azimuth_deg:.0f}°"
+            if is_dense_multisite
+            else f"Sector {sec.sector_id}\ncell {sec.cell_id}\naz={sec.azimuth_deg:.0f}°"
+        )
+        ax.text(
+            tx, ty, label, ha="center", va="center",
+            fontsize=7 if is_dense_multisite else 8,
+            bbox=dict(facecolor="white", edgecolor="none", alpha=0.58, pad=0.8)
+            if is_dense_multisite else None,
+        )
 
     if topology.ues:
         xs = [u.x_m for u in topology.ues]
         ys = [u.y_m for u in topology.ues]
         cs = [u.serving_cell for u in topology.ues]
-        sc = ax.scatter(xs, ys, c=cs, s=16, alpha=0.8, label="UE")
+        extent_x.extend(float(x) for x in xs)
+        extent_y.extend(float(y) for y in ys)
+        sc = ax.scatter(
+            xs, ys, c=cs,
+            s=12 if is_dense_multisite else 16,
+            alpha=0.65 if is_dense_multisite else 0.8,
+            label="UE",
+        )
         try:
             fig.colorbar(sc, ax=ax, label="Serving cell")
         except Exception:
@@ -158,12 +182,10 @@ def plot_topology(topology, cfg: Dict, path: str | Path) -> None:
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
     ax.set_title(f"Topology: {len(topology.sites)} sites, {topology.num_cells} cells/sectors, UE drops")
-    xs = [float(s.x_m) for s in topology.sites] + [float(u.x_m) for u in topology.ues]
-    ys = [float(s.y_m) for s in topology.sites] + [float(u.y_m) for u in topology.ues]
-    if xs and ys:
+    if extent_x and extent_y:
         pad = max(80.0, 0.25 * max(max_d, isd))
-        ax.set_xlim(min(xs) - pad, max(xs) + pad)
-        ax.set_ylim(min(ys) - pad, max(ys) + pad)
+        ax.set_xlim(min(extent_x) - pad, max(extent_x) + pad)
+        ax.set_ylim(min(extent_y) - pad, max(extent_y) + pad)
     else:
         lim = max(max_d, isd * 0.6)
         ax.set_xlim(-lim, max(isd * 1.05, lim))

@@ -46,6 +46,31 @@ def normalize_domain_mode(mode: str | None) -> str:
     raise ValueError(f"Unknown scheduler.domain_mode={mode}")
 
 
+def normalize_cluster_mode(scheduler_cfg: Dict) -> str:
+    raw = str(scheduler_cfg.get("cluster_mode") or "").strip().lower()
+    aliases = {
+        "cell": "per_cell",
+        "sector": "per_cell",
+        "site": "per_site",
+        "network": "global",
+        "manual": "custom",
+    }
+    if raw:
+        mode = aliases.get(raw, raw)
+        if mode not in ("per_cell", "per_site", "global", "custom"):
+            raise ValueError(
+                "scheduler.cluster_mode must be one of: "
+                "per_cell, per_site, global, custom"
+            )
+        return mode
+    legacy = normalize_domain_mode(scheduler_cfg.get("domain_mode", "global"))
+    return {
+        "per_sector_independent": "per_cell",
+        "per_site_joint": "per_site",
+        "global": "global",
+    }[legacy]
+
+
 def is_site_domain_mode(mode: str | None) -> bool:
     return normalize_domain_mode(mode) == "per_site_joint"
 
@@ -104,16 +129,28 @@ def schedule(reports: List[UEReport],
              link_adapter=None,
              algorithm: str | None = None,
              progress_callback: Callable[[str], None] | None = None) -> ScheduleResult:
-    domain_mode = normalize_domain_mode(cfg["scheduler"].get("domain_mode", "global"))
-    if domain_mode == "per_site_joint":
+    cluster_mode = normalize_cluster_mode(cfg["scheduler"])
+    domain_mode = {
+        "per_cell": "per_sector_independent",
+        "per_site": "per_site_joint",
+        "global": "global",
+        "custom": "static_cluster",
+    }[cluster_mode]
+    if cluster_mode != "global":
+        def cluster_key(report: UEReport) -> int:
+            if report.scheduling_cluster is not None:
+                return int(report.scheduling_cluster)
+            if cluster_mode == "per_site" and report.site_id is not None:
+                return int(report.site_id)
+            if cluster_mode == "per_cell" and report.serving_cell is not None:
+                return int(report.serving_cell)
+            raise ValueError(
+                "Each UE report must carry scheduling_cluster for "
+                f"scheduler.cluster_mode={cluster_mode}"
+            )
         return schedule_grouped_domains(reports, beam_ids, cfg, tbar_mbps, link_adapter,
                                         domain_mode=domain_mode, algorithm=algorithm,
-                                        group_key=lambda r: 0 if r.site_id is None else int(r.site_id),
-                                        progress_callback=progress_callback)
-    if domain_mode == "per_sector_independent":
-        return schedule_grouped_domains(reports, beam_ids, cfg, tbar_mbps, link_adapter,
-                                        domain_mode=domain_mode, algorithm=algorithm,
-                                        group_key=lambda r: 0 if r.serving_cell is None else int(r.serving_cell),
+                                        group_key=cluster_key,
                                         progress_callback=progress_callback)
     return _schedule_single_domain(reports, beam_ids, cfg, tbar_mbps, link_adapter,
                                    domain_id=None, domain_mode="global", algorithm=algorithm,
@@ -242,19 +279,77 @@ def _pf_weight(ue_id: int, cfg: Dict, tbar_mbps: Dict[int, float] | None) -> flo
     return 1.0 / max(init if tbar_mbps is None else tbar_mbps.get(ue_id, init), 1e-6)
 
 
+def update_pf_throughput(tbar_mbps: Dict[int, float],
+                         ue_ids: Sequence[int],
+                         goodput_mbps: Dict[int, float],
+                         cfg: Dict) -> Dict[int, float]:
+    """Apply the PF EWMA once per TTI, including zero for unscheduled UEs."""
+    window = int(cfg["scheduler"].get("pf_averaging_window_tti", 100))
+    if window <= 0:
+        raise ValueError("scheduler.pf_averaging_window_tti must be > 0")
+    alpha = 1.0 / float(window)
+    init = float(cfg["scheduler"].get("pf_tbar_init_mbps", 1.0))
+    for ue_id in ue_ids:
+        u = int(ue_id)
+        old = float(tbar_mbps.get(u, init))
+        served = float(goodput_mbps.get(u, 0.0))
+        tbar_mbps[u] = (1.0 - alpha) * old + alpha * served
+    return tbar_mbps
+
+
 def _panel_constraint_ok(assignments: Sequence[Tuple[int, int]],
                          reports: List[UEReport],
                          beam_ids: Sequence[BeamId],
                          cfg: Dict) -> bool:
     if not cfg["scheduler"].get("use_panel_constraint", True):
         return True
-    used = set()
+    dynamic = bool(cfg.get("_resolved", {}).get("dynamic_beam_assignment", False))
+    capacity = int(cfg.get("_resolved", {}).get("max_parallel_beams_per_trp", 1)) if dynamic else 1
+    used: Dict[Tuple, int] = {}
     for ue_id, b in assignments:
-        key = beam_ids[b].panel_key()
-        if key in used:
+        key = beam_ids[b].trp_key() if dynamic else beam_ids[b].panel_key()
+        used[key] = used.get(key, 0) + 1
+        if used[key] > capacity:
             return False
-        used.add(key)
     return True
+
+
+def _resource_key(beam_id: BeamId, cfg: Dict) -> Tuple:
+    dynamic = bool(cfg.get("_resolved", {}).get("dynamic_beam_assignment", False))
+    return beam_id.trp_key() if dynamic else beam_id.panel_key()
+
+
+def _resource_capacity(cfg: Dict) -> int:
+    if bool(cfg.get("_resolved", {}).get("dynamic_beam_assignment", False)):
+        return max(1, int(cfg.get("_resolved", {}).get("max_parallel_beams_per_trp", 1)))
+    return 1
+
+
+def _reported_interference_power(rep: UEReport,
+                                 service_beam: int,
+                                 interferer_beam: int,
+                                 signal_power_w: float,
+                                 noise_power_w: float,
+                                 cfg: Dict) -> float:
+    measured = rep.measured_interference_beams
+    if measured is not None and int(interferer_beam) not in measured:
+        policy = str(
+            cfg["scheduler"].get("unknown_interference_policy", "zero")
+        ).lower()
+        if policy == "zero":
+            return 0.0
+        raise ValueError(
+            "scheduler.unknown_interference_policy currently supports only "
+            f"'zero', got {policy!r}"
+        )
+    gamma = float(rep.full_gamma[int(service_beam), int(interferer_beam)])
+    if gamma <= 0.0:
+        raise ValueError(
+            "Measured full-Gamma entry is missing or non-positive for "
+            f"UE {rep.ue_id}, service beam {service_beam}, "
+            f"interferer beam {interferer_beam}"
+        )
+    return max(0.0, signal_power_w / gamma - noise_power_w)
 
 
 def _evaluate_assignments(assignments: Sequence[Tuple[int, int]],
@@ -289,9 +384,9 @@ def _evaluate_assignments(assignments: Sequence[Tuple[int, int]],
             for other_ue, other_b in assignments:
                 if other_ue == ue_id:
                     continue
-                # I = S/Gamma - N, clipped for numerical safety.
-                g = float(rep.full_gamma[b, other_b])
-                den += max(0.0, s / max(g, 1e-30) - float(rep.full_noise_power_w))
+                den += _reported_interference_power(
+                    rep, b, other_b, s, float(rep.full_noise_power_w), cfg
+                )
             pred_sinr_lin = s / max(den, 1e-30)
             if link_adapter is not None:
                 mcs = int(link_adapter.select_mcs_from_sinr_lin(float(pred_sinr_lin)))
@@ -403,6 +498,8 @@ def _sorted_report_copy(rep: UEReport,
                     candidates=cands,
                     site_id=rep.site_id,
                     serving_cell=rep.serving_cell,
+                    scheduling_cluster=rep.scheduling_cluster,
+                    measured_interference_beams=rep.measured_interference_beams,
                     full_gamma=rep.full_gamma,
                     full_service_power_w=rep.full_service_power_w,
                     full_noise_power_w=rep.full_noise_power_w)
@@ -506,7 +603,7 @@ def exhaustive_schedule(reports: List[UEReport],
 
     def dfs(start_index: int,
             assignments: List[Tuple[int, int]],
-            used_panel_keys: set,
+            used_panel_keys: Dict[Tuple, int],
             current_val: float,
             current_links: List[ScheduledLink]) -> None:
         nonlocal best_val, best_links
@@ -527,8 +624,8 @@ def exhaustive_schedule(reports: List[UEReport],
                     continue
             r = reports[i]
             for c in r.candidates:
-                key = beam_ids[c.beam_index].panel_key()
-                if use_panel_constraint and key in used_panel_keys:
+                key = _resource_key(beam_ids[c.beam_index], cfg)
+                if use_panel_constraint and used_panel_keys.get(key, 0) >= _resource_capacity(cfg):
                     stats["panel_pruned_count"] += 1
                     continue
                 trial = assignments + [(r.ue_id, c.beam_index)]
@@ -539,12 +636,12 @@ def exhaustive_schedule(reports: List[UEReport],
                 stats["evaluated_assignment_count"] += 1
                 if not np.isfinite(val):
                     continue
-                next_keys = set(used_panel_keys)
+                next_keys = dict(used_panel_keys)
                 if use_panel_constraint:
-                    next_keys.add(key)
+                    next_keys[key] = next_keys.get(key, 0) + 1
                 dfs(i + 1, trial, next_keys, float(val), links)
 
-    dfs(0, [], set(), 0.0, [])
+    dfs(0, [], {}, 0.0, [])
     stats["best_objective_value"] = float(best_val)
     stats["num_scheduled"] = int(len(best_links))
     stats["num_scheduled_outage"] = int(sum(link.predicted_outage for link in best_links))
@@ -591,7 +688,7 @@ def _node_arrays(reports: Sequence[UEReport],
     nodes = [(r, c) for r in reports for c in r.candidates]
     ue_ids = np.asarray([r.ue_id for r, _ in nodes], dtype=np.int32)
     beam_indices = np.asarray([c.beam_index for _, c in nodes], dtype=np.int32)
-    panel_keys = [beam_ids[int(b)].panel_key() for b in beam_indices]
+    panel_keys = [_resource_key(beam_ids[int(b)], cfg) for b in beam_indices]
     weights = np.asarray([_pf_weight(r.ue_id, cfg, tbar_mbps) for r, _ in nodes], dtype=float)
     rates = np.asarray([
         0.0 if c.su_outage else (
@@ -651,7 +748,7 @@ def _optimized_limited_greedy_schedule(reports: List[UEReport],
     conflict_increment = np.zeros(count, dtype=float)
     selected: List[int] = []
     used_ues: set[int] = set()
-    used_panel_keys: set = set()
+    used_panel_keys: Dict[Tuple, int] = {}
     current_val = 0.0
     use_panel_constraint = bool(cfg["scheduler"].get("use_panel_constraint", True))
     rounds: List[Dict] = []
@@ -663,7 +760,8 @@ def _optimized_limited_greedy_schedule(reports: List[UEReport],
         remaining = np.asarray([int(u) not in used_ues for u in ue_ids], dtype=bool)
         remaining_count = int(np.count_nonzero(remaining))
         if use_panel_constraint:
-            panel_legal = np.asarray([key not in used_panel_keys for key in panel_keys], dtype=bool)
+            capacity = _resource_capacity(cfg)
+            panel_legal = np.asarray([used_panel_keys.get(key, 0) < capacity for key in panel_keys], dtype=bool)
             pruned = int(np.count_nonzero(remaining & ~panel_legal))
         else:
             panel_legal = np.ones(count, dtype=bool)
@@ -695,7 +793,8 @@ def _optimized_limited_greedy_schedule(reports: List[UEReport],
         selected.append(chosen)
         used_ues.add(int(ue_ids[chosen]))
         if use_panel_constraint:
-            used_panel_keys.add(panel_keys[chosen])
+            key = panel_keys[chosen]
+            used_panel_keys[key] = used_panel_keys.get(key, 0) + 1
         current_val += best_delta
         if count:
             conflict_increment += adjacency[:, chosen].astype(float) + adjacency[chosen, :].astype(float)
@@ -759,14 +858,15 @@ def _optimized_full_gamma_greedy_schedule(reports: List[UEReport],
         s = signal[i]
         n = noise[i]
         for j in range(count):
-            g = float(rep.full_gamma[int(cand.beam_index), int(beam_indices[j])])
-            interference[i, j] = max(0.0, s / max(g, 1e-30) - n)
+            interference[i, j] = _reported_interference_power(
+                rep, int(cand.beam_index), int(beam_indices[j]), s, n, cfg
+            )
 
     selected: List[int] = []
     selected_den = np.asarray([], dtype=float)
     incoming_den = noise.copy()
     used_ues: set[int] = set()
-    used_panel_keys: set = set()
+    used_panel_keys: Dict[Tuple, int] = {}
     current_val = 0.0
     use_panel_constraint = bool(cfg["scheduler"].get("use_panel_constraint", True))
     rounds: List[Dict] = []
@@ -778,7 +878,8 @@ def _optimized_full_gamma_greedy_schedule(reports: List[UEReport],
         remaining = np.asarray([int(u) not in used_ues for u in ue_ids], dtype=bool)
         remaining_count = int(np.count_nonzero(remaining))
         if use_panel_constraint:
-            panel_legal = np.asarray([key not in used_panel_keys for key in panel_keys], dtype=bool)
+            capacity = _resource_capacity(cfg)
+            panel_legal = np.asarray([used_panel_keys.get(key, 0) < capacity for key in panel_keys], dtype=bool)
             pruned = int(np.count_nonzero(remaining & ~panel_legal))
         else:
             panel_legal = np.ones(count, dtype=bool)
@@ -831,7 +932,8 @@ def _optimized_full_gamma_greedy_schedule(reports: List[UEReport],
         selected.append(chosen)
         used_ues.add(int(ue_ids[chosen]))
         if use_panel_constraint:
-            used_panel_keys.add(panel_keys[chosen])
+            key = panel_keys[chosen]
+            used_panel_keys[key] = used_panel_keys.get(key, 0) + 1
         current_val = best_val
 
     assignments = [(int(ue_ids[i]), int(beam_indices[i])) for i in selected]
@@ -995,7 +1097,8 @@ def hard_conflict_greedy_schedule(reports: List[UEReport],
 
     Selecting one node removes the selected UE's other nodes and only the
     conflicting candidate nodes of other UEs. It never removes an entire UE
-    merely because one of that UE's candidate beams conflicts.
+    merely because one of that UE's candidate beams conflicts. Node weights
+    use the configured scheduling objective, including PF weights when enabled.
     """
     started = perf_counter()
     max_q = _effective_max_mu_order(cfg)
@@ -1005,13 +1108,17 @@ def hard_conflict_greedy_schedule(reports: List[UEReport],
     num_su_outage_candidates = sum(int(c.su_outage) for r in reports for c in r.candidates)
     rep_by_ue = {r.ue_id: r for r in reports}
     pool: Dict[Tuple[int, int], float] = {
-        (r.ue_id, c.beam_index): _candidate_rate_mbps(r, c.beam_index, cfg, link_adapter)
+        (r.ue_id, c.beam_index): (
+            _pf_weight(r.ue_id, cfg, tbar_mbps)
+            * _candidate_rate_mbps(r, c.beam_index, cfg, link_adapter)
+        )
         for r in reports
         for c in r.candidates
         if not c.su_outage
     }
     initial_pool_size = len(pool)
     selected: List[Tuple[int, int]] = []
+    used_resource_counts: Dict[Tuple, int] = {}
     removed_same_ue = 0
     removed_conflict = 0
     removed_panel = 0
@@ -1036,7 +1143,8 @@ def hard_conflict_greedy_schedule(reports: List[UEReport],
         chosen = min(pool, key=lambda node: (-pool[node], node[0], node[1]))
         selected.append(chosen)
         chosen_ue, chosen_beam = chosen
-        chosen_panel = beam_ids[chosen_beam].panel_key()
+        chosen_panel = _resource_key(beam_ids[chosen_beam], cfg)
+        used_resource_counts[chosen_panel] = used_resource_counts.get(chosen_panel, 0) + 1
         del pool[chosen]
 
         for node in list(pool):
@@ -1046,7 +1154,11 @@ def hard_conflict_greedy_schedule(reports: List[UEReport],
             elif conflicts(chosen, node):
                 del pool[node]
                 removed_conflict += 1
-            elif use_panel_constraint and beam_ids[node[1]].panel_key() == chosen_panel:
+            elif (
+                use_panel_constraint
+                and _resource_key(beam_ids[node[1]], cfg) == chosen_panel
+                and used_resource_counts[chosen_panel] >= _resource_capacity(cfg)
+            ):
                 del pool[node]
                 removed_panel += 1
         elapsed = float(perf_counter() - started)
@@ -1075,7 +1187,11 @@ def hard_conflict_greedy_schedule(reports: List[UEReport],
         "removed_conflicting_candidates": int(removed_conflict),
         "removed_panel_candidates": int(removed_panel),
         "panel_constraint_enabled": use_panel_constraint,
-        "node_weight": "su_rate_mbps",
+        "node_weight": (
+            "pf_weighted_su_rate"
+            if cfg["scheduler"].get("objective", "sum_rate") == "proportional_fair"
+            else "su_rate_mbps"
+        ),
         "best_objective_value": float(final_val),
         "num_scheduled": int(len(final_links)),
         "num_scheduled_outage": int(sum(link.predicted_outage for link in final_links)),

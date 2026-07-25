@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Mapping, Sequence, Tuple
 
 import numpy as np
 
@@ -48,6 +48,7 @@ class UE:
     z_m: float = 1.5
     serving_cell: int = 0
     site_id: int = 0
+    scheduling_cluster: int = 0
 
     @property
     def distance_2d_m(self) -> float:
@@ -71,6 +72,7 @@ class UE:
             "z_m": float(self.z_m),
             "serving_cell": int(self.serving_cell),
             "site_id": int(self.site_id),
+            "scheduling_cluster": int(self.scheduling_cluster),
             "distance_2d_m": self.distance_2d_m,
             "azimuth_deg": float(np.rad2deg(self.azimuth_rad)),
         }
@@ -108,6 +110,248 @@ class Topology:
 
 def _angle_wrap(rad: float) -> float:
     return float(np.arctan2(np.sin(rad), np.cos(rad)))
+
+
+MEASUREMENT_DOMAIN_ALIASES = {
+    "trp": "trp",
+    "cell": "trp",
+    "serving_cell": "trp",
+    "site": "site",
+    "site_domain": "site",
+    "neighbor": "neighbor_area",
+    "neighbour": "neighbor_area",
+    "neighbor_area": "neighbor_area",
+    "neighbour_area": "neighbor_area",
+}
+
+
+def normalize_measurement_domain(mode: str | None) -> str:
+    raw = str(mode or "site").strip().lower()
+    try:
+        return MEASUREMENT_DOMAIN_ALIASES[raw]
+    except KeyError as exc:
+        raise ValueError(
+            "measurement.domain_mode must be one of: trp, site, neighbor_area"
+        ) from exc
+
+
+def serving_cell_from_position(x_m: float,
+                               y_m: float,
+                               sites: Sequence[Site],
+                               sectors: Sequence[Sector]) -> Tuple[int, int]:
+    """Associate a point geometrically: nearest site, then nearest boresight.
+
+    This intentionally does not use pathloss, shadowing, fading, or RSRP.
+    """
+    if not sites or not sectors:
+        raise ValueError("Serving-cell association requires at least one site and sector")
+    site = min(
+        sites,
+        key=lambda s: (
+            float(np.hypot(float(x_m) - s.x_m, float(y_m) - s.y_m)),
+            int(s.site_id),
+        ),
+    )
+    site_sectors = [sec for sec in sectors if int(sec.site_id) == int(site.site_id)]
+    if not site_sectors:
+        raise ValueError(f"Site {site.site_id} has no sectors")
+    azimuth = float(np.arctan2(float(y_m) - site.y_m, float(x_m) - site.x_m))
+    sector = min(
+        site_sectors,
+        key=lambda sec: (
+            abs(_angle_wrap(azimuth - np.deg2rad(float(sec.azimuth_deg)))),
+            int(sec.cell_id),
+        ),
+    )
+    return int(sector.cell_id), int(site.site_id)
+
+
+def _cell_facing_point(site: Site,
+                       sectors: Sequence[Sector],
+                       x_m: float,
+                       y_m: float) -> int:
+    site_sectors = [sec for sec in sectors if int(sec.site_id) == int(site.site_id)]
+    if not site_sectors:
+        raise ValueError(f"Site {site.site_id} has no sectors")
+    azimuth = float(np.arctan2(float(y_m) - site.y_m, float(x_m) - site.x_m))
+    return int(min(
+        site_sectors,
+        key=lambda sec: (
+            abs(_angle_wrap(azimuth - np.deg2rad(float(sec.azimuth_deg)))),
+            int(sec.cell_id),
+        ),
+    ).cell_id)
+
+
+def neighbor_area_vertex_sites(topo: Topology, ue: UE) -> List[Site]:
+    """Return the available first-tier sites at the serving hexagon vertices.
+
+    A finite layout can contain fewer than six vertices at its outer boundary.
+    """
+    anchor = topo.site_by_id(int(ue.site_id))
+    candidates = [
+        (
+            float(np.hypot(site.x_m - anchor.x_m, site.y_m - anchor.y_m)),
+            int(site.site_id),
+            site,
+        )
+        for site in topo.sites
+        if int(site.site_id) != int(anchor.site_id)
+    ]
+    if not candidates:
+        return []
+    nearest_distance = min(item[0] for item in candidates)
+    tolerance = max(1e-6, nearest_distance * 1e-6)
+    first_tier = [
+        item for item in candidates
+        if item[0] <= nearest_distance + tolerance
+    ]
+    first_tier.sort(key=lambda item: (
+        float(np.arctan2(item[2].y_m - anchor.y_m, item[2].x_m - anchor.x_m)),
+        item[1],
+    ))
+    return [item[2] for item in first_tier[:6]]
+
+
+def measurement_cell_ids_by_ue(topo: Topology,
+                               domain_mode: str) -> Dict[int, List[int]]:
+    """Resolve measured cells independently from the scheduler domain."""
+    mode = normalize_measurement_domain(domain_mode)
+    by_site: Dict[int, List[int]] = {}
+    for sector in topo.sectors:
+        by_site.setdefault(int(sector.site_id), []).append(int(sector.cell_id))
+    result: Dict[int, List[int]] = {}
+    for ue in topo.ues:
+        if mode == "trp":
+            cells = [int(ue.serving_cell)]
+        elif mode == "site":
+            cells = sorted(by_site.get(int(ue.site_id), []))
+        else:
+            # Each available hexagon vertex contributes exactly one
+            # inward-facing cell, not all cells at the vertex site.
+            vertices = neighbor_area_vertex_sites(topo, ue)
+            if not vertices:
+                raise ValueError(
+                    "measurement.domain_mode=neighbor_area requires at least "
+                    f"one neighboring site; UE {ue.ue_id} has none"
+                )
+            cells = []
+            for site in vertices:
+                cells.append(_cell_facing_point(site, topo.sectors, ue.x_m, ue.y_m))
+        result[int(ue.ue_id)] = sorted(set(cells))
+    return result
+
+
+def resolve_static_scheduling_clusters(
+        topo: Topology,
+        scheduler_cfg: Mapping) -> Tuple[Dict[int, List[int]], Dict[int, int]]:
+    """Return a complete, disjoint static partition and cell-to-cluster map."""
+    mode = str(scheduler_cfg.get("cluster_mode") or "").strip().lower()
+    if not mode:
+        legacy = str(scheduler_cfg.get("domain_mode", "per_site_joint")).lower()
+        if legacy in ("global", "network", "global_joint", "network_joint"):
+            mode = "global"
+        elif legacy in (
+            "sector", "cell", "per_sector", "per_cell",
+            "sector_independent", "cell_independent",
+            "per_sector_independent", "per_cell_independent",
+            "single_site_three_sector_independent",
+        ):
+            mode = "per_cell"
+        else:
+            mode = "per_site"
+    aliases = {
+        "cell": "per_cell",
+        "sector": "per_cell",
+        "site": "per_site",
+        "network": "global",
+        "manual": "custom",
+    }
+    mode = aliases.get(mode, mode)
+    cell_ids = sorted(int(sec.cell_id) for sec in topo.sectors)
+    if mode == "per_cell":
+        clusters = {cell: [cell] for cell in cell_ids}
+    elif mode == "per_site":
+        clusters: Dict[int, List[int]] = {}
+        for sec in topo.sectors:
+            clusters.setdefault(int(sec.site_id), []).append(int(sec.cell_id))
+        clusters = {cid: sorted(cells) for cid, cells in sorted(clusters.items())}
+    elif mode == "global":
+        clusters = {0: cell_ids}
+    elif mode == "custom":
+        raw_groups = scheduler_cfg.get("static_clusters", [])
+        if not isinstance(raw_groups, list) or not raw_groups:
+            raise ValueError(
+                "scheduler.cluster_mode=custom requires non-empty "
+                "scheduler.static_clusters"
+            )
+        clusters = {}
+        for index, entry in enumerate(raw_groups):
+            if isinstance(entry, Mapping):
+                cluster_id = int(entry.get("cluster_id", index))
+                raw_cells = entry.get("cell_ids", [])
+            else:
+                cluster_id = int(index)
+                raw_cells = entry
+            if cluster_id in clusters:
+                raise ValueError(f"Duplicate scheduling cluster_id={cluster_id}")
+            clusters[cluster_id] = sorted(int(cell) for cell in raw_cells)
+    else:
+        raise ValueError(
+            "scheduler.cluster_mode must be one of: "
+            "per_cell, per_site, global, custom"
+        )
+
+    seen: Dict[int, int] = {}
+    valid = set(cell_ids)
+    for cluster_id, cells in clusters.items():
+        if not cells:
+            raise ValueError(f"Scheduling cluster {cluster_id} is empty")
+        for cell in cells:
+            if cell not in valid:
+                raise ValueError(
+                    f"Scheduling cluster {cluster_id} contains unknown cell {cell}"
+                )
+            if cell in seen:
+                raise ValueError(
+                    f"Cell {cell} belongs to scheduling clusters "
+                    f"{seen[cell]} and {cluster_id}"
+                )
+            seen[cell] = int(cluster_id)
+    missing = sorted(valid - set(seen))
+    if missing:
+        raise ValueError(
+            "Static scheduling clusters must cover every cell exactly once; "
+            f"missing cells={missing}"
+        )
+    return clusters, seen
+
+
+def assign_ues_to_scheduling_clusters(
+        topo: Topology,
+        cell_to_cluster: Mapping[int, int]) -> Dict[int, int]:
+    """Assign every UE to the unique cluster owning its serving cell."""
+    result: Dict[int, int] = {}
+    for ue in topo.ues:
+        cell = int(ue.serving_cell)
+        if cell not in cell_to_cluster:
+            raise ValueError(f"Serving cell {cell} has no scheduling cluster")
+        cluster_id = int(cell_to_cluster[cell])
+        ue.scheduling_cluster = cluster_id
+        result[int(ue.ue_id)] = cluster_id
+    return result
+
+
+def cluster_cell_ids_by_ue(
+        topo: Topology,
+        clusters: Mapping[int, Sequence[int]]) -> Dict[int, List[int]]:
+    """The unified measurement/scheduling domain for every UE."""
+    return {
+        int(ue.ue_id): sorted(
+            int(cell) for cell in clusters[int(ue.scheduling_cluster)]
+        )
+        for ue in topo.ues
+    }
 
 
 def default_sector_azimuths(num_sectors: int) -> List[float]:
@@ -216,6 +460,43 @@ def drop_uniform_sector(num_ues: int,
     return ues
 
 
+def drop_uniform_cell(num_ues: int,
+                      min_radius_m: float,
+                      max_radius_m: float,
+                      sector: Sector,
+                      site: Site,
+                      sites: Sequence[Site],
+                      sectors: Sequence[Sector],
+                      rng: np.random.Generator,
+                      start_ue_id: int = 0,
+                      ue_height_m: float = 1.5) -> List[UE]:
+    """Uniformly sample the geometric cell and keep exactly ``num_ues`` UEs."""
+    accepted: List[UE] = []
+    attempts = 0
+    max_attempts = max(1000, int(num_ues) * 10000)
+    while len(accepted) < int(num_ues):
+        attempts += 1
+        if attempts > max_attempts:
+            raise RuntimeError(
+                f"Could not place {num_ues} UEs in cell {sector.cell_id}; "
+                "check radius, site spacing, and sector geometry"
+            )
+        candidate = drop_uniform_sector(
+            1, min_radius_m, max_radius_m, sector, site, rng,
+            start_ue_id=start_ue_id + len(accepted),
+            ue_height_m=ue_height_m,
+        )[0]
+        serving_cell, site_id = serving_cell_from_position(
+            candidate.x_m, candidate.y_m, sites, sectors
+        )
+        if serving_cell != int(sector.cell_id):
+            continue
+        candidate.serving_cell = serving_cell
+        candidate.site_id = site_id
+        accepted.append(candidate)
+    return accepted
+
+
 def make_topology(cfg: Dict, rng: np.random.Generator) -> Topology:
     sc = cfg["scenario"]
     topo_cfg = cfg.get("topology", {})
@@ -236,12 +517,14 @@ def make_topology(cfg: Dict, rng: np.random.Generator) -> Topology:
         raise ValueError("v2 currently supports ue_drop.distribution=uniform_in_sector")
     for sec in sectors:
         site = next(s for s in sites if s.site_id == sec.site_id)
-        new_ues = drop_uniform_sector(
+        new_ues = drop_uniform_cell(
             num_ues=int(ud["num_ut_per_sector"]),
             min_radius_m=float(sc["min_ue_distance_m"]),
             max_radius_m=float(sc["max_ue_distance_m"]),
             sector=sec,
             site=site,
+            sites=sites,
+            sectors=sectors,
             rng=rng,
             start_ue_id=uid,
             ue_height_m=float(topo_cfg.get("ue_height_m", 1.5)),

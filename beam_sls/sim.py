@@ -10,19 +10,35 @@ from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
-from .channel import SionnaImportProbe, generate_channel
-from .codebook import ArrayConfig, build_network_tx_beams, dft_codebook_from_array
+from .channel import DopplerChannelEvolver, SionnaImportProbe, generate_channel
+from .codebook import (
+    ArrayConfig,
+    build_network_tx_beams,
+    dft_codebook_from_array,
+    extract_panel_tx_dimension,
+)
 from .config import save_config
 from .coverage import compute_coverage_heatmap_standard_sampling, compute_fixed_vertical_beam_cdf
 from .evaluation import EvaluationCase, resolve_evaluation_plan
 from .feedback import make_reports
-from .link import LinkEvalRow, run_tti_loop
+from .link import LinkEvalRow, run_one_tti, run_tti_loop
 from .link_adaptation import make_link_adapter, make_scheduler_link_adapter
-from .measurement import compute_gamma_measurement
-from .rf import resolve_rf_architecture, resolved_max_mu_order, tx_units_per_sector
+from .measurement import associate_ues_by_average_rsrp, compute_gamma_measurement
+from .rf import resolve_rf_architecture, resolved_max_mu_order, trps_per_sector
 from .plotting import plot_bar, plot_best_beam_heatmap, plot_cdf, plot_heatmap, plot_topology
-from .scheduler import ScheduleResult, is_sector_domain_mode, is_site_domain_mode, normalize_domain_mode, schedule
-from .topology import make_topology, topology_to_rows
+from .scheduler import (
+    ScheduleResult,
+    normalize_cluster_mode,
+    schedule,
+    update_pf_throughput,
+)
+from .topology import (
+    assign_ues_to_scheduling_clusters,
+    cluster_cell_ids_by_ue,
+    make_topology,
+    resolve_static_scheduling_clusters,
+    topology_to_rows,
+)
 from .utils import (dbm_to_watt, ensure_dir, occupied_bandwidth_hz, percentile,
                     thermal_noise_watt, watt_to_dbm, write_csv, write_json)
 
@@ -49,9 +65,13 @@ def _panels_per_cell(cfg: Dict[str, Any], tx_cfg: ArrayConfig | None = None, rf_
     """
     if tx_cfg is not None:
         rf = rf_architecture or resolve_rf_architecture(cfg, tx_cfg)
-        return int(tx_units_per_sector(cfg, rf))
+        return max(1, trps_per_sector(cfg)) * max(1, len(rf.tx_units))
     trp = cfg.get("trp", {})
     return int(trp.get("num_trps_per_sector", trp.get("num_panels_per_sector", 1)))
+
+
+def _parallel_beams_per_cell(cfg: Dict[str, Any], rf_architecture) -> int:
+    return max(1, trps_per_sector(cfg)) * int(rf_architecture.max_parallel_beams_per_trp)
 
 
 def _progress(cfg: Dict[str, Any], msg: str) -> None:
@@ -59,11 +79,47 @@ def _progress(cfg: Dict[str, Any], msg: str) -> None:
         print(msg, flush=True)
 
 
-def _beam_indices_by_site(beam_ids) -> Dict[int, List[int]]:
-    out: Dict[int, List[int]] = {}
-    for bi, bid in enumerate(beam_ids):
-        out.setdefault(int(bid.trp), []).append(int(bi))
-    return out
+def resolve_tti_counts(cfg: Dict[str, Any]) -> Tuple[bool, int, int, float]:
+    """Resolve measured/warmup TTI counts and measured duration per drop."""
+    system_cfg = cfg["system"]
+    continuous_cfg = system_cfg.get("continuous_tti", {}) or {}
+    continuous_enabled = bool(continuous_cfg.get("enabled", False))
+    slot_ms = float(cfg["pdsch"].get("slot_duration_ms", 0.125))
+    if slot_ms <= 0.0:
+        raise ValueError("pdsch.slot_duration_ms must be > 0")
+
+    if continuous_enabled and continuous_cfg.get("num_tti") is not None:
+        measured_tti = int(continuous_cfg["num_tti"])
+        if measured_tti <= 0:
+            raise ValueError("system.continuous_tti.num_tti must be > 0")
+    elif continuous_enabled:
+        duration_ms = float(continuous_cfg.get("duration_ms", 2.0))
+        if duration_ms <= 0.0:
+            raise ValueError("system.continuous_tti.duration_ms must be > 0")
+        exact_tti = duration_ms / slot_ms
+        measured_tti = int(round(exact_tti))
+        if measured_tti <= 0 or not np.isclose(
+            exact_tti, measured_tti, rtol=0.0, atol=1e-9
+        ):
+            raise ValueError(
+                "system.continuous_tti.duration_ms must be an integer multiple "
+                "of pdsch.slot_duration_ms"
+            )
+    else:
+        measured_tti = int(system_cfg.get("num_tti_per_drop", 1))
+        if measured_tti <= 0:
+            raise ValueError("system.num_tti_per_drop must be > 0")
+
+    continuous_warmup = continuous_cfg.get("warmup_tti")
+    if continuous_enabled and continuous_warmup is not None:
+        warmup_tti = int(continuous_warmup)
+    else:
+        warmup_tti = int(cfg["link_abstraction"].get("olla_warmup_tti", 0))
+    if warmup_tti < 0:
+        raise ValueError("warmup TTI count must be >= 0")
+
+    measured_duration_ms = float(measured_tti) * slot_ms
+    return continuous_enabled, measured_tti, warmup_tti, measured_duration_ms
 
 
 def _beam_indices_by_cell(beam_ids) -> Dict[int, List[int]]:
@@ -73,30 +129,27 @@ def _beam_indices_by_cell(beam_ids) -> Dict[int, List[int]]:
     return out
 
 
-def _domain_candidate_beam_indices_by_ue(topo, beam_ids, domain_mode: str) -> Dict[int, List[int]] | None:
-    if is_site_domain_mode(domain_mode):
-        beams_by_site = _beam_indices_by_site(beam_ids)
-        return {
-            int(ue.ue_id): beams_by_site.get(int(ue.site_id), [])
-            for ue in topo.ues
-        }
-    if is_sector_domain_mode(domain_mode):
-        beams_by_cell = _beam_indices_by_cell(beam_ids)
-        return {
-            int(ue.ue_id): beams_by_cell.get(int(ue.serving_cell), [])
-            for ue in topo.ues
-        }
-    return None
+def _beam_indices_by_ue_cells(cells_by_ue,
+                              beam_ids) -> Dict[int, List[int]]:
+    beams_by_cell = _beam_indices_by_cell(beam_ids)
+    return {
+        int(ue_id): [
+            beam_index
+            for cell_id in cell_ids
+            for beam_index in beams_by_cell.get(int(cell_id), [])
+        ]
+        for ue_id, cell_ids in cells_by_ue.items()
+    }
 
 
 def _domain_metric(values: np.ndarray,
-                   candidate_beam_indices_by_ue: Dict[int, List[int]] | None,
+                   beam_indices_by_ue: Dict[int, List[int]] | None,
                    fn) -> float:
-    if candidate_beam_indices_by_ue is None:
+    if beam_indices_by_ue is None:
         arr = np.asarray(values, dtype=float).reshape(-1)
     else:
         chunks = []
-        for u, inds in candidate_beam_indices_by_ue.items():
+        for u, inds in beam_indices_by_ue.items():
             if inds:
                 chunks.append(np.asarray(values[int(u), inds], dtype=float))
         arr = np.concatenate(chunks) if chunks else np.asarray([], dtype=float)
@@ -105,14 +158,14 @@ def _domain_metric(values: np.ndarray,
     return float(fn(arr))
 
 
-def _avg_domain_beams(candidate_beam_indices_by_ue: Dict[int, List[int]] | None,
+def _avg_domain_beams(beam_indices_by_ue: Dict[int, List[int]] | None,
                       num_beams: int,
                       num_ues: int) -> float:
     if num_ues <= 0:
         return 0.0
-    if candidate_beam_indices_by_ue is None:
+    if beam_indices_by_ue is None:
         return float(num_beams)
-    return float(np.mean([len(v) for v in candidate_beam_indices_by_ue.values()]))
+    return float(np.mean([len(v) for v in beam_indices_by_ue.values()]))
 
 
 def _schedule_stat_rows(drop: int, scheme: str, sched) -> List[Dict[str, Any]]:
@@ -233,6 +286,46 @@ def build_ue_goodput_rows(link_rows: List[Dict[str, Any]],
         }
         for scheme in schemes
         for drop, ue_id in ue_keys
+    ]
+
+
+def build_system_tti_goodput_rows(link_rows: List[Dict[str, Any]],
+                                  schemes: List[str],
+                                  num_drops: int,
+                                  num_tti: int) -> List[Dict[str, Any]]:
+    """Sum link goodput for every measured TTI, explicitly retaining zeros."""
+    sums: Dict[Tuple[str, int, int], float] = {}
+    for row in link_rows:
+        key = (str(row["scheme"]), int(row["drop"]), int(row["tti"]))
+        sums[key] = sums.get(key, 0.0) + float(row["goodput_mbps"])
+    return [
+        {
+            "scheme": scheme,
+            "drop": int(drop),
+            "tti": int(tti),
+            "system_goodput_mbps": float(sums.get((scheme, drop, tti), 0.0)),
+        }
+        for scheme in schemes
+        for drop in range(max(0, int(num_drops)))
+        for tti in range(max(0, int(num_tti)))
+    ]
+
+
+def build_system_drop_avg_goodput_rows(
+        system_tti_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Average instantaneous system goodput over each drop's measured window."""
+    values: Dict[Tuple[str, int], List[float]] = {}
+    for row in system_tti_rows:
+        key = (str(row["scheme"]), int(row["drop"]))
+        values.setdefault(key, []).append(float(row["system_goodput_mbps"]))
+    return [
+        {
+            "scheme": scheme,
+            "drop": int(drop),
+            "avg_system_goodput_mbps": float(np.mean(samples)) if samples else 0.0,
+            "num_measured_tti": int(len(samples)),
+        }
+        for (scheme, drop), samples in sorted(values.items())
     ]
 
 
@@ -547,6 +640,8 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     rf_arch = resolve_rf_architecture(cfg, tx_cfg)
     effective_mu_order = resolved_max_mu_order(cfg, rf_arch)
     cfg.setdefault("_resolved", {})["max_mu_order"] = effective_mu_order
+    cfg["_resolved"]["max_parallel_beams_per_trp"] = int(rf_arch.max_parallel_beams_per_trp)
+    cfg["_resolved"]["dynamic_beam_assignment"] = bool(rf_arch.dynamic_beam_assignment)
     cfg["_resolved"]["rf_architecture"] = rf_arch.to_dict()
     _progress(cfg, f"[init] RF={rf_arch.connectivity}, tx_units/TRP={rf_arch.tx_units_per_trp}, max_mu_order={effective_mu_order}")
     write_json(out_dir / "rf_architecture_summary.json", rf_arch.to_dict())
@@ -560,6 +655,12 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
         "tx_beams_per_codebook": _max_beams_from_cfg(cfg["tx_array"], tx_cfg),
         "tx_effective_tx_units_per_sector": _panels_per_cell(cfg, tx_cfg, rf_arch),
         "tx_total_beams_per_sector": _panels_per_cell(cfg, tx_cfg, rf_arch) * max(0, int(_max_beams_from_cfg(cfg["tx_array"], tx_cfg) or (tx_cfg.configured_beams_per_codebook or 0))),
+        "tx_panel_view_num_ant": (
+            tx_cfg.panel_num_h * tx_cfg.panel_num_v * tx_cfg.polarization_count
+            if rf_arch.compact_panel_channel else tx_cfg.num_ant
+        ),
+        "tx_full_num_ant": tx_cfg.num_ant,
+        "channel_storage": "full_trp",
         "ue_rx_beams": _max_beams_from_cfg(cfg["ue_array"], rx_cfg),
         "rf_architecture": rf_arch.to_dict(),
         "resolved_max_mu_order": effective_mu_order,
@@ -580,7 +681,9 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
                                        max_beams=_max_beams_from_cfg(cfg["ue_array"], rx_cfg))
 
     total_tx_power_w = float(dbm_to_watt(float(cfg["system"]["tx_power_dbm"])))
-    num_tx_units = max(1, topo0.num_cells * _panels_per_cell(cfg, tx_cfg, rf_arch))
+    # In dynamic codebook mode there is one channel axis per TRP, but each
+    # physical panel remains an independently powered simultaneous-beam resource.
+    num_tx_units = max(1, topo0.num_cells * _parallel_beams_per_cell(cfg, rf_arch))
     power_mode = str(cfg["trp"].get("panel_power_mode", "per_tx_unit_equal")).lower()
     if power_mode in ("per_panel_equal", "per_tx_unit_equal", "per_txru_equal"):
         tx_power_w_per_panel = total_tx_power_w / num_tx_units
@@ -598,6 +701,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     sector_rows_all: List[Dict[str, Any]] = []
     beam_rows: List[Dict[str, Any]] = [b.to_dict() for b in beam_ids]
     report_rows: List[Dict[str, Any]] = []
+    measurement_domain_rows: List[Dict[str, Any]] = []
     su_snr_sample_rows: List[Dict[str, Any]] = []
     scheduled_ue_su_throughput_rows: List[Dict[str, Any]] = []
     scheduler_stat_rows: List[Dict[str, Any]] = []
@@ -616,7 +720,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     gamma_backend_rows: List[Dict[str, Any]] = []
     scheduled_pair_sets: Dict[Tuple[int, str], set] = {}
     scheduled_pair_lists: Dict[Tuple[int, str], List[Tuple[int, int]]] = {}
-    domain_mode = normalize_domain_mode(cfg["scheduler"].get("domain_mode", "global"))
+    cluster_mode = normalize_cluster_mode(cfg["scheduler"])
 
     baseline_reference = evaluation_plan.references.get("baseline")
     upper_bound_enabled = bool(
@@ -638,23 +742,161 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
         write_json(out_dir / "topology_plot_error.json", {"error": f"{type(e).__name__}: {e}"})
 
     num_drops = int(cfg["system"].get("num_drops", 1))
-    num_tti = int(cfg["system"].get("num_tti_per_drop", 1))
-    olla_warmup_tti = int(cfg["link_abstraction"].get("olla_warmup_tti", 0))
+    continuous_cfg = cfg["system"].get("continuous_tti", {}) or {}
+    (
+        continuous_tti_enabled,
+        num_tti,
+        olla_warmup_tti,
+        measured_duration_ms,
+    ) = resolve_tti_counts(cfg)
+    cfg["system"]["num_tti_per_drop"] = num_tti
+    cfg["link_abstraction"]["olla_warmup_tti"] = olla_warmup_tti
     _progress(cfg, f"[run] drops={num_drops}, warmup_tti/drop={olla_warmup_tti}, measured_tti/drop={num_tti}, cases={','.join(case_ids)}, beams={len(beam_ids)}, tx_units/sector={_panels_per_cell(cfg, tx_cfg, rf_arch)}")
     for drop in range(num_drops):
         _progress(cfg, f"[drop {drop+1}/{num_drops}] topology + channel generation")
         rng = np.random.default_rng(int(rng_master.integers(0, 2**31 - 1)))
+        topology_started = perf_counter()
         topo = make_topology(cfg, rng)
+        topology_elapsed_s = float(perf_counter() - topology_started)
+        runtime_phase_rows.append({
+            "drop": int(drop),
+            "case_id": "all",
+            "phase": "topology_generation",
+            "elapsed_s": topology_elapsed_s,
+        })
+        _progress(
+            cfg,
+            f"[drop {drop+1}/{num_drops}] topology finished, "
+            f"elapsed={topology_elapsed_s:.3f}s",
+        )
+        channel_started = perf_counter()
         ch = generate_channel(topo, cfg, tx_cfg, rx_cfg, rng)
+        channel_elapsed_s = float(perf_counter() - channel_started)
+        runtime_phase_rows.append({
+            "drop": int(drop),
+            "case_id": "all",
+            "phase": "channel_generation",
+            "elapsed_s": channel_elapsed_s,
+            "backend": ch.backend,
+        })
         channel_backend_rows.append({"drop": drop, "backend": ch.backend, "backend_status": ch.backend_status})
-        _progress(cfg, f"[drop {drop+1}/{num_drops}] channel backend={ch.backend}; computing Gamma measurement")
+        _progress(
+            cfg,
+            f"[drop {drop+1}/{num_drops}] channel finished, "
+            f"backend={ch.backend}, elapsed={channel_elapsed_s:.3f}s",
+        )
+        measurement_h = (
+            extract_panel_tx_dimension(
+                ch.h_freq, tx_cfg, int(rf_arch.measurement_panel_index)
+            )
+            if rf_arch.compact_panel_channel
+            else ch.h_freq
+        )
+        association_started = perf_counter()
+        average_rsrp_by_ue_cell = associate_ues_by_average_rsrp(
+            measurement_h,
+            tx_beams,
+            rx_beams,
+            beam_ids,
+            topo,
+            tx_power_w_per_panel,
+        )
+        if ch.pathloss_db_by_site is not None:
+            for ue in topo.ues:
+                ch.pathloss_db[int(ue.ue_id)] = ch.pathloss_db_by_site[
+                    int(ue.ue_id), int(ue.site_id)
+                ]
+                ch.shadow_db[int(ue.ue_id)] = ch.shadow_db_by_site[
+                    int(ue.ue_id), int(ue.site_id)
+                ]
+        association_elapsed_s = float(perf_counter() - association_started)
+        runtime_phase_rows.append({
+            "drop": int(drop),
+            "case_id": "all",
+            "phase": "average_rsrp_association",
+            "elapsed_s": association_elapsed_s,
+        })
+        _progress(
+            cfg,
+            f"[drop {drop+1}/{num_drops}] average-RSRP association "
+            f"finished, elapsed={association_elapsed_s:.3f}s",
+        )
+        cluster_started = perf_counter()
+        scheduling_clusters, cell_to_cluster = (
+            resolve_static_scheduling_clusters(topo, cfg["scheduler"])
+        )
+        ue_scheduling_clusters = assign_ues_to_scheduling_clusters(
+            topo, cell_to_cluster
+        )
         ue_site_ids = {int(ue.ue_id): int(ue.site_id) for ue in topo.ues}
         ue_serving_cells = {int(ue.ue_id): int(ue.serving_cell) for ue in topo.ues}
-        candidate_beam_indices_by_ue = _domain_candidate_beam_indices_by_ue(topo, beam_ids, domain_mode)
-        meas = compute_gamma_measurement(ch.h_freq, tx_beams, rx_beams, beam_ids,
+        measurement_cells_by_ue = cluster_cell_ids_by_ue(
+            topo, scheduling_clusters
+        )
+        service_cells_by_ue = {
+            int(ue.ue_id): [int(ue.serving_cell)] for ue in topo.ues
+        }
+        service_beam_indices_by_ue = _beam_indices_by_ue_cells(
+            service_cells_by_ue, beam_ids
+        )
+        measured_beam_indices_by_ue = _beam_indices_by_ue_cells(
+            measurement_cells_by_ue, beam_ids
+        )
+        reported_beam_indices_by_ue = {
+            ue_id: list(dict.fromkeys(
+                service_beam_indices_by_ue[ue_id]
+                + measured_beam_indices_by_ue[ue_id]
+            ))
+            for ue_id in service_beam_indices_by_ue
+        }
+        for ue in topo.ues:
+            measured_cells = measurement_cells_by_ue[int(ue.ue_id)]
+            measurement_domain_rows.append({
+                "drop": int(drop),
+                "ue_id": int(ue.ue_id),
+                "measurement_domain_mode": "scheduling_cluster",
+                "scheduling_cluster": int(ue.scheduling_cluster),
+                "cluster_mode": cluster_mode,
+                "serving_cell": int(ue.serving_cell),
+                "site_id": int(ue.site_id),
+                "serving_average_rsrp_w": float(
+                    average_rsrp_by_ue_cell[int(ue.ue_id)][int(ue.serving_cell)]
+                ),
+                "service_cell_ids": json.dumps(
+                    service_cells_by_ue[int(ue.ue_id)]
+                ),
+                "measured_cell_ids": json.dumps(measured_cells),
+                "num_service_beams": len(
+                    service_beam_indices_by_ue[int(ue.ue_id)]
+                ),
+                "num_measured_cells": len(measured_cells),
+                "num_measured_beams": len(
+                    measured_beam_indices_by_ue[int(ue.ue_id)]
+                ),
+                "num_reported_beams": len(
+                    reported_beam_indices_by_ue[int(ue.ue_id)]
+                ),
+            })
+        cluster_elapsed_s = float(perf_counter() - cluster_started)
+        runtime_phase_rows.append({
+            "drop": int(drop),
+            "case_id": "all",
+            "phase": "static_cluster_preparation",
+            "elapsed_s": cluster_elapsed_s,
+            "cluster_mode": cluster_mode,
+            "num_clusters": len(scheduling_clusters),
+        })
+        _progress(
+            cfg,
+            f"[drop {drop+1}/{num_drops}] static clusters finished, "
+            f"mode={cluster_mode}, clusters={len(scheduling_clusters)}, "
+            f"elapsed={cluster_elapsed_s:.3f}s",
+        )
+        meas = compute_gamma_measurement(measurement_h, tx_beams, rx_beams, beam_ids,
                                          tx_power_w_per_panel=tx_power_w_per_panel,
                                          noise_power_w=noise_w,
-                                         candidate_beam_indices_by_ue=candidate_beam_indices_by_ue,
+                                         service_beam_indices_by_ue=service_beam_indices_by_ue,
+                                         interference_beam_indices_by_ue=measured_beam_indices_by_ue,
                                          compute_backend=cfg["measurement"].get("gamma_backend", "numpy"),
                                          ue_batch_size=cfg["measurement"].get("gamma_ue_batch_size", 0))
         gamma_backend_rows.append({
@@ -664,6 +906,13 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             "backend_status": meas.backend_status,
             "ue_batch_size": int(cfg["measurement"].get("gamma_ue_batch_size", 0)),
             "elapsed_s": float(meas.elapsed_s),
+        })
+        runtime_phase_rows.append({
+            "drop": int(drop),
+            "case_id": "all",
+            "phase": "gamma_measurement",
+            "elapsed_s": float(meas.elapsed_s),
+            "backend": meas.compute_backend,
         })
         _progress(cfg, f"[drop {drop+1}/{num_drops}] Gamma backend={meas.compute_backend}, elapsed={meas.elapsed_s:.3f}s; {meas.backend_status}")
         feedback_started = perf_counter()
@@ -676,7 +925,9 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             threshold_db=float(cfg["feedback"].get("conflict_sinr_threshold_db", 0.0)),
             ue_site_ids=ue_site_ids,
             ue_serving_cells=ue_serving_cells,
-            candidate_beam_indices_by_ue=candidate_beam_indices_by_ue,
+            ue_scheduling_clusters=ue_scheduling_clusters,
+            service_beam_indices_by_ue=service_beam_indices_by_ue,
+            measured_beam_indices_by_ue=reported_beam_indices_by_ue,
             link_adapter=scheduler_link_adapter,
         )
         feedback_elapsed_s = float(perf_counter() - feedback_started)
@@ -690,6 +941,11 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             "elapsed_s": feedback_elapsed_s,
             **feedback_counter_delta,
         })
+        _progress(
+            cfg,
+            f"[drop {drop+1}/{num_drops}] feedback generation finished, "
+            f"elapsed={feedback_elapsed_s:.3f}s",
+        )
         site_rows, sector_rows = topology_to_rows(topo)
         for r in site_rows:
             rr = dict(r); rr["drop"] = drop; site_rows_all.append(rr)
@@ -725,11 +981,146 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
         # Every case starts from the same ACK random stream for cleaner paired
         # comparisons. OLLA state remains isolated by case_id.
         common_link_rng_state = copy.deepcopy(rng.bit_generator.state)
+        doppler_seed = int(rng.integers(0, 2**31 - 1))
+        if continuous_tti_enabled:
+            # UE identities and their large-scale channel are new in every drop.
+            # PF history must therefore not leak across independent drops.
+            for case_id in case_ids:
+                tbar_by_scheme[case_id] = {
+                    int(ue.ue_id): float(cfg["scheduler"].get("pf_tbar_init_mbps", 1.0))
+                    for ue in topo.ues
+                }
         for case_index, case in enumerate(evaluation_cases, start=1):
             scheme = case.feedback_scheme
             case_id = case.case_id
             case_prefix = f"[drop {drop+1}/{num_drops}][case {case_index}/{len(evaluation_cases)}] {case_id}"
             _progress(cfg, f"{case_prefix} started")
+            if continuous_tti_enabled:
+                case_rng = np.random.default_rng()
+                case_rng.bit_generator.state = copy.deepcopy(common_link_rng_state)
+                doppler = DopplerChannelEvolver.from_drop(
+                    ch.h_freq, cfg, np.random.default_rng(doppler_seed)
+                )
+                upper_olla_state: Dict[Tuple[str, int], float] = {}
+                case_links: List[LinkEvalRow] = []
+                case_link_elapsed_s = 0.0
+                reports_tti = reports_by_scheme[scheme]
+                case_scheduler_elapsed_s = 0.0
+                last_sched = None
+                all_ue_ids = [int(ue.ue_id) for ue in topo.ues]
+
+                for step in range(olla_warmup_tti + num_tti):
+                    tti = step - olla_warmup_tti
+                    h_tti = doppler.current() if step == 0 else doppler.advance()
+                    scheduler_started = perf_counter()
+                    sched = schedule(
+                        reports_tti, beam_ids, cfg, tbar_by_scheme.get(case_id),
+                        link_adapter=scheduler_link_adapter, algorithm=case.algorithm,
+                    )
+                    case_scheduler_elapsed_s += float(
+                        perf_counter() - scheduler_started
+                    )
+                    sched.case_id = case_id
+                    sched.feedback_scheme = scheme
+                    sched.algorithm = case.algorithm
+                    sched.metadata["algorithm"] = case.algorithm
+                    sched.metadata["measurement_reports_per_drop"] = 1
+                    sched.metadata["tti"] = int(tti)
+                    last_sched = sched
+
+                    link_started = perf_counter()
+                    link_rng_state_before_tti = copy.deepcopy(case_rng.bit_generator.state)
+                    rows_tti, olla_state = run_one_tti(
+                        sched, h_tti, tx_beams, rx_beams, beam_ids, meas,
+                        tx_power_w_per_panel, cfg, drop, tti, case_rng, olla_state,
+                        link_adapter=link_adapter, record=True,
+                    )
+                    case_link_elapsed_s += float(perf_counter() - link_started)
+                    if tti >= 0:
+                        case_links.extend(rows_tti)
+
+                    if cfg["scheduler"].get("objective", "sum_rate") == "proportional_fair":
+                        served = {
+                            int(row.ue_id): float(row.goodput_mbps)
+                            for row in rows_tti
+                        }
+                        update_pf_throughput(
+                            tbar_by_scheme[case_id], all_ue_ids, served, cfg,
+                        )
+
+                    if tti >= 0:
+                        schedule_rows.append({
+                            "drop": drop, "tti": int(tti), "scheme": case_id,
+                            "case_id": case_id, "feedback_scheme": scheme,
+                            "algorithm": case.algorithm,
+                            "objective_value": sched.objective_value,
+                            "num_scheduled": len(sched.links),
+                            "num_outage": int(sum(link.predicted_outage for link in sched.links)),
+                            "outage_occurred": bool(any(link.predicted_outage for link in sched.links)),
+                            "schedule_json": json.dumps(sched.to_dict(beam_ids), ensure_ascii=False),
+                        })
+                        su_rows = build_scheduled_ue_su_throughput_rows(
+                            drop, case_id, sched, reports_tti, beam_ids,
+                            scheduler_link_adapter,
+                        )
+                        for row in su_rows:
+                            row["tti"] = int(tti)
+                        scheduled_ue_su_throughput_rows.extend(su_rows)
+
+                    if case_id == baseline_reference and upper_bound_enabled:
+                        upper_sched = ScheduleResult(
+                            scheme=BASELINE_NO_INTERFERENCE_SCHEME,
+                            objective_value=float(sched.objective_value),
+                            links=list(sched.links),
+                            metadata={"source_scheme": case_id, "interference_mode": "forced_zero"},
+                            case_id=BASELINE_NO_INTERFERENCE_SCHEME,
+                            feedback_scheme=BASELINE_NO_INTERFERENCE_SCHEME,
+                            algorithm=case.algorithm,
+                        )
+                        upper_rng = np.random.default_rng()
+                        upper_rng.bit_generator.state = link_rng_state_before_tti
+                        upper_rows, upper_olla_state = run_one_tti(
+                            upper_sched, h_tti, tx_beams, rx_beams, beam_ids, meas,
+                            tx_power_w_per_panel, cfg, drop, tti, upper_rng,
+                            upper_olla_state, link_adapter=link_adapter,
+                            ignore_interference=True, record=tti >= 0,
+                        )
+                        all_link_rows.extend(upper_rows)
+
+                all_link_rows.extend(case_links)
+                if last_sched is not None:
+                    scheduled_pair_sets[(drop, case_id)] = {
+                        (int(link.ue_id), int(link.beam_index)) for link in last_sched.links
+                    }
+                    scheduled_pair_lists[(drop, case_id)] = [
+                        (int(link.ue_id), int(link.beam_index)) for link in last_sched.links
+                    ]
+                    _attach_case_scheduler_metrics(last_sched, {
+                        "scheduler_elapsed_s": case_scheduler_elapsed_s,
+                        "link_evaluation_elapsed_s": case_link_elapsed_s,
+                        "num_scheduler_invocations": int(
+                            olla_warmup_tti + num_tti
+                        ),
+                        "num_tti_schedule_reused": 0,
+                    })
+                    scheduler_stat_rows.extend(_schedule_stat_rows(drop, case_id, last_sched))
+                runtime_phase_rows.extend([
+                    {
+                        "drop": int(drop), "case_id": case_id,
+                        "phase": "scheduler", "elapsed_s": case_scheduler_elapsed_s,
+                    },
+                    {
+                        "drop": int(drop), "case_id": case_id,
+                        "phase": "link_evaluation", "elapsed_s": case_link_elapsed_s,
+                    },
+                ])
+                _progress(
+                    cfg,
+                    f"{case_prefix} finished, continuous_tti={num_tti}, "
+                    f"scheduler_elapsed={case_scheduler_elapsed_s:.3f}s, "
+                    f"link_eval_elapsed={case_link_elapsed_s:.3f}s",
+                )
+                continue
             scheduler_started = perf_counter()
             scheduler_counters_before = _counter_snapshot(scheduler_link_adapter)
             sched = schedule(
@@ -843,13 +1234,20 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             "num_beams": len(beam_ids),
             "olla_warmup_tti": olla_warmup_tti,
             "num_measured_tti": num_tti,
-            "scheduler_domain_mode": domain_mode,
+            "continuous_tti_enabled": continuous_tti_enabled,
+            "continuous_duration_ms": measured_duration_ms,
+            "ue_speed_kmh": float(cfg.get("ue_drop", {}).get("speed_kmh", 0.0)),
+            "scheduler_domain_mode": "static_cluster",
+            "measurement_domain_mode": "scheduling_cluster",
+            "scheduling_cluster_mode": cluster_mode,
+            "num_scheduling_clusters": len(scheduling_clusters),
             "occupied_bandwidth_mhz": float(noise_bw_hz / 1e6),
             "noise_dbm": float(watt_to_dbm(noise_w)),
             "tx_power_per_tx_unit_dbm": float(watt_to_dbm(tx_power_w_per_panel)),
-            "avg_su_snr_db": _domain_metric(meas.su_snr_db, candidate_beam_indices_by_ue, np.mean),
-            "p95_su_snr_db": _domain_metric(meas.su_snr_db, candidate_beam_indices_by_ue, lambda x: np.percentile(x, 95)),
-            "avg_measurement_beams_per_ue": _avg_domain_beams(candidate_beam_indices_by_ue, len(beam_ids), len(topo.ues)),
+            "avg_su_snr_db": _domain_metric(meas.su_snr_db, service_beam_indices_by_ue, np.mean),
+            "p95_su_snr_db": _domain_metric(meas.su_snr_db, service_beam_indices_by_ue, lambda x: np.percentile(x, 95)),
+            "avg_measurement_beams_per_ue": _avg_domain_beams(measured_beam_indices_by_ue, len(beam_ids), len(topo.ues)),
+            "avg_reported_beams_per_ue": _avg_domain_beams(reported_beam_indices_by_ue, len(beam_ids), len(topo.ues)),
             "channel_backend": ch.backend,
             "link_adaptation_backend": link_adapter.status.backend,
         })
@@ -877,6 +1275,10 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     write_csv(out_dir / "metrics" / "beams.csv", beam_rows)
     write_csv(out_dir / "metrics" / "gamma_measurement_backend.csv", gamma_backend_rows)
     write_csv(out_dir / "metrics" / "reports.csv", report_rows)
+    write_csv(
+        out_dir / "metrics" / "measurement_domains.csv",
+        measurement_domain_rows,
+    )
     write_csv(out_dir / "metrics" / "scheduler_stats.csv", scheduler_stat_rows)
     write_csv(out_dir / "metrics" / "scheduler_iterations.csv", scheduler_iteration_rows)
     write_csv(out_dir / "metrics" / "runtime_phases.csv", runtime_phase_rows)
@@ -886,6 +1288,20 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
         link_dict_rows, analysis_schemes, ue_rows, num_tti,
     )
     write_csv(out_dir / "metrics" / "ue_goodput.csv", ue_goodput_rows)
+    system_tti_goodput_rows = build_system_tti_goodput_rows(
+        link_dict_rows, analysis_schemes, num_drops, num_tti,
+    )
+    system_drop_avg_goodput_rows = build_system_drop_avg_goodput_rows(
+        system_tti_goodput_rows,
+    )
+    write_csv(
+        out_dir / "metrics" / "system_tti_goodput.csv",
+        system_tti_goodput_rows,
+    )
+    write_csv(
+        out_dir / "metrics" / "system_drop_avg_goodput.csv",
+        system_drop_avg_goodput_rows,
+    )
 
     similarity_by_drop, similarity_summary = schedule_similarity_rows(scheduled_pair_sets, case_ids)
     write_csv(out_dir / "metrics" / "schedule_similarity_by_drop.csv", similarity_by_drop)
@@ -909,6 +1325,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
 
     summary = summarize_results(
         link_dict_rows, analysis_schemes, ue_goodput_rows,
+        system_tti_goodput_rows=system_tti_goodput_rows,
         references=evaluation_plan.references, cases_by_id=cases_by_id,
     )
     summary["_backend"] = {
@@ -924,6 +1341,8 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     make_plots(
         out_dir, link_dict_rows, summary, analysis_schemes,
         ue_goodput_rows=ue_goodput_rows,
+        system_tti_goodput_rows=system_tti_goodput_rows,
+        system_drop_avg_goodput_rows=system_drop_avg_goodput_rows,
         su_snr_samples=su_snr_sample_rows,
         su_snr_max_rows=su_snr_max_rows,
         scheduled_ue_su_throughput_rows=scheduled_ue_su_throughput_rows,
@@ -974,25 +1393,24 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
 def summarize_results(link_rows: List[Dict[str, Any]],
                       schemes: List[str],
                       ue_goodput_rows: List[Dict[str, Any]] | None = None,
+                      system_tti_goodput_rows: List[Dict[str, Any]] | None = None,
                       references: Dict[str, str] | None = None,
                       cases_by_id: Dict[str, EvaluationCase] | None = None) -> Dict[str, Any]:
     summary: Dict[str, Any] = {}
     for scheme in schemes:
         rows = [r for r in link_rows if r.get("scheme") == scheme]
-        if not rows:
-            summary[scheme] = {
-                "avg_system_goodput_mbps": 0.0,
-                "avg_ue_goodput_mbps": 0.0,
-                "p05_ue_goodput_mbps": 0.0,
-                "avg_eff_sinr_db": 0.0,
-                "avg_tbler": 0.0,
-                "num_tx": 0,
-            }
-            continue
-        sys_by_slot: Dict[Tuple[int, int], float] = {}
-        for r in rows:
-            key = (int(r["drop"]), int(r["tti"]))
-            sys_by_slot[key] = sys_by_slot.get(key, 0.0) + float(r["goodput_mbps"])
+        if system_tti_goodput_rows is None:
+            sys_by_slot: Dict[Tuple[int, int], float] = {}
+            for r in rows:
+                key = (int(r["drop"]), int(r["tti"]))
+                sys_by_slot[key] = sys_by_slot.get(key, 0.0) + float(r["goodput_mbps"])
+            system_values = list(sys_by_slot.values())
+        else:
+            system_values = [
+                float(r["system_goodput_mbps"])
+                for r in system_tti_goodput_rows
+                if r.get("scheme") == scheme
+            ]
         if ue_goodput_rows is None:
             ue_vals: Dict[Tuple[int, int], List[float]] = {}
             for r in rows:
@@ -1010,12 +1428,19 @@ def summarize_results(link_rows: List[Dict[str, Any]],
             "case_id": scheme,
             "feedback_scheme": case.feedback_scheme if case is not None else scheme,
             "algorithm": case.algorithm if case is not None else None,
-            "avg_system_goodput_mbps": float(np.mean(list(sys_by_slot.values()))) if sys_by_slot else 0.0,
+            "avg_system_goodput_mbps": float(np.mean(system_values)) if system_values else 0.0,
             "avg_ue_goodput_mbps": float(np.mean(ue_mean)) if ue_mean else 0.0,
             "p05_ue_goodput_mbps": percentile(ue_mean, 5.0),
-            "avg_eff_sinr_db": float(np.mean([float(r["effective_sinr_db"]) for r in rows])),
-            "avg_tbler": float(np.mean([float(r["tbler"]) for r in rows])),
-            "ack_rate": float(np.mean([float(r["ack"]) for r in rows])),
+            "avg_eff_sinr_db": (
+                float(np.mean([float(r["effective_sinr_db"]) for r in rows]))
+                if rows else 0.0
+            ),
+            "avg_tbler": (
+                float(np.mean([float(r["tbler"]) for r in rows])) if rows else 0.0
+            ),
+            "ack_rate": (
+                float(np.mean([float(r["ack"]) for r in rows])) if rows else 0.0
+            ),
             "num_tx": len(rows),
         }
     refs = references or {}
@@ -1055,6 +1480,8 @@ def make_plots(out_dir: Path,
                summary: Dict[str, Any],
                schemes: List[str],
                ue_goodput_rows: List[Dict[str, Any]] | None = None,
+               system_tti_goodput_rows: List[Dict[str, Any]] | None = None,
+               system_drop_avg_goodput_rows: List[Dict[str, Any]] | None = None,
                su_snr_samples: List[Dict[str, Any]] | None = None,
                su_snr_max_rows: List[Dict[str, Any]] | None = None,
                scheduled_ue_su_throughput_rows: List[Dict[str, Any]] | None = None,
@@ -1073,6 +1500,34 @@ def make_plots(out_dir: Path,
             "Per-UE average goodput [Mbps]",
             "Per-UE goodput CDF (unscheduled UEs included as zero)",
             out_dir / "figures" / "ue_goodput_cdf.png",
+        )
+    if system_tti_goodput_rows is not None:
+        plot_cdf(
+            {
+                s: [
+                    float(r["system_goodput_mbps"])
+                    for r in system_tti_goodput_rows
+                    if r.get("scheme") == s
+                ]
+                for s in schemes
+            },
+            "System goodput per TTI [Mbps]",
+            "Instantaneous system goodput CDF (zero TTIs included)",
+            out_dir / "figures" / "system_tti_goodput_cdf.png",
+        )
+    if system_drop_avg_goodput_rows is not None:
+        plot_cdf(
+            {
+                s: [
+                    float(r["avg_system_goodput_mbps"])
+                    for r in system_drop_avg_goodput_rows
+                    if r.get("scheme") == s
+                ]
+                for s in schemes
+            },
+            "Per-drop average system goodput [Mbps]",
+            "Per-drop measured-window average system goodput CDF",
+            out_dir / "figures" / "system_drop_avg_goodput_cdf.png",
         )
     report_schemes = feedback_schemes or schemes
     if su_snr_samples is not None:

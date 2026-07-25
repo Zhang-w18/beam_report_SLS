@@ -5,8 +5,15 @@ from typing import Dict, List, Tuple
 import numpy as np
 
 from .channel import generate_channel, generate_numpy_geometric_channel, uma_like_pathloss_db
-from .codebook import ArrayConfig, BeamId, build_network_tx_beams, steering_vector_from_array
+from .codebook import (
+    ArrayConfig,
+    BeamId,
+    build_network_tx_beams,
+    extract_panel_tx_dimension,
+    steering_vector_from_array,
+)
 from .measurement import compute_gamma_measurement
+from .rf import resolve_rf_architecture
 from .topology import Sector, Site, Topology, UE
 from .utils import db_to_lin, watt_to_dbm
 
@@ -117,12 +124,20 @@ def compute_coverage_heatmap_standard_sampling(cfg: Dict,
     p_dbm = np.full((len(y), len(x)), np.nan, dtype=float)
     best_beam = np.full((len(y), len(x)), -1, dtype=int)
     backend_status = "not_run"
+    rf_architecture = resolve_rf_architecture(cfg, tx_array)
     for start in range(0, len(pts), max(1, chunk)):
         part = pts[start:start + max(1, chunk)]
         topo = _topology_for_grid_chunk(cfg, part)
         ch = generate_channel(topo, cfg, tx_array, rx_array, rng)
         backend_status = ch.backend_status
-        meas = compute_gamma_measurement(ch.h_freq, tx_beams, rx_beams, beam_ids,
+        measurement_h = (
+            extract_panel_tx_dimension(
+                ch.h_freq, tx_array, int(rf_architecture.measurement_panel_index)
+            )
+            if rf_architecture.compact_panel_channel
+            else ch.h_freq
+        )
+        meas = compute_gamma_measurement(measurement_h, tx_beams, rx_beams, beam_ids,
                                          tx_power_w_per_panel=tx_power_w_per_panel,
                                          noise_power_w=noise_power_w,
                                          link_adapter=None,
@@ -208,6 +223,7 @@ def compute_fixed_vertical_beam_cdf(cfg: Dict,
     candidates = _candidate_vertical_indices(cfg, tx_array)
     x, y, pts = _make_grid_points(cfg)
     values_by_v: Dict[int, List[float]] = {int(v): [] for v in candidates}
+    resolved_rf = rf_architecture or resolve_rf_architecture(cfg, tx_array)
 
     for start in range(0, len(pts), max(1, chunk)):
         part = pts[start:start + max(1, chunk)]
@@ -223,7 +239,14 @@ def compute_fixed_vertical_beam_cdf(cfg: Dict,
                 fixed_v_index=int(v),
                 rf_architecture=rf_architecture,
             )
-            meas = compute_gamma_measurement(ch.h_freq, tx_beams_v, rx_beams, beam_ids_v,
+            measurement_h = (
+                extract_panel_tx_dimension(
+                    ch.h_freq, tx_array, int(resolved_rf.measurement_panel_index)
+                )
+                if resolved_rf.compact_panel_channel
+                else ch.h_freq
+            )
+            meas = compute_gamma_measurement(measurement_h, tx_beams_v, rx_beams, beam_ids_v,
                                              tx_power_w_per_panel=tx_power_w_per_panel,
                                              noise_power_w=noise_power_w,
                                              link_adapter=None,

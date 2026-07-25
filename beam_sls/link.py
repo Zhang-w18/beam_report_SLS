@@ -5,7 +5,7 @@ from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 
-from .codebook import BeamId
+from .codebook import ArrayConfig, BeamId, extract_panel_tx_dimension
 from .mcs import bler_from_sinr_db, select_mcs_from_sinr_db, tbs_bits_from_mcs
 from .measurement import MeasurementResult
 from .scheduler import ScheduleResult
@@ -58,16 +58,44 @@ def realized_sinr_grid(schedule: ScheduleResult,
                        beam_ids: Sequence[BeamId],
                        meas: MeasurementResult,
                        tx_power_w_per_panel: float,
-                       ignore_interference: bool = False) -> Dict[int, np.ndarray]:
-    """Return SINR[f] per scheduled UE using true H and selected RX beam."""
+                       ignore_interference: bool = False,
+                       tx_array: ArrayConfig | None = None) -> Dict[int, np.ndarray]:
+    """Return SINR[f] using full H and dynamically assigned physical panels."""
     out: Dict[int, np.ndarray] = {}
     links = schedule.links
+    panel_by_link: Dict[Tuple[int, int], int] = {}
+    next_panel_by_trp: Dict[Tuple[int, int], int] = {}
+    for scheduled in links:
+        bid = beam_ids[scheduled.beam_index]
+        key = bid.trp_key()
+        panel = int(next_panel_by_trp.get(key, 0))
+        if tx_array is not None and panel >= int(tx_array.num_array_panels):
+            raise ValueError(
+                f"Schedule assigns more than {tx_array.num_array_panels} beams to TRP {key}"
+            )
+        panel_by_link[(scheduled.ue_id, scheduled.beam_index)] = panel
+        next_panel_by_trp[key] = panel + 1
+
+    def _panel_h(ue_id: int, beam_index: int) -> np.ndarray:
+        bid = beam_ids[beam_index]
+        h = h_freq[ue_id, bid.tx_unit]
+        f = tx_beams[beam_index]
+        if int(h.shape[-1]) == int(f.shape[-1]):
+            return h
+        if tx_array is None:
+            raise ValueError(
+                f"Full channel TX dimension {h.shape[-1]} and beam dimension "
+                f"{f.shape[-1]} differ, but tx_array was not provided"
+            )
+        panel = panel_by_link[(ue_id, beam_index)]
+        return extract_panel_tx_dimension(h, tx_array, panel)
+
     for link in links:
         u = link.ue_id
         m = link.beam_index
         bid_m = beam_ids[m]
         q = rx_beams[meas.selected_rx_beam[u, m]]
-        h_sig = h_freq[u, bid_m.tx_unit]
+        h_sig = _panel_h(u, m)
         f_sig = tx_beams[m]
         hf = np.einsum("frt,t->fr", h_sig, f_sig)
         z = np.einsum("n,fn->f", np.conjugate(q), hf)
@@ -79,8 +107,20 @@ def realized_sinr_grid(schedule: ScheduleResult,
                     continue
                 bn = other.beam_index
                 bid_n = beam_ids[bn]
-                h_int = h_freq[u, bid_n.tx_unit]
+                # The interferer's physical panel assignment is independent of
+                # the victim UE. Look it up using the scheduled other link.
+                h_int_full = h_freq[u, bid_n.tx_unit]
                 f_int = tx_beams[bn]
+                if int(h_int_full.shape[-1]) == int(f_int.shape[-1]):
+                    h_int = h_int_full
+                elif tx_array is not None:
+                    h_int = extract_panel_tx_dimension(
+                        h_int_full,
+                        tx_array,
+                        panel_by_link[(other.ue_id, other.beam_index)],
+                    )
+                else:
+                    raise ValueError("tx_array is required for panel channel views")
                 hf_i = np.einsum("frt,t->fr", h_int, f_int)
                 z_i = np.einsum("n,fn->f", np.conjugate(q), hf_i)
                 den += tx_power_w_per_panel * (np.abs(z_i) ** 2)
@@ -117,6 +157,11 @@ def run_tti_loop(schedule: ScheduleResult,
     sinr_grid = realized_sinr_grid(
         schedule, h_freq, tx_beams, rx_beams, beam_ids, meas,
         tx_power_w_per_panel, ignore_interference=ignore_interference,
+        tx_array=(
+            ArrayConfig.from_dict(cfg["tx_array"])
+            if h_freq.shape[-1] != tx_beams.shape[-1]
+            else None
+        ),
     )
 
     # Negative loop indices are warmup TTIs. They consume ACK randomness and
@@ -194,3 +239,37 @@ def run_tti_loop(schedule: ScheduleResult,
                     off += olla_step * (1.0 - target) / max(target, 1e-6)
                 olla[key] = float(off)
     return rows, olla
+
+
+def run_one_tti(schedule: ScheduleResult,
+                h_freq: np.ndarray,
+                tx_beams: np.ndarray,
+                rx_beams: np.ndarray,
+                beam_ids: Sequence[BeamId],
+                meas: MeasurementResult,
+                tx_power_w_per_panel: float,
+                cfg: Dict,
+                drop_idx: int,
+                tti: int,
+                rng: np.random.Generator,
+                initial_olla: Dict[Tuple[str, int], float] | None = None,
+                link_adapter=None,
+                ignore_interference: bool = False,
+                record: bool = True) -> Tuple[List[LinkEvalRow], Dict[Tuple[str, int], float]]:
+    """Evaluate one scheduled TTI and immediately update per-UE OLLA state."""
+    one_tti_cfg = {
+        **cfg,
+        "system": {**cfg["system"], "num_tti_per_drop": 1},
+        "link_abstraction": {
+            **cfg["link_abstraction"],
+            "olla_warmup_tti": 0,
+        },
+    }
+    rows, olla = run_tti_loop(
+        schedule, h_freq, tx_beams, rx_beams, beam_ids, meas,
+        tx_power_w_per_panel, one_tti_cfg, drop_idx, rng, initial_olla,
+        link_adapter=link_adapter, ignore_interference=ignore_interference,
+    )
+    for row in rows:
+        row.tti = int(tti)
+    return (rows if record else []), olla

@@ -435,6 +435,113 @@ def _panel_padded_spatial_vector(array_cfg: ArrayConfig, panel_index: int, h_ind
     return full_grid.reshape(-1)
 
 
+def panel_spatial_indices(array_cfg: ArrayConfig, panel_index: int) -> np.ndarray:
+    """Indices of one physical panel in the flattened full spatial grid."""
+    p = int(panel_index)
+    if not 0 <= p < array_cfg.num_array_panels:
+        raise ValueError(
+            f"panel_index must be in [0, {array_cfg.num_array_panels - 1}], got {p}"
+        )
+    panel_cols = int(array_cfg.panel_grid_h)
+    panel_row = p // panel_cols
+    panel_col = p % panel_cols
+    rows = np.arange(
+        panel_row * array_cfg.panel_num_v,
+        (panel_row + 1) * array_cfg.panel_num_v,
+        dtype=int,
+    )
+    cols = np.arange(
+        panel_col * array_cfg.panel_num_h,
+        (panel_col + 1) * array_cfg.panel_num_h,
+        dtype=int,
+    )
+    return (rows[:, None] * int(array_cfg.num_h) + cols[None, :]).reshape(-1)
+
+
+def panel_ae_indices(array_cfg: ArrayConfig, panel_index: int) -> np.ndarray:
+    """Indices of one panel across all polarization blocks.
+
+    The project AE ordering is ``[pol0 full-spatial, pol1 full-spatial, ...]``.
+    The returned compact ordering is ``[pol0 panel-spatial, pol1 panel-spatial, ...]``.
+    """
+    spatial = panel_spatial_indices(array_cfg, panel_index)
+    return np.concatenate([
+        spatial + pol * int(array_cfg.num_spatial)
+        for pol in range(int(array_cfg.polarization_count))
+    ]).astype(int, copy=False)
+
+
+def sionna_panelarray_source_indices(array_cfg: ArrayConfig) -> np.ndarray:
+    """Map the official Sionna ``PanelArray`` AE order to project AE order.
+
+    The returned array is indexed by the project's local AE index and contains
+    the corresponding source index in Sionna's antenna axis.  Sionna stores
+    panels column-major, then polarization blocks within each panel, with
+    vertical position varying fastest.  This project stores polarization
+    blocks over the complete array, with horizontal position varying fastest.
+    """
+    if array_cfg.model != "tr38901_panel":
+        # A one-panel legacy UPA still differs in its spatial flattening.
+        panel_v = int(array_cfg.num_v)
+        panel_h = int(array_cfg.num_h)
+        panel_grid_v = 1
+        panel_grid_h = 1
+    else:
+        panel_v = int(array_cfg.panel_num_v)
+        panel_h = int(array_cfg.panel_num_h)
+        panel_grid_v = int(array_cfg.panel_grid_v)
+        panel_grid_h = int(array_cfg.panel_grid_h)
+    num_spatial = int(array_cfg.num_spatial)
+    panel_spatial = panel_v * panel_h
+    source_by_local = np.empty(int(array_cfg.num_ant), dtype=int)
+    for pol in range(int(array_cfg.polarization_count)):
+        for panel_row in range(panel_grid_v):
+            for panel_col in range(panel_grid_h):
+                # Sionna PanelArray loops panel columns first, then panel rows.
+                sionna_panel = panel_col * panel_grid_v + panel_row
+                for local_v in range(panel_v):
+                    for local_h in range(panel_h):
+                        global_v = panel_row * panel_v + local_v
+                        global_h = panel_col * panel_h + local_h
+                        local_ae = (
+                            pol * num_spatial
+                            + global_v * int(array_cfg.num_h)
+                            + global_h
+                        )
+                        sionna_ae = (
+                            sionna_panel
+                            * panel_spatial
+                            * int(array_cfg.polarization_count)
+                            + pol * panel_spatial
+                            + local_h * panel_v
+                            + local_v
+                        )
+                        source_by_local[local_ae] = sionna_ae
+    if not np.array_equal(np.sort(source_by_local), np.arange(array_cfg.num_ant)):
+        raise ValueError("Sionna-to-project antenna mapping is not a permutation")
+    return source_by_local
+
+
+def extract_panel_tx_dimension(values: np.ndarray,
+                               array_cfg: ArrayConfig,
+                               panel_index: int) -> np.ndarray:
+    """Extract one panel from the last (TX antenna) dimension."""
+    arr = np.asarray(values)
+    expected_compact = (
+        int(array_cfg.panel_num_h)
+        * int(array_cfg.panel_num_v)
+        * int(array_cfg.polarization_count)
+    )
+    if arr.shape[-1] == expected_compact:
+        return arr
+    if arr.shape[-1] != int(array_cfg.num_ant):
+        raise ValueError(
+            f"Cannot extract panel from TX dimension {arr.shape[-1]}; "
+            f"expected full={array_cfg.num_ant} or compact={expected_compact}"
+        )
+    return np.take(arr, panel_ae_indices(array_cfg, panel_index), axis=-1)
+
+
 def dft_2d_codebook(num_h: int,
                     num_v: int,
                     max_beams: int | None = None,
@@ -644,6 +751,10 @@ class BeamId:
     def panel_key(self) -> Tuple[int, int, int]:
         return (self.cell, self.trp, self.panel)
 
+    def trp_key(self) -> Tuple[int, int]:
+        """Physical TRP resource key, independent of any TXRU assignment."""
+        return (self.cell, self.trp)
+
     def short(self) -> str:
         return f"c{self.cell}t{self.trp}p{self.panel}b{self.beam}"
 
@@ -760,7 +871,14 @@ def build_network_tx_beams(num_cells: int,
                     beam_vecs.append(ent["vector"])
                     gi += 1
                 tx_unit += 1
-        return beam_ids, np.asarray(beam_vecs, dtype=np.complex128)
+        beam_matrix = np.asarray(beam_vecs, dtype=np.complex128)
+        if bool(getattr(rf_architecture, "compact_panel_channel", False)):
+            beam_matrix = extract_panel_tx_dimension(
+                beam_matrix,
+                tx_cfg,
+                int(rf_architecture.measurement_panel_index),
+            )
+        return beam_ids, beam_matrix
 
     # Legacy fallback.
     phys = max(1, tx_cfg.num_array_panels if tx_cfg.normalized_beam_scope == "per_panel" else 1)

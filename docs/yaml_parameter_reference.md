@@ -47,6 +47,10 @@
 | `tx_power_dbm` | 发射功率 | dBm | 默认按 TX unit 平均分配。 |
 | `num_drops` | 随机 drop 数 | 正整数 | 越大统计越稳定，仿真越慢。 |
 | `num_tti_per_drop` | 每个 drop 的 TTI 数 | 正整数 | OLLA/HARQ 风格随机 ACK 统计使用。 |
+| `continuous_tti.enabled` | 是否启用连续 TTI 模式 | `true`/`false` | 启用后每个 drop 只实例化一次信道并进行一次测量/上报；每个 warmup 和正式 TTI 都推进小尺度衰落、重新调度并更新 PF/OLLA。 |
+| `continuous_tti.duration_ms` | 每个 drop 的正式统计时长 | 正数，单位 ms | `num_tti=null` 时使用，且必须是 `pdsch.slot_duration_ms` 的整数倍。例如 2 ms / 0.125 ms = 16 TTI。 |
+| `continuous_tti.num_tti` | 每个 drop 的正式统计 TTI 总数 | 正整数或 `null` | 非 `null` 时优先于 `duration_ms`；CLI `--num-tti` 可覆盖。 |
+| `continuous_tti.warmup_tti` | 每个 drop 的 warmup TTI 数 | 非负整数或 `null` | warmup 更新信道、PF、OLLA和调度，但不进入 CSV/CDF；`null` 时沿用 `link_abstraction.olla_warmup_tti`。 |
 | `random_seed` | 随机种子 | 整数 | 用于复现实验。 |
 | `target_bler` | 目标 BLER | `(0,1)`，默认 `0.1` | ILLA/MCS 选择和 OLLA 使用。 |
 
@@ -113,7 +117,7 @@ v2.4 新增的关键配置块。
 | 参数 | 含义 | 取值范围 | 说明 |
 |---|---|---|---|
 | `txru_connectivity` | TXRU 与 AEs 的连接结构 | `panel_polarization_subarray` 或 `fully_connected` | 情况 1 或情况 2。支持别名：`sub_connected`, `case1`, `fully_connected_hybrid`, `case2` 等。 |
-| `allow_independent_polarization_beams` | 同一物理面板的两个极化是否可用不同 beam | `true`/`false` | 仅对 `panel_polarization_subarray` 关键。默认 `true`。 |
+| `allow_independent_polarization_beams` | 同一物理面板的两个极化是否可用不同 beam | `true`/`false` | 仅对 `panel_polarization_subarray` 关键。默认 `false`，两个极化共用空间权值。 |
 | `num_txru` | TRP TXRU 数 | 正整数 | 默认 4。通常应与 `tx_array.num_txru` 一致。 |
 | `max_parallel_beams_per_trp` | 每 TRP 最大并发模拟 beam 数 | 当前建议 `auto` | 解析结果写入 `rf_architecture_summary.json`。 |
 
@@ -124,7 +128,7 @@ v2.4 新增的关键配置块。
 ```yaml
 rf_architecture:
   txru_connectivity: panel_polarization_subarray
-  allow_independent_polarization_beams: true
+  allow_independent_polarization_beams: false
   num_txru: 4
 ```
 
@@ -138,36 +142,32 @@ $$
 \mathrm{polarizations} = P = 2
 $$
 
-$$
-\mathrm{panel\ polarization\ TX\ units} = 2 \times 2 = 4
-$$
-
 因此：
 
 $$
-\mathrm{max\_parallel\_beams\_per\_trp} = 4
+\mathrm{max\_parallel\_beams\_per\_trp}
+= \mathrm{physical\ panels} = 2
 $$
 
 $$
-\mathrm{scheduler.max\_mu\_order(auto)} = 4
+\mathrm{scheduler.max\_mu\_order(auto)}
+= 2 \times \mathrm{TRPs\ in\ scheduling\ domain}
 $$
 
-每个 TXRU 只使用对应 panel-polarization 子阵列的 DFT beam。
+波束码字属于 TRP 共享池，不在码本生成阶段绑定到特定 TXRU。调度器可从共享池选择任意
+`N` 个波束，其中 `N` 为该 TRP 的物理面板数；选中后再动态映射到空闲发射资源。
+每个波束的空间权值同时施加到两个极化。
 
 如果：
 
 ```yaml
-allow_independent_polarization_beams: false
+allow_independent_polarization_beams: true
 ```
 
-则同一面板两个极化共享一个空间 beam：
+则恢复兼容模式：每个 panel-polarization/TXRU 子阵列拥有独立码本并可使用不同波束：
 
 $$
-\mathrm{max\_parallel\_beams\_per\_trp} = \mathrm{physical\ panels} = 2
-$$
-
-$$
-\mathrm{scheduler.max\_mu\_order(auto)} = 2
+\mathrm{max\_parallel\_beams\_per\_trp} = \mathrm{num\_txru} = 4
 $$
 
 ### 8.2 情况 2：`fully_connected`
@@ -229,7 +229,21 @@ $$
 \mathrm{per\ panel\ DFT\ spatial\ codebook} = N \times M
 $$
 
-默认 sub-connected/panel-polarization 模式下，每个 TXRU 使用对应 physical panel 的 local DFT codebook，即 `N*M = 256` 个完整候选方向；默认 SLS 只采样 `4*4=16` 个。
+默认共享码本模式下，`measurement.tx_panel_index` 指定一个参考物理面板，码本按该
+面板的 `N*M = 256` 个 DFT 方向定义；默认 SLS 均匀采样其中 `4*4=16` 个。
+如需固定该面板遍历完整码本，可配置：
+
+```yaml
+tx_array:
+  num_beams_h: 16
+  num_beams_v: 16
+  max_beams: 256
+
+measurement:
+  tx_panel_index: 0
+```
+
+极化数 `P` 只扩展每个波束权值向量的长度，不增加空间波束方向数量。
 
 ---
 
@@ -264,18 +278,24 @@ ue_array:
 
 | 参数 | 含义 | 取值范围 | 说明 |
 |---|---|---|---|
+| `domain_mode` | 已废弃 | 忽略 | 测量域固定为 UE 所属静态调度簇。 |
 | `num_freq_points` | 频域采样点数 | 正整数 | Gamma 矩阵和 EESM 使用。越大越慢。 |
-| `compute_full_gamma` | 是否计算完整服务/干扰 beam Gamma | `true`/`false` | 当前主流程需要 Gamma 用于 full_gamma/oracle；实际计算会按 `scheduler.domain_mode` 裁剪到 UE 的调度域。 |
+| `tx_panel_index` | TX 波束扫描使用的参考物理面板 | `0` 到 `Mg*Ng*Mp*Np-1` | 默认 `0`。共享码本模式固定该面板遍历候选波束；它只是测量参考，不绑定 TXRU。 |
+| `use_panel_channel_views` | 是否使用单面板计算视图 | `true`/`false` | 默认 `true`。完整 TRP 信道始终保存为 1024 维；SLS 从中提取参考面板的 `M*N*P=512` 维视图，实际传输按动态分配的物理面板提取视图。旧参数 `compact_tx_panel_channel` 仅作为兼容别名。 |
+| `compute_full_gamma` | 是否计算服务/干扰 beam Gamma | `true`/`false` | 服务维只包含 serving-cell 候选波束，干扰维为所属静态簇的全部 beam。 |
 | `frequency_average` | 频域平均方式 | 当前 `linear_power` | 预留字段。 |
 
 复杂度大致随：
 
 $$
-N_{\mathrm{UE}} \times N_{\mathrm{TX\ beam}}^2
+N_{\mathrm{UE}} \times N_{\mathrm{service\ beam}}
+\times N_{\mathrm{measurement\ beam}}
 \times N_{\mathrm{RX\ beam}} \times N_{\mathrm{freq}}
 $$
 
 增长。
+
+测量域与调度域相同，均为 UE 所属静态调度簇。服务候选始终来自 serving cell。
 
 ---
 
@@ -296,12 +316,14 @@ $$
 
 | 参数 | 含义 | 取值范围 | 说明 |
 |---|---|---|---|
-| `domain_mode` | 调度域模式 | `single_site_three_sector_independent`, `per_site_joint`, `global` | 默认 `per_site_joint`。`single_site_three_sector_independent` 表示每个 sector 独立测量和调度；`per_site_joint` 表示同站点 3 个 sector 联合测量和调度。 |
+| `cluster_mode` | 静态簇划分 | `per_cell`, `per_site`, `global`, `custom` | 决定测量范围和联合调度分组。 |
+| `static_clusters` | 自定义 cell 分区 | list | `custom` 使用；必须完整覆盖且互不交叠。 |
+| `domain_mode` | 兼容旧参数 | 旧三种模式 | 仅当 `cluster_mode` 未配置时映射到新模式。 |
 | `objective` | 优化目标 | `sum_rate`, `proportional_fair` | 总吞吐最大或比例公平。 |
 | `max_mu_order` | 最大 MU order | `auto` 或正整数 | `auto` 时由 RF architecture 自动解析。 |
 | `cap_mu_order_by_rf` | 是否用 RF 物理并发 beam 数截断手动 MU order | `true`/`false` | 默认 `true`。 |
 | `algorithm` | 调度算法 | `greedy`, `exhaustive`, `hard_conflict_greedy`, `adaptive_lambda_greedy` | `hard_conflict_greedy` 在候选二元组级实施硬冲突删除；`adaptive_lambda_greedy` 使用场景自适应冲突惩罚。 |
-| `use_panel_constraint` | 是否约束同一 TX unit 同时只选一个 beam | `true`/`false` | 默认 `true`。 |
+| `use_panel_constraint` | 是否启用物理发射资源约束 | `true`/`false` | 默认 `true`。共享码本模式按 TRP 计数，最多选择面板数个任意码字；兼容模式仍按固定 panel/TX unit 限制。 |
 | `exhaustive_pruning.enabled` | 是否启用穷举剪枝配置 | `true`/`false` | 默认 `true`。 |
 | `exhaustive_pruning.sort_by_upper_bound` | 是否按单用户上界排序 | `true`/`false` | 先找到较好当前最优值，帮助上界剪枝。 |
 | `exhaustive_pruning.zero_upper_bound` | 是否移除零上界 UE report | `true`/`false` | 不改变最优性。 |
@@ -309,8 +331,9 @@ $$
 | `conflict_penalty_lambda` | proposed feedback 冲突惩罚权重 | 非负数 | 用于 ID-only conflict penalty。 |
 | `conflict_penalty_mode` | lambda 模式 | `fixed`, `adaptive` | `adaptive` 时忽略固定值，按候选 SU rate 中位数计算。 |
 | `adaptive_lambda_alpha` | 自适应 lambda 比例 | 非负数，常用 `0.1`, `0.2`, `0.5` | `lambda = alpha * median(candidate SU rate [Mbps])`，逐调度域计算。 |
-| `unknown_interference_policy` | 未知干扰处理 | 当前 `zero` | 预留字段。 |
+| `unknown_interference_policy` | 调度域内未测量干扰处理 | 当前 `zero` | `zero` 表示调度预测中未知干扰按 0；真实链路评估仍计算全网实际干扰。 |
 | `pf_tbar_init_mbps` | PF 初始平均吞吐 | 正数 | `objective=proportional_fair` 时使用。 |
+| `pf_averaging_window_tti` | PF 吞吐 EWMA 窗长 | 正整数 | 每 TTI 使用 `alpha=1/window` 更新；未调度 UE 的本 TTI 吞吐按 0 更新。 |
 
 `max_mu_order:auto` 的解析规则：
 
@@ -321,7 +344,9 @@ $$
 
 $$
 \mathrm{panel\_polarization\_subarray + shared\ polarization\ beam}:
-\quad \mathrm{max\_mu\_order} = \mathrm{physical\ panel\ count}
+\quad \mathrm{max\_mu\_order}
+= \mathrm{physical\ panel\ count}
+\times \mathrm{TRPs\ in\ scheduling\ domain}
 $$
 
 $$
@@ -329,7 +354,9 @@ $$
 \quad \mathrm{max\_mu\_order} = \mathrm{num\_txru}
 $$
 
-如果 `num_trps_per_sector > 1`，则每 sector 的 RF 并发上限会乘以 TRP 数。
+`TRPs in scheduling domain` 按调度域解析：sector 域为 1，site 域为
+`sectors_per_site`，global 域为 `num_sites * sectors_per_site`；如果
+`num_trps_per_sector > 1`，还会继续乘以该值。
 
 ---
 
@@ -459,6 +486,8 @@ sionna_import_probe.json
 metrics/beams.csv
 metrics/summary.csv
 metrics/ue_goodput.csv
+metrics/system_tti_goodput.csv
+metrics/system_drop_avg_goodput.csv
 metrics/schedule_similarity.csv
 metrics/schedule_similarity_by_drop.csv
 metrics/su_snr_samples.csv
@@ -467,8 +496,14 @@ metrics/su_snr_summary.csv
 metrics/scheduled_ue_su_throughput.csv
 metrics/scheduled_ue_su_throughput_summary.csv
 figures/scheduled_ue_su_throughput_cdf.png
+figures/system_tti_goodput_cdf.png
+figures/system_drop_avg_goodput_cdf.png
 metrics/paired_case_debug.txt
 ```
+
+`system_tti_goodput.csv` 显式包含零吞吐 TTI，用于瞬时系统吞吐 CDF；
+`system_drop_avg_goodput.csv` 对每个 drop 的完整正式统计窗口求平均，用于
+蒙特卡洛 realization 间的系统吞吐 CDF。
 
 `rf_architecture_summary.json` 是确认 MU order 与射频架构是否按预期解析的核心文件。
 
@@ -490,3 +525,41 @@ analysis:
 终端只需复制从 `[paired-debug] begin` 到 `[paired-debug] end` 的内容。
 `link_tti.csv` 会同时记录 `ack_random_uniform` 和 `link_position`，用于判断共同随机数
 是否因 link 遍历顺序不同而分配给了不同 UE。
+## v2.12 静态调度簇参数（现行语义）
+
+测量域与调度域不再分别配置，二者都等于 UE 所属的静态调度簇。
+
+| 参数 | 类型/取值 | 默认/行为 |
+|---|---|---|
+| `scheduler.cluster_mode` | `per_cell`, `per_site`, `global`, `custom` 或 `null` | 新配置建议显式设置；`null` 时从旧 `scheduler.domain_mode` 兼容映射 |
+| `scheduler.static_clusters` | list | 仅 `custom` 使用；每项可写 `{cluster_id, cell_ids}`，也可直接写 cell ID 列表 |
+| `measurement.domain_mode` | deprecated | 已忽略；测量 cell 固定为 UE 调度簇的全部 cell |
+
+静态簇必须是不交叠的全网 cell 完整划分。每个 UE 按最大宽带平均 RSRP 关联
+serving cell，并继承该 cell 唯一的 `cluster_id`。配置示例：
+
+```yaml
+scheduler:
+  cluster_mode: custom
+  static_clusters:
+    - cluster_id: 10
+      cell_ids: [0, 1, 2]
+    - cluster_id: 11
+      cell_ids: [3, 4, 5]
+```
+
+CLI 可用 `--cluster-mode per_cell|per_site|global|custom` 覆盖模式；`custom`
+仍需 YAML 提供 `static_clusters`。
+
+模式定义：
+
+| 模式 | 静态划分 |
+|---|---|
+| `per_cell` | 每个 cell 一个簇 |
+| `per_site` | 相同 `site_id` 的全部 cell 一个簇 |
+| `global` | 全网全部 cell 一个簇 |
+| `custom` | 严格按 `static_clusters` 列表划分 |
+
+`metrics/runtime_phases.csv` 的 `elapsed_s` 记录拓扑、信道、平均 RSRP 关联、
+静态簇准备、Gamma、反馈、逐 case 调度和逐 case 链路评估耗时；启用 progress
+时相同阶段会在完成后输出 elapsed time。

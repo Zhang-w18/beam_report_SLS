@@ -1,0 +1,227 @@
+# v2.12: seven sites, 21 cells, static per-site scheduling clusters.
+#
+# Array/RF scale follows configs/v_2_10_2TXRU_3sites_global.yaml:
+# - TX: (M,N,P,Mg,Ng,Mp,Np)=(8,16,2,1,1,1,1), 256 AEs.
+# - RX: (M,N,P,Mg,Ng,Mp,Np)=(4,1,2,1,1,1,1), 8 AEs.
+# - One sector is one TRP; every TRP has two independently schedulable
+#   polarization-panel/TXRU resources.
+#
+# Static per-site clusters:
+# - 3 TRPs/site * 2 independent resources/TRP = 6 concurrent beams/cluster.
+# - 7 independent site clusters * 6 = 42 concurrent beams network-wide.
+# - This equals 21 TRPs * 2 independent resources/TRP.
+# - Measurement domain = scheduling domain = the UE's serving-site cluster.
+
+scenario:
+  name: urban_macro_v2_12_7site21cell_persite_baseline_topk_50drop_200tti
+  carrier_frequency_ghz: 30.0
+  channel_model: sionna_tr38901_uma
+  min_ue_distance_m: 35.0
+  max_ue_distance_m: 250.0
+  num_clusters: 4
+  delay_spread_ns: 100.0
+  shadow_fading_std_db: 4.0
+  pathloss_exponent: 3.0
+  enable_pathloss: true
+  enable_shadow_fading: true
+  o2i_model: low
+
+topology:
+  layout: seven_site_hex
+  num_sites: 7
+  sectors_per_site: 3
+  sector_azimuths_deg: [30.0, 150.0, 270.0]
+  sector_width_deg: 120.0
+  isd_m: 500.0
+  bs_height_m: 25.0
+  ue_height_m: 1.5
+
+system:
+  subcarrier_spacing_khz: 120.0
+  # Preserve approximately 33 dBm/TRP and 30 dBm/independent TX resource:
+  # 33 dBm + 10*log10(21 TRPs) = 46.222 dBm network-wide.
+  tx_power_dbm: 46.222
+  num_drops: 50
+  # This is 200 measured TTIs per drop. The 50 OLLA warmup TTIs below are
+  # additional, so the link loop executes 250 TTIs per drop.
+  num_tti_per_drop: 200
+  random_seed: 20260725
+  target_bler: 0.1
+
+pdsch:
+  num_prbs: 132
+  num_symbols: 12
+  dmrs_overhead_re_per_prb: 18
+  num_layers_per_ue: 1
+  slot_duration_ms: 0.125
+
+noise:
+  thermal_noise_density_dbm_per_hz: -174.0
+  ue_noise_figure_db: 7.0
+
+ue_drop:
+  # Same UE density as the reference: 5 UE/cell * 21 cells = 105 UEs/drop.
+  num_ut_per_sector: 5
+  distribution: uniform_in_sector
+  speed_kmh: 3.0
+
+trp:
+  num_trps_per_sector: 1
+  num_panels_per_sector: 1
+  panel_azimuth_offsets_deg: [0.0]
+  panel_power_mode: per_tx_unit_equal
+
+rf_architecture:
+  txru_connectivity: panel_polarization_subarray
+  allow_independent_polarization_beams: true
+  num_txru: 2
+  max_parallel_beams_per_trp: auto
+
+tx_array:
+  model: tr38901_panel
+  num_txru: 2
+  num_ae: 256
+  M: 8
+  N: 16
+  P: 2
+  Mg: 1
+  Ng: 1
+  Mp: 1
+  Np: 1
+  dH: 0.5
+  dV: 0.5
+  beam_scope: per_panel
+  sampling_mode: uniform
+  num_beams_h: 16
+  num_beams_v: 4
+  max_beams: 64
+  vertical_beam_mode: distance_range
+  fixed_v_index: null
+  vertical_beam:
+    min_horizontal_distance_m: 35.0
+    max_horizontal_distance_m: 250.0
+    height_difference_m: 23.5
+
+ue_array:
+  model: tr38901_panel
+  num_rxru: 2
+  num_ae: 8
+  M: 4
+  N: 1
+  P: 2
+  Mg: 1
+  Ng: 1
+  Mp: 1
+  Np: 1
+  dH: 0.5
+  dV: 0.5
+  beam_scope: joint
+  sampling_mode: uniform
+  num_beams_h: 1
+  num_beams_v: 4
+  max_beams: 4
+  vertical_beam_mode: scan
+  fixed_v_index: null
+
+beam:
+  tx_codebook: dft_2d
+  rx_codebook: dft_2d
+  one_beam_per_panel: true
+
+measurement:
+  # No independent domain_mode: v2.12 always measures the UE scheduling cluster.
+  # Top-K conflict reporting still needs internal Gamma calculation.
+  num_freq_points: 16
+  compute_full_gamma: true
+  frequency_average: linear_power
+  tx_panel_index: 0
+  use_panel_channel_views: true
+  # Use CUDA/CuPy when available; otherwise v2.12 records a NumPy fallback.
+  gamma_backend: auto
+  gamma_ue_batch_size: 4
+
+feedback:
+  schemes:
+    - baseline
+    - topk_conflict_id
+  cqi_mode: illa_target_bler
+  service_beam_top_k1: 4
+  oracle_service_beam_top_k: 4
+  conflict_top_k2: 3
+  conflict_sinr_threshold_db: 0.0
+
+evaluation:
+  matrix:
+    baseline: [greedy]
+    topk_conflict_id: [hard_conflict_greedy]
+  references:
+    baseline: baseline__greedy
+
+scheduler:
+  # These two keys have identical semantics. cluster_mode is authoritative;
+  # domain_mode remains only as a compatible, non-conflicting legacy value.
+  cluster_mode: per_site
+  static_clusters: []
+  domain_mode: per_site_joint
+  objective: sum_rate
+  # auto -> 3 TRPs/site * 2 independent resources/TRP = 6 per site cluster.
+  # Across seven independently scheduled site clusters the network maximum is 42.
+  max_mu_order: auto
+  cap_mu_order_by_rf: true
+  algorithm: greedy
+  use_panel_constraint: true
+  exhaustive_pruning:
+    enabled: true
+    sort_by_upper_bound: true
+    zero_upper_bound: true
+    branch_and_bound: true
+  conflict_penalty_lambda: 0.35
+  conflict_penalty_mode: adaptive
+  adaptive_lambda_alpha: 0.20
+  unknown_interference_policy: zero
+  pf_tbar_init_mbps: 1.0
+
+analysis:
+  # Keep exactly the two requested evaluation schemes; do not add the derived
+  # baseline-no-interference upper-bound case.
+  baseline_no_interference_upper_bound: false
+  paired_case_debug:
+    enabled: false
+    pairs: []
+
+link_abstraction:
+  mode: sionna_sys_precomputed_bler
+  mcs_table_index: 1
+  mcs_category: 1
+  sinr_mapping: eesm
+  eesm_beta_db: 5.0
+  olla_enabled: true
+  olla_warmup_tti: 50
+  olla_step_db: 0.1
+  harq_enabled: true
+  bler_curve_slope: 1.1
+  fallback_snr_min_db: -8.0
+  fallback_snr_max_db: 35.0
+  fallback_snr_step_db: 0.05
+
+# The topology figure is always generated at figures/topology.png.
+coverage_heatmap:
+  enabled: false
+
+progress:
+  enabled: true
+
+sionna:
+  enable_import_probe: true
+  prefer_sionna_sys_phy_abstraction: true
+  # Keep the configuration runnable on v2.12 installations without Sionna;
+  # both the channel and link adapter will record the effective fallback.
+  fallback_to_numpy_if_unavailable: true
+  device: null
+  precision: null
+  bs_polarization: dual
+  bs_polarization_type: cross
+  bs_antenna_pattern: "38.901"
+  ut_polarization: dual
+  ut_polarization_type: cross
+  ut_antenna_pattern: omni

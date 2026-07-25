@@ -1,3 +1,4 @@
+import csv
 from pathlib import Path
 
 import numpy as np
@@ -9,8 +10,11 @@ from beam_sls.link import eesm, realized_sinr_grid, run_tti_loop
 from beam_sls.measurement import MeasurementResult, SparseGamma, compute_gamma_measurement
 from beam_sls.scheduler import ScheduledLink, ScheduleResult, _evaluate_assignments, exhaustive_schedule, normalize_domain_mode, schedule
 from beam_sls.sim import (build_paired_case_debug_lines,
-                          build_scheduled_ue_su_throughput_rows, build_ue_goodput_rows,
+                          build_scheduled_ue_su_throughput_rows,
+                          build_system_drop_avg_goodput_rows,
+                          build_system_tti_goodput_rows, build_ue_goodput_rows,
                           run_simulation, schedule_similarity_rows,
+                          summarize_results,
                           summarize_scheduled_ue_su_throughput, summarize_su_snr)
 from beam_sls.topology import make_topology
 from beam_sls.utils import occupied_bandwidth_hz
@@ -35,14 +39,35 @@ def test_smoke(tmp_path: Path):
     assert (tmp_path / "out" / "metrics" / "summary.csv").exists()
     assert "baseline_no_interference_upper_bound" in summary
     assert (tmp_path / "out" / "metrics" / "ue_goodput.csv").exists()
+    assert (tmp_path / "out" / "metrics" / "system_tti_goodput.csv").exists()
+    assert (tmp_path / "out" / "metrics" / "system_drop_avg_goodput.csv").exists()
     assert (tmp_path / "out" / "metrics" / "schedule_similarity.csv").exists()
     assert (tmp_path / "out" / "metrics" / "su_snr_samples.csv").exists()
     assert (tmp_path / "out" / "metrics" / "scheduled_ue_su_throughput.csv").exists()
     assert (tmp_path / "out" / "metrics" / "scheduled_ue_su_throughput_summary.csv").exists()
     assert (tmp_path / "out" / "metrics" / "scheduler_iterations.csv").exists()
     assert (tmp_path / "out" / "metrics" / "runtime_phases.csv").exists()
+    assert (tmp_path / "out" / "metrics" / "measurement_domains.csv").exists()
     assert (tmp_path / "out" / "figures" / "ue_goodput_cdf.png").exists()
+    assert (tmp_path / "out" / "figures" / "system_tti_goodput_cdf.png").exists()
+    assert (tmp_path / "out" / "figures" / "system_drop_avg_goodput_cdf.png").exists()
     assert (tmp_path / "out" / "figures" / "scheduled_ue_su_throughput_cdf.png").exists()
+    with (tmp_path / "out" / "metrics" / "runtime_phases.csv").open(
+        encoding="utf-8", newline=""
+    ) as handle:
+        runtime_rows = list(csv.DictReader(handle))
+    phases = {row["phase"] for row in runtime_rows}
+    assert {
+        "topology_generation",
+        "channel_generation",
+        "average_rsrp_association",
+        "static_cluster_preparation",
+        "gamma_measurement",
+        "feedback_generation",
+        "scheduler",
+        "link_evaluation",
+    } <= phases
+    assert all(float(row["elapsed_s"]) >= 0.0 for row in runtime_rows)
 
 
 def test_scheduled_ue_su_throughput_uses_selected_beam_standalone_mcs():
@@ -381,6 +406,43 @@ def test_single_site_three_sector_independent_is_sector_domain():
     assert {l.beam_index for l in sched.links} == {0, 1}
 
 
+def test_scheduler_groups_reports_by_unique_static_cluster():
+    beam_ids = [
+        BeamId(cell=0, trp=0, panel=0, beam=0, global_index=0, tx_unit=0),
+        BeamId(cell=1, trp=0, panel=0, beam=0, global_index=1, tx_unit=1),
+        BeamId(cell=2, trp=1, panel=0, beam=0, global_index=2, tx_unit=2),
+    ]
+    reports = [
+        UEReport(
+            0, "baseline", [ServiceCandidate(0, 10.0, 4)],
+            site_id=0, serving_cell=0, scheduling_cluster=7,
+            measured_interference_beams={0, 1},
+        ),
+        UEReport(
+            1, "baseline", [ServiceCandidate(1, 9.0, 3)],
+            site_id=0, serving_cell=1, scheduling_cluster=7,
+            measured_interference_beams={0, 1},
+        ),
+    ]
+
+    cfg = load_config(None)
+    cfg["scheduler"]["cluster_mode"] = "custom"
+    cfg["scheduler"]["static_clusters"] = [
+        {"cluster_id": 7, "cell_ids": [0, 1]},
+        {"cluster_id": 8, "cell_ids": [2]},
+    ]
+    cfg["_resolved"] = {"max_mu_order": 1}
+    result = schedule(reports, beam_ids, cfg)
+    assert result.links
+    assert result.metadata["domain_mode"] == "static_cluster"
+    assert result.metadata["num_domains"] == 1
+    assert all(
+        beam_ids[link.beam_index].cell
+        == reports[link.ue_id].serving_cell
+        for link in result.links
+    )
+
+
 def test_domain_limited_measurement_uses_sparse_gamma():
     beam_ids = [
         BeamId(cell=0, trp=0, panel=0, beam=0, global_index=0, tx_unit=0),
@@ -401,6 +463,83 @@ def test_domain_limited_measurement_uses_sparse_gamma():
     assert meas.service_power_w[0, 1] == 0.0
     assert meas.gamma[0, 0, 0] > 0.0
     assert meas.gamma[0, 0, 1] == 0.0
+
+
+def test_service_and_measured_interference_beams_are_independent():
+    beam_ids = [
+        BeamId(cell=i, trp=i, panel=0, beam=0, global_index=i, tx_unit=i)
+        for i in range(3)
+    ]
+    h_freq = np.ones((1, 3, 1, 1, 1), dtype=np.complex128)
+    tx_beams = np.ones((3, 1), dtype=np.complex128)
+    rx_beams = np.ones((1, 1), dtype=np.complex128)
+    meas = compute_gamma_measurement(
+        h_freq, tx_beams, rx_beams, beam_ids, 1.0, 1.0,
+        service_beam_indices_by_ue={0: [0]},
+        interference_beam_indices_by_ue={0: [1, 2]},
+    )
+
+    assert isinstance(meas.gamma, SparseGamma)
+    assert meas.service_power_w[0, 0] > 0.0
+    assert meas.service_power_w[0, 1] == 0.0
+    assert meas.gamma[0, 0, 0] > 0.0
+    assert meas.gamma[0, 0, 1] > 0.0
+    assert meas.gamma[0, 0, 2] > 0.0
+    assert meas.gamma[0, 1, 1] == 0.0
+
+    report = make_reports(
+        meas, beam_ids, schemes=["topk_conflict_id"],
+        k1=2, oracle_top_k=2, k2=2, threshold_db=0.0,
+        service_beam_indices_by_ue={0: [0]},
+        measured_beam_indices_by_ue={0: [1, 2]},
+    )["topk_conflict_id"][0]
+    assert report.candidate_indices() == [0]
+    assert report.measured_interference_beams == {1, 2}
+    assert report.candidates[0].conflict_beams == {1, 2}
+
+
+def test_rectangular_sparse_gamma_matches_dense_measurement():
+    rng = np.random.default_rng(20260724)
+    beam_ids = [
+        BeamId(cell=i, trp=i, panel=0, beam=0, global_index=i, tx_unit=i)
+        for i in range(4)
+    ]
+    h_freq = (
+        rng.normal(size=(2, 4, 3, 2, 3))
+        + 1j * rng.normal(size=(2, 4, 3, 2, 3))
+    )
+    tx_beams = (
+        rng.normal(size=(4, 3)) + 1j * rng.normal(size=(4, 3))
+    )
+    rx_beams = (
+        rng.normal(size=(3, 2)) + 1j * rng.normal(size=(3, 2))
+    )
+    dense = compute_gamma_measurement(
+        h_freq, tx_beams, rx_beams, beam_ids, 1.5, 0.1,
+    )
+    service = {0: [0], 1: [2]}
+    measured = {0: [1, 3], 1: [0, 1, 3]}
+    sparse = compute_gamma_measurement(
+        h_freq, tx_beams, rx_beams, beam_ids, 1.5, 0.1,
+        service_beam_indices_by_ue=service,
+        interference_beam_indices_by_ue=measured,
+    )
+
+    for ue_id in range(2):
+        for service_beam in service[ue_id]:
+            assert np.isclose(
+                sparse.service_power_w[ue_id, service_beam],
+                dense.service_power_w[ue_id, service_beam],
+            )
+            assert (
+                sparse.selected_rx_beam[ue_id, service_beam]
+                == dense.selected_rx_beam[ue_id, service_beam]
+            )
+            for interferer_beam in measured[ue_id] + [service_beam]:
+                assert np.isclose(
+                    sparse.gamma[ue_id, service_beam, interferer_beam],
+                    dense.gamma[ue_id, service_beam, interferer_beam],
+                )
 
 
 def test_gamma_measurement_ue_batching_preserves_dense_result():
@@ -582,6 +721,34 @@ def test_analysis_helpers_include_zero_ues_and_exact_pair_similarity():
     assert snr_summary[0]["avg_reported_su_snr_db"] == 2.0
 
 
+def test_system_goodput_helpers_include_zero_ttis_and_average_each_drop():
+    tti_rows = build_system_tti_goodput_rows(
+        [
+            {"scheme": "a", "drop": 0, "tti": 0, "goodput_mbps": 10.0},
+            {"scheme": "a", "drop": 0, "tti": 0, "goodput_mbps": 5.0},
+            {"scheme": "a", "drop": 1, "tti": 1, "goodput_mbps": 8.0},
+        ],
+        schemes=["a"],
+        num_drops=2,
+        num_tti=2,
+    )
+    assert [row["system_goodput_mbps"] for row in tti_rows] == [
+        15.0, 0.0, 0.0, 8.0,
+    ]
+
+    drop_rows = build_system_drop_avg_goodput_rows(tti_rows)
+    assert [row["avg_system_goodput_mbps"] for row in drop_rows] == [7.5, 4.0]
+    assert [row["num_measured_tti"] for row in drop_rows] == [2, 2]
+
+    summary = summarize_results(
+        link_rows=[],
+        schemes=["a"],
+        ue_goodput_rows=[],
+        system_tti_goodput_rows=tti_rows,
+    )
+    assert summary["a"]["avg_system_goodput_mbps"] == 5.75
+
+
 class _OutageAwareFakeAdapter:
     target_bler = 0.1
 
@@ -688,3 +855,30 @@ def test_full_gamma_rechecks_outage_at_predicted_mu_sinr():
     assert links[0].predicted_mcs == 3
     assert links[0].predicted_outage is True
     assert links[0].predicted_rate_mbps == 0.0
+
+
+def test_full_gamma_unknown_unmeasured_interference_uses_zero_policy():
+    cfg = load_config(None)
+    beam_ids = [
+        BeamId(cell=i, trp=i, panel=0, beam=0, global_index=i, tx_unit=i)
+        for i in range(2)
+    ]
+    reports = [
+        UEReport(
+            ue_id=i,
+            scheme="full_gamma",
+            candidates=[ServiceCandidate(i, 0.0, 1)],
+            measured_interference_beams={i},
+            full_gamma=np.eye(2, dtype=float),
+            full_service_power_w=np.ones(2, dtype=float),
+            full_noise_power_w=1.0,
+        )
+        for i in range(2)
+    ]
+
+    _utility, links = _evaluate_assignments(
+        [(0, 0), (1, 1)], reports, beam_ids, cfg, None,
+    )
+
+    assert len(links) == 2
+    assert all(np.isclose(link.predicted_sinr_db, 0.0) for link in links)

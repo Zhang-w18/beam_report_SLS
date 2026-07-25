@@ -70,9 +70,9 @@ rf_architecture:
   # Case 2: fully_connected. Each TXRU connects to the whole TRP array and can
   # form one full-array hybrid beam.
   txru_connectivity: panel_polarization_subarray   # panel_polarization_subarray / fully_connected
-  # true: two polarizations of the same panel may use different DFT beams;
-  # false: two polarizations on one panel share the same spatial beam.
-  allow_independent_polarization_beams: true
+  # false: both polarizations share one spatial beam. Codewords belong to a
+  # TRP-wide pool and are dynamically assigned to available TXRUs.
+  allow_independent_polarization_beams: false
   num_txru: 4
   max_parallel_beams_per_trp: auto
 
@@ -92,13 +92,11 @@ tx_array:
   Np: 1
   dH: 0.5
   dV: 0.5
-  # Legacy/manual beam-scope field. v2.4 resolves the effective scope from
-  # rf_architecture. With the default RF architecture, the effective scope is
-  # panel_polarization_subarray.
+  # The default shared codebook is defined on one physical panel. The reference
+  # panel used for SLS is selected by measurement.tx_panel_index.
   beam_scope: per_panel
   # Candidate DFT beam grid. num_beams_h*num_beams_v is the scanned subset.
-  # In default sub-connected mode these counts apply to each panel-polarization
-  # TXRU; in fully_connected mode they apply to the whole TRP array per TXRU.
+  # One 16x16 panel has 256 full DFT directions; the default scans 4x4=16.
   sampling_mode: uniform
   num_beams_h: 4
   num_beams_v: 4
@@ -136,6 +134,11 @@ measurement:
   num_freq_points: 24
   compute_full_gamma: true
   frequency_average: linear_power
+  # Reference panel for sweeping the shared single-panel codebook during SLS.
+  # This is a measurement reference, not a beam-to-TXRU binding.
+  tx_panel_index: 0
+  # Reduce the TX dimension from the full TRP AE count to one panel's M*N*P.
+  use_panel_channel_views: true
 
 feedback:
   schemes: [full_gamma, baseline, topk_conflict_id, threshold_conflict_set]
@@ -146,10 +149,11 @@ feedback:
   conflict_sinr_threshold_db: 0.0
 
 scheduler:
+  cluster_mode: per_site
   domain_mode: per_site_joint
   objective: sum_rate
-  # auto binds MU order to RF architecture. With default case-1 RF, 4 TXRUs and
-  # independent polarization beams, resolved max_mu_order = 4.
+  # auto binds MU order to RF capacity in the scheduling domain. With two
+  # panels/TRP and three TRPs/site, resolved max_mu_order = 6.
   max_mu_order: auto
   cap_mu_order_by_rf: true
   # greedy / exhaustive / hard_conflict_greedy / adaptive_lambda_greedy
