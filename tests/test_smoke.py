@@ -43,6 +43,7 @@ def test_smoke(tmp_path: Path):
     assert (tmp_path / "out" / "metrics" / "system_drop_avg_goodput.csv").exists()
     assert (tmp_path / "out" / "metrics" / "schedule_similarity.csv").exists()
     assert (tmp_path / "out" / "metrics" / "su_snr_samples.csv").exists()
+    assert (tmp_path / "out" / "metrics" / "topk_interference_details.csv").exists()
     assert (tmp_path / "out" / "metrics" / "scheduled_ue_su_throughput.csv").exists()
     assert (tmp_path / "out" / "metrics" / "scheduled_ue_su_throughput_summary.csv").exists()
     assert (tmp_path / "out" / "metrics" / "scheduler_iterations.csv").exists()
@@ -496,6 +497,16 @@ def test_service_and_measured_interference_beams_are_independent():
     assert report.candidate_indices() == [0]
     assert report.measured_interference_beams == {1, 2}
     assert report.candidates[0].conflict_beams == {1, 2}
+    details = report.candidates[0].interference_details
+    assert [d["interferer_beam_index"] for d in details] == [1, 2]
+    for detail in details:
+        assert np.isclose(detail["service_snr_db"], 0.0)
+        assert np.isclose(detail["pair_sinr_db"], -3.010299956639812)
+        assert np.isclose(detail["sinr_loss_db"], 3.010299956639812)
+    serialized = report.to_dict(beam_ids)["candidates"][0]["interference_details"]
+    assert [d["interferer_beam_id"] for d in serialized] == [
+        beam_ids[1].short(), beam_ids[2].short(),
+    ]
 
 
 def test_rectangular_sparse_gamma_matches_dense_measurement():

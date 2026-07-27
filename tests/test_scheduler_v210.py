@@ -137,6 +137,46 @@ def test_incremental_limited_feedback_matches_v29_reference_greedy():
     assert optimized.metadata["stats"]["implementation"] == "v2.10_incremental_limited_feedback"
 
 
+def test_equal_rate_prefers_candidate_with_smallest_conflict_impact():
+    beams = _beam_ids(4)
+    reports = [
+        UEReport(0, "topk_conflict_id", [
+            ServiceCandidate(0, 10.0, 3, conflict_beams={2, 3}),
+        ]),
+        UEReport(1, "topk_conflict_id", [
+            ServiceCandidate(1, 10.0, 3),
+        ]),
+        UEReport(2, "topk_conflict_id", [
+            ServiceCandidate(2, 5.0, 1),
+        ]),
+        UEReport(3, "topk_conflict_id", [
+            ServiceCandidate(3, 5.0, 1),
+        ]),
+    ]
+
+    for algorithm, optimized in [
+        ("adaptive_lambda_greedy", True),
+        ("adaptive_lambda_greedy", False),
+        ("hard_conflict_greedy", True),
+    ]:
+        cfg = load_config(None)
+        cfg["scheduler"].update({
+            "algorithm": algorithm,
+            "domain_mode": "global",
+            "objective": "sum_rate",
+            "optimized_greedy": optimized,
+            "use_panel_constraint": True,
+        })
+        cfg["_resolved"] = {"max_mu_order": 1}
+
+        result = schedule(reports, beams, cfg, link_adapter=_PiecewiseAdapter())
+
+        assert [(link.ue_id, link.beam_index) for link in result.links] == [(1, 1)]
+        round_stats = result.metadata["stats"]["rounds"][0]
+        assert round_stats["equal_metric_candidate_count"] == 2
+        assert round_stats["selected_conflict_impact"] == 0
+
+
 def test_incremental_full_gamma_matches_v29_reference_greedy():
     cfg = load_config(None)
     cfg["scheduler"].update({"domain_mode": "global", "use_panel_constraint": True})

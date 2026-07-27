@@ -701,6 +701,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     sector_rows_all: List[Dict[str, Any]] = []
     beam_rows: List[Dict[str, Any]] = [b.to_dict() for b in beam_ids]
     report_rows: List[Dict[str, Any]] = []
+    topk_interference_rows: List[Dict[str, Any]] = []
     measurement_domain_rows: List[Dict[str, Any]] = []
     su_snr_sample_rows: List[Dict[str, Any]] = []
     scheduled_ue_su_throughput_rows: List[Dict[str, Any]] = []
@@ -962,6 +963,22 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
                 report_rows.append({"drop": drop, "scheme": scheme, "ue_id": r.ue_id,
                                     "report_json": json.dumps(r.to_dict(beam_ids), ensure_ascii=False)})
                 for rank, cand in enumerate(r.candidates):
+                    for interferer_rank, detail in enumerate(cand.interference_details):
+                        interferer_beam = int(detail["interferer_beam_index"])
+                        topk_interference_rows.append({
+                            "drop": int(drop),
+                            "scheme": scheme,
+                            "ue_id": int(r.ue_id),
+                            "service_candidate_rank": int(rank),
+                            "service_beam_index": int(cand.beam_index),
+                            "service_beam_id": beam_ids[cand.beam_index].short(),
+                            "interferer_rank": int(interferer_rank),
+                            "interferer_beam_index": interferer_beam,
+                            "interferer_beam_id": beam_ids[interferer_beam].short(),
+                            "service_snr_db": float(detail["service_snr_db"]),
+                            "pair_sinr_db": float(detail["pair_sinr_db"]),
+                            "sinr_loss_db": float(detail["sinr_loss_db"]),
+                        })
                     su_snr_sample_rows.append({
                         "drop": int(drop),
                         "scheme": scheme,
@@ -1275,6 +1292,10 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     write_csv(out_dir / "metrics" / "beams.csv", beam_rows)
     write_csv(out_dir / "metrics" / "gamma_measurement_backend.csv", gamma_backend_rows)
     write_csv(out_dir / "metrics" / "reports.csv", report_rows)
+    write_csv(
+        out_dir / "metrics" / "topk_interference_details.csv",
+        topk_interference_rows,
+    )
     write_csv(
         out_dir / "metrics" / "measurement_domains.csv",
         measurement_domain_rows,

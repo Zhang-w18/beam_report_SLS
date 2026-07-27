@@ -8,6 +8,7 @@ import numpy as np
 from .codebook import BeamId
 from .mcs import bler_from_sinr_db, select_mcs_from_sinr_lin
 from .measurement import MeasurementResult
+from .utils import lin_to_db
 
 
 @dataclass
@@ -17,6 +18,7 @@ class ServiceCandidate:
     su_mcs: int
     conflict_beams: Set[int] = field(default_factory=set)
     su_outage: bool = False
+    interference_details: List[Dict[str, float | int]] = field(default_factory=list)
 
     def to_dict(self, beam_ids: Sequence[BeamId]) -> Dict:
         return {
@@ -26,6 +28,15 @@ class ServiceCandidate:
             "su_mcs": self.su_mcs,
             "su_outage": self.su_outage,
             "conflict_beams": [beam_ids[i].short() for i in sorted(self.conflict_beams)],
+            "interference_details": [
+                {
+                    **detail,
+                    "interferer_beam_id": beam_ids[
+                        int(detail["interferer_beam_index"])
+                    ].short(),
+                }
+                for detail in self.interference_details
+            ],
         }
 
 
@@ -177,15 +188,31 @@ def make_reports(meas: MeasurementResult,
             cands: List[ServiceCandidate] = []
             for m in top:
                 conflicts: Set[int] = set()
+                interference_details: List[Dict[str, float | int]] = []
                 if scheme == "topk_conflict_id":
                     row = meas.gamma[u, m, :].copy()
                     row[m] = np.inf
                     if measured_set is None:
-                        candidates = [int(i) for i in np.argsort(row) if int(i) != int(m)]
+                        candidates = [
+                            int(i)
+                            for i in np.argsort(row, kind="stable")
+                            if int(i) != int(m)
+                        ]
                     else:
                         candidates = sorted((int(i) for i in measured_set if int(i) != int(m)),
-                                            key=lambda i: float(row[i]))
+                                            key=lambda i: (float(row[i]), int(i)))
                     conflicts = set(candidates[:int(k2)])
+                    service_snr_db = float(lin_to_db(float(meas.gamma[u, m, m])))
+                    for interferer_beam in candidates[:int(k2)]:
+                        pair_sinr_db = float(
+                            lin_to_db(float(meas.gamma[u, m, interferer_beam]))
+                        )
+                        interference_details.append({
+                            "interferer_beam_index": int(interferer_beam),
+                            "service_snr_db": service_snr_db,
+                            "pair_sinr_db": pair_sinr_db,
+                            "sinr_loss_db": service_snr_db - pair_sinr_db,
+                        })
                 elif scheme == "threshold_conflict_set":
                     row = meas.gamma[u, m, :]
                     if measured_set is None:
@@ -203,6 +230,7 @@ def make_reports(meas: MeasurementResult,
                     su_mcs=int(meas.su_mcs[u, m]),
                     conflict_beams=conflicts,
                     su_outage=False if meas.su_outage is None else bool(meas.su_outage[u, m]),
+                    interference_details=interference_details,
                 ))
             rep = UEReport(ue_id=u,
                            scheme=scheme,

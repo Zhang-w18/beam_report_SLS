@@ -351,6 +351,31 @@ def test_seven_site_three_trp_topology_and_capacity():
     assert resolved_max_mu_order(cfg, rf) == 6
 
 
+def test_v212_baseline_topk_config_enables_requested_comparison_modes():
+    from beam_sls.config import load_config
+    from beam_sls.rf import resolve_rf_architecture, resolved_max_mu_order
+
+    cfg = load_config(
+        "configs/v2_12_7site21cell_persite_baseline_topk_50drop_200tti.yaml"
+    )
+    tx = ArrayConfig.from_dict(cfg["tx_array"])
+    rf = resolve_rf_architecture(cfg, tx)
+
+    assert cfg["scheduler"]["objective"] == "proportional_fair"
+    assert cfg["evaluation"]["matrix"] == {
+        "baseline": ["greedy"],
+        "topk_conflict_id": [
+            "adaptive_lambda_greedy",
+            "hard_conflict_greedy",
+        ],
+    }
+    assert cfg["feedback"]["service_beam_top_k1"] == 2
+    assert cfg["feedback"]["conflict_top_k2"] == 2
+    assert rf.dynamic_beam_assignment is True
+    assert rf.max_parallel_beams_per_trp == 1
+    assert resolved_max_mu_order(cfg, rf) == 3
+
+
 def test_three_site_global_36ue_config_exposes_36_tx_units():
     import numpy as np
 

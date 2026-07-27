@@ -73,7 +73,8 @@ trp:
 
 rf_architecture:
   txru_connectivity: panel_polarization_subarray
-  allow_independent_polarization_beams: true
+  # Shared TRP codebook; selected codewords are dynamically assigned after scheduling.
+  allow_independent_polarization_beams: false
   num_txru: 2
   max_parallel_beams_per_trp: auto
 
@@ -145,15 +146,15 @@ feedback:
     - baseline
     - topk_conflict_id
   cqi_mode: illa_target_bler
-  service_beam_top_k1: 4
-  oracle_service_beam_top_k: 4
-  conflict_top_k2: 3
+  service_beam_top_k1: 2
+  oracle_service_beam_top_k: 2
+  conflict_top_k2: 2
   conflict_sinr_threshold_db: 0.0
 
 evaluation:
   matrix:
     baseline: [greedy]
-    topk_conflict_id: [hard_conflict_greedy]
+    topk_conflict_id: [adaptive_lambda_greedy, hard_conflict_greedy]
   references:
     baseline: baseline__greedy
 
@@ -163,12 +164,12 @@ scheduler:
   cluster_mode: per_site
   static_clusters: []
   domain_mode: per_site_joint
-  objective: sum_rate
-  # auto -> 3 TRPs/site * 2 independent resources/TRP = 6 per site cluster.
-  # Across seven independently scheduled site clusters the network maximum is 42.
+  objective: proportional_fair
+  # Dynamic shared-codebook mode has one physical panel per TRP in this YAML:
+  # auto -> 3 TRPs/site * 1 panel/TRP = 3 per-site, 21 network-wide.
   max_mu_order: auto
   cap_mu_order_by_rf: true
-  algorithm: greedy
+  algorithm: adaptive_lambda_greedy
   use_panel_constraint: true
   exhaustive_pruning:
     enabled: true

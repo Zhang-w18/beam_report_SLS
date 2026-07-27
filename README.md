@@ -442,7 +442,7 @@ scheduler:
   algorithm: hard_conflict_greedy
 ```
 
-它把每个 `(UE, beam)` 当作一个节点，按 SU rate 从高到低选择。选中节点后，只删除该 UE 的其他候选节点、与该节点存在任一方向冲突的候选节点，以及违反 TX unit 约束的候选节点。某个 UE 的一个 beam 冲突不会导致该 UE 的其他 beam 被删除。
+它把每个 `(UE, beam)` 当作一个节点，按 SU rate 从高到低选择。选中节点后，只删除该 UE 的其他候选节点、与该节点存在任一方向冲突的候选节点，以及违反 TX unit 约束的候选节点。某个 UE 的一个 beam 冲突不会导致该 UE 的其他 beam 被删除。多个候选的调度指标完全相同时，有限反馈 greedy 和硬冲突 greedy 都优先选择与当前仍可选的其他 UE 候选冲突最少的节点；若冲突影响仍相同，再按原候选顺序或 `(UE ID, beam index)` 确定性打破平局。
 
 自适应 lambda：
 
@@ -627,6 +627,7 @@ metrics/su_snr_max_per_ue.csv
 metrics/su_snr_summary.csv
 metrics/beams.csv
 metrics/reports.csv
+metrics/topk_interference_details.csv
 metrics/ues.csv
 metrics/sites.csv
 metrics/sectors.csv
@@ -706,6 +707,13 @@ scheduling_cluster
 measured_interference_beams
 candidates
 ```
+
+`topk_conflict_id` 的每个服务候选还包含 `interference_details`。每个上报的
+强干扰 beam 记录 `service_snr_db`（仅有噪声时的 \(S/N\)）、
+`pair_sinr_db`（该干扰 beam 存在时的 \(S/(I+N)\)）和
+`sinr_loss_db = service_snr_db - pair_sinr_db`。相同内容同时按每个
+`(drop, UE, service beam, interferer beam)` 一行写入
+`metrics/topk_interference_details.csv`，并保留服务候选排名和干扰 beam 排名。
 
 候选 beam 的 `beam_id` 形如：
 

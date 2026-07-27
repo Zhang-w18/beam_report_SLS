@@ -257,6 +257,8 @@ g[t+1] = rho*g[t] + sqrt(1-rho^2)*z[t]
 
 optimized greedy 与 legacy/reference 路径需要保持回归一致。穷举路径包含候选排序、
 零上界剪枝和 branch-and-bound。
+有限反馈 greedy 与 hard-conflict greedy 在调度指标完全相同时，使用候选对当前
+仍可选的其他 UE 节点造成的双向冲突数量作为次级排序键，优先选择冲突影响较小者。
 
 所有算法都必须使用当前 `scheduler.objective`。PF 模式下，普通 greedy、
 full-Gamma greedy、exhaustive 和 hard-conflict greedy 均使用
@@ -339,6 +341,7 @@ NACK: b <- b + delta*(1-target_bler)/target_bler
 | `metrics/runtime_phases.csv` | feedback、scheduler、link evaluation 等阶段耗时 |
 | `metrics/drops.csv` | 每 drop 网络规模、后端、TTI 模式和信道诊断 |
 | `metrics/reports.csv` | UE feedback report JSON |
+| `metrics/topk_interference_details.csv` | 每个 Top-K `(drop, UE, service beam, interferer beam)` 的服务 SNR、pair SINR 和 SINR 下降 dB |
 | `metrics/measurement_domains.csv` | 每 `(drop, UE)` 的服务 cell、测量域 cells、服务/测量/总上报波束数量 |
 | `metrics/su_snr_samples.csv` | 所有上报候选的 SU-SNR |
 | `metrics/su_snr_max_per_ue.csv` | 每 UE 最大上报 SU-SNR |

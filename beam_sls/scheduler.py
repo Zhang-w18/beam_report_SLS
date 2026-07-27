@@ -700,6 +700,60 @@ def _node_arrays(reports: Sequence[UEReport],
     return nodes, ue_ids, beam_indices, panel_keys, weights, rates
 
 
+def _limited_feedback_adjacency(nodes,
+                                ue_ids: np.ndarray,
+                                beam_indices: np.ndarray,
+                                scheme: str) -> np.ndarray:
+    count = len(nodes)
+    adjacency = np.zeros((count, count), dtype=np.uint8)
+    if scheme not in ("topk_conflict_id", "threshold_conflict_set"):
+        return adjacency
+    for i, (_, cand) in enumerate(nodes):
+        if not cand.conflict_beams:
+            continue
+        for j in range(count):
+            if ue_ids[j] != ue_ids[i] and int(beam_indices[j]) in cand.conflict_beams:
+                adjacency[i, j] = 1
+    return adjacency
+
+
+def _candidate_conflict_impact(adjacency: np.ndarray,
+                               node_index: int,
+                               active: np.ndarray,
+                               ue_ids: np.ndarray) -> int:
+    """Count active nodes of other UEs affected in either conflict direction."""
+    if adjacency.size == 0:
+        return 0
+    conflicts = (adjacency[node_index, :] != 0) | (adjacency[:, node_index] != 0)
+    affected = active & (ue_ids != ue_ids[node_index])
+    return int(np.count_nonzero(conflicts & affected))
+
+
+def _choose_best_limited_candidate(eligible_indices: np.ndarray,
+                                   delta: np.ndarray,
+                                   adjacency: np.ndarray,
+                                   active: np.ndarray,
+                                   ue_ids: np.ndarray) -> Tuple[int | None, float, int, int]:
+    """Choose max metric; exact ties prefer the smallest active conflict impact."""
+    if eligible_indices.size == 0:
+        return None, 0.0, 0, 0
+    best_delta = float(np.max(delta))
+    if best_delta <= 0.0:
+        return None, 0.0, 0, 0
+    tied = eligible_indices[np.flatnonzero(delta == best_delta)]
+    impacts = np.asarray([
+        _candidate_conflict_impact(adjacency, int(i), active, ue_ids)
+        for i in tied
+    ], dtype=np.int32)
+    chosen_position = int(np.argmin(impacts))
+    return (
+        int(tied[chosen_position]),
+        best_delta,
+        int(tied.size),
+        int(impacts[chosen_position]),
+    )
+
+
 def _round_progress(progress_callback: Callable[[str], None] | None,
                     domain_id: int | None,
                     q: int,
@@ -735,14 +789,9 @@ def _optimized_limited_greedy_schedule(reports: List[UEReport],
         reports, cfg, link_adapter, force_adaptive=force_adaptive_lambda,
     )
     penalty_lambda = float(penalty_info["conflict_penalty_lambda_mbps"])
-    adjacency = np.zeros((count, count), dtype=np.uint8)
-    if scheme in ("topk_conflict_id", "threshold_conflict_set"):
-        for i, (_, cand) in enumerate(nodes):
-            if not cand.conflict_beams:
-                continue
-            for j in range(count):
-                if ue_ids[j] != ue_ids[i] and int(beam_indices[j]) in cand.conflict_beams:
-                    adjacency[i, j] = 1
+    adjacency = _limited_feedback_adjacency(
+        nodes, ue_ids, beam_indices, scheme,
+    )
 
     base_utility = weights * rates
     conflict_increment = np.zeros(count, dtype=float)
@@ -773,18 +822,27 @@ def _optimized_limited_greedy_schedule(reports: List[UEReport],
         evaluated_count += candidate_count
         chosen = None
         best_delta = 0.0
+        equal_metric_candidate_count = 0
+        selected_conflict_impact = 0
         if candidate_count:
             delta = base_utility[eligible_indices] - penalty_lambda * conflict_increment[eligible_indices]
-            local = int(np.argmax(delta))
-            if float(delta[local]) > 0.0:
-                chosen = int(eligible_indices[local])
-                best_delta = float(delta[local])
+            active = eligible & (base_utility > 0.0)
+            (
+                chosen,
+                best_delta,
+                equal_metric_candidate_count,
+                selected_conflict_impact,
+            ) = _choose_best_limited_candidate(
+                eligible_indices, delta, adjacency, active, ue_ids,
+            )
         elapsed = float(perf_counter() - started)
         rounds.append({
             "q": int(q),
             "remaining_candidate_count": remaining_count,
             "evaluated_candidate_count": candidate_count,
             "panel_pruned_count": pruned,
+            "equal_metric_candidate_count": int(equal_metric_candidate_count),
+            "selected_conflict_impact": int(selected_conflict_impact),
             "elapsed_s": elapsed,
         })
         _round_progress(progress_callback, domain_id, q, max_q, candidate_count, elapsed)
@@ -1008,6 +1066,16 @@ def _legacy_greedy_schedule(reports: List[UEReport],
     reports = [r for r in reports if r.candidates]
     scheme = reports[0].scheme if reports else "unknown"
     num_su_outage_candidates = sum(int(c.su_outage) for r in reports for c in r.candidates)
+    tie_nodes, tie_ue_ids, tie_beam_indices, _, tie_weights, tie_rates = _node_arrays(
+        reports, beam_ids, cfg, tbar_mbps, link_adapter,
+    )
+    tie_adjacency = _limited_feedback_adjacency(
+        tie_nodes, tie_ue_ids, tie_beam_indices, scheme,
+    )
+    tie_node_index = {
+        (int(ue_id), int(beam_index)): int(i)
+        for i, (ue_id, beam_index) in enumerate(zip(tie_ue_ids, tie_beam_indices))
+    }
     current: List[Tuple[int, int]] = []
     current_val = 0.0
     used_ues = set()
@@ -1034,9 +1102,22 @@ def _legacy_greedy_schedule(reports: List[UEReport],
         evaluated_before = int(stats["evaluated_assignment_count"])
         pruned_before = int(stats["panel_pruned_count"])
         remaining_count = sum(len(r.candidates) for r in reports if r.ue_id not in used_ues)
+        active_tie_nodes = np.asarray([
+            (
+                int(tie_ue_ids[i]) not in used_ues
+                and float(tie_weights[i] * tie_rates[i]) > 0.0
+                and _panel_constraint_ok(
+                    current + [(int(tie_ue_ids[i]), int(tie_beam_indices[i]))],
+                    reports, beam_ids, cfg,
+                )
+            )
+            for i in range(len(tie_nodes))
+        ], dtype=bool)
         best_delta = 0.0
         best_assignment = None
         best_val = current_val
+        best_conflict_impact = 0
+        equal_metric_candidate_count = 0
         for r in reports:
             if r.ue_id in used_ues:
                 continue
@@ -1051,10 +1132,22 @@ def _legacy_greedy_schedule(reports: List[UEReport],
                 )
                 stats["evaluated_assignment_count"] += 1
                 delta = val - current_val
+                node_index = tie_node_index[(int(r.ue_id), int(c.beam_index))]
+                conflict_impact = _candidate_conflict_impact(
+                    tie_adjacency, node_index, active_tie_nodes, tie_ue_ids,
+                )
                 if delta > best_delta:
                     best_delta = delta
                     best_assignment = (r.ue_id, c.beam_index)
                     best_val = val
+                    best_conflict_impact = conflict_impact
+                    equal_metric_candidate_count = 1
+                elif delta == best_delta and delta > 0.0:
+                    equal_metric_candidate_count += 1
+                    if conflict_impact < best_conflict_impact:
+                        best_assignment = (r.ue_id, c.beam_index)
+                        best_val = val
+                        best_conflict_impact = conflict_impact
         candidate_count = int(stats["evaluated_assignment_count"]) - evaluated_before
         elapsed = float(perf_counter() - started)
         rounds.append({
@@ -1062,6 +1155,8 @@ def _legacy_greedy_schedule(reports: List[UEReport],
             "remaining_candidate_count": int(remaining_count),
             "evaluated_candidate_count": int(candidate_count),
             "panel_pruned_count": int(stats["panel_pruned_count"]) - pruned_before,
+            "equal_metric_candidate_count": int(equal_metric_candidate_count),
+            "selected_conflict_impact": int(best_conflict_impact),
             "elapsed_s": elapsed,
         })
         _round_progress(progress_callback, domain_id, q, max_q, candidate_count, elapsed)
@@ -1139,8 +1234,23 @@ def hard_conflict_greedy_schedule(reports: List[UEReport],
         q = len(selected) + 1
         candidate_count = len(pool)
         removed_panel_before = removed_panel
-        # The tuple suffix gives deterministic tie-breaking across runs.
-        chosen = min(pool, key=lambda node: (-pool[node], node[0], node[1]))
+        best_weight = max(pool.values())
+        tied = [node for node in pool if pool[node] == best_weight]
+        conflict_impacts = {
+            node: sum(
+                1
+                for other in pool
+                if other[0] != node[0] and conflicts(node, other)
+            )
+            for node in tied
+        }
+        # Equal-weight nodes first minimize damage to the active candidate pool;
+        # the tuple suffix keeps the remaining tie deterministic across runs.
+        chosen = min(
+            tied,
+            key=lambda node: (conflict_impacts[node], node[0], node[1]),
+        )
+        selected_conflict_impact = int(conflict_impacts[chosen])
         selected.append(chosen)
         chosen_ue, chosen_beam = chosen
         chosen_panel = _resource_key(beam_ids[chosen_beam], cfg)
@@ -1167,6 +1277,8 @@ def hard_conflict_greedy_schedule(reports: List[UEReport],
             "remaining_candidate_count": int(candidate_count),
             "evaluated_candidate_count": int(candidate_count),
             "panel_pruned_count": int(removed_panel - removed_panel_before),
+            "equal_metric_candidate_count": int(len(tied)),
+            "selected_conflict_impact": selected_conflict_impact,
             "elapsed_s": elapsed,
         })
         _round_progress(progress_callback, domain_id, q, max_q, candidate_count, elapsed)
