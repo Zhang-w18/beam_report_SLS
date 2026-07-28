@@ -41,10 +41,10 @@ system:
   # Preserve approximately 33 dBm/TRP and 30 dBm/independent TX resource:
   # 33 dBm + 10*log10(21 TRPs) = 46.222 dBm network-wide.
   tx_power_dbm: 46.222
-  num_drops: 50
-  # This is 200 measured TTIs per drop. The 50 OLLA warmup TTIs below are
-  # additional, so the link loop executes 250 TTIs per drop.
-  num_tti_per_drop: 200
+  num_drops: 1
+  # This is 50 measured TTIs per drop. The 50 OLLA warmup TTIs below are
+  # additional, so the link loop executes 100 TTIs per drop.
+  num_tti_per_drop: 50
   random_seed: 20260725
   target_bler: 0.1
 
@@ -67,6 +67,7 @@ ue_drop:
 
 trp:
   num_trps_per_sector: 1
+  # Legacy topology alias; physical array panels are resolved from Mg*Ng*Mp*Np.
   num_panels_per_sector: 1
   panel_azimuth_offsets_deg: [0.0]
   panel_power_mode: per_tx_unit_equal
@@ -81,12 +82,12 @@ rf_architecture:
 tx_array:
   model: tr38901_panel
   num_txru: 2
-  num_ae: 256
+  num_ae: 512
   M: 8
   N: 16
   P: 2
   Mg: 1
-  Ng: 1
+  Ng: 2
   Mp: 1
   Np: 1
   dH: 0.5
@@ -165,8 +166,8 @@ scheduler:
   static_clusters: []
   domain_mode: per_site_joint
   objective: proportional_fair
-  # Dynamic shared-codebook mode has one physical panel per TRP in this YAML:
-  # auto -> 3 TRPs/site * 1 panel/TRP = 3 per-site, 21 network-wide.
+  # Dynamic shared-codebook mode has two physical panels per TRP in this YAML:
+  # auto -> 3 TRPs/site * 2 panels/TRP = 6 per-site, 42 network-wide.
   max_mu_order: auto
   cap_mu_order_by_rf: true
   algorithm: adaptive_lambda_greedy

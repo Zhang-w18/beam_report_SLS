@@ -177,6 +177,85 @@ def test_equal_rate_prefers_candidate_with_smallest_conflict_impact():
         assert round_stats["selected_conflict_impact"] == 0
 
 
+def test_equal_mcs_prefers_candidate_with_higher_snr_for_all_algorithms():
+    beams = _beam_ids(2)
+    reports = [
+        UEReport(0, "baseline", [ServiceCandidate(0, 6.0, 3)]),
+        UEReport(1, "baseline", [ServiceCandidate(1, 10.0, 3)]),
+    ]
+
+    for algorithm, optimized in [
+        ("greedy", True),
+        ("greedy", False),
+        ("adaptive_lambda_greedy", True),
+        ("adaptive_lambda_greedy", False),
+        ("hard_conflict_greedy", True),
+        ("exhaustive", True),
+    ]:
+        cfg = load_config(None)
+        cfg["scheduler"].update({
+            "algorithm": algorithm,
+            "domain_mode": "global",
+            "objective": "sum_rate",
+            "optimized_greedy": optimized,
+            "use_panel_constraint": True,
+        })
+        cfg["_resolved"] = {"max_mu_order": 1}
+
+        result = schedule(
+            reports, beams, cfg, link_adapter=_PiecewiseAdapter()
+        )
+
+        assert [(link.ue_id, link.beam_index) for link in result.links] == [
+            (1, 1)
+        ], (algorithm, optimized)
+        assert result.links[0].predicted_mcs == 3
+        assert result.links[0].predicted_sinr_db == 10.0
+
+
+def test_full_gamma_equal_mcs_prefers_higher_predicted_snr():
+    beams = _beam_ids(2)
+    reports = [
+        UEReport(
+            0,
+            "full_gamma",
+            [ServiceCandidate(0, 0.4, 2)],
+            full_gamma=np.asarray([[1.1, 1.0], [1.0, 1.0]]),
+            full_service_power_w=np.asarray([1.1, 1.0]),
+            full_noise_power_w=1.0,
+        ),
+        UEReport(
+            1,
+            "full_gamma",
+            [ServiceCandidate(1, 2.8, 2)],
+            full_gamma=np.asarray([[1.0, 1.0], [1.0, 1.9]]),
+            full_service_power_w=np.asarray([1.0, 1.9]),
+            full_noise_power_w=1.0,
+        ),
+    ]
+
+    for optimized in (True, False):
+        cfg = load_config(None)
+        cfg["scheduler"].update({
+            "algorithm": "greedy",
+            "domain_mode": "global",
+            "objective": "sum_rate",
+            "optimized_greedy": optimized,
+            "use_panel_constraint": True,
+        })
+        cfg["_resolved"] = {"max_mu_order": 1}
+
+        result = schedule(
+            reports, beams, cfg, link_adapter=_PiecewiseAdapter()
+        )
+
+        assert [(link.ue_id, link.beam_index) for link in result.links] == [
+            (1, 1)
+        ], optimized
+        assert result.links[0].predicted_mcs == 2
+        assert result.links[0].predicted_sinr_db > 2.0
+
+
 def test_incremental_full_gamma_matches_v29_reference_greedy():
     cfg = load_config(None)
     cfg["scheduler"].update({"domain_mode": "global", "use_panel_constraint": True})

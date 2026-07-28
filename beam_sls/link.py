@@ -20,6 +20,7 @@ class LinkEvalRow:
     ue_id: int
     beam_index: int
     beam_id: str
+    predicted_sinr_db: float
     predicted_mcs: int
     actual_mcs: int
     effective_sinr_db: float
@@ -216,6 +217,7 @@ def run_tti_loop(schedule: ScheduleResult,
                     ue_id=link.ue_id,
                     beam_index=link.beam_index,
                     beam_id=beam_ids[link.beam_index].short(),
+                    predicted_sinr_db=float(link.predicted_sinr_db),
                     predicted_mcs=int(link.predicted_mcs),
                     actual_mcs=int(actual_mcs),
                     effective_sinr_db=eff_db,

@@ -423,6 +423,34 @@ def _evaluate_assignments(assignments: Sequence[Tuple[int, int]],
     return float(utility), links
 
 
+def _mcs_profile(links: Sequence[ScheduledLink]) -> Tuple[int, ...]:
+    """Return an order-independent MCS profile for schedule tie-breaking."""
+    return tuple(sorted(int(link.predicted_mcs) for link in links))
+
+
+def _snr_tiebreak_score(links: Sequence[ScheduledLink]) -> float:
+    """Higher aggregate predicted SNR wins when MCS profiles are identical."""
+    return float(sum(float(link.predicted_sinr_db) for link in links))
+
+
+def _compare_equal_mcs_snr(trial: Sequence[ScheduledLink],
+                           incumbent: Sequence[ScheduledLink]) -> int | None:
+    """Compare SNR only for identical MCS profiles.
+
+    Returns 1 when ``trial`` has higher SNR, -1 when lower, 0 when equal, and
+    None when the MCS profiles differ and this tie-break rule does not apply.
+    """
+    if _mcs_profile(trial) != _mcs_profile(incumbent):
+        return None
+    trial_snr = _snr_tiebreak_score(trial)
+    incumbent_snr = _snr_tiebreak_score(incumbent)
+    if trial_snr > incumbent_snr:
+        return 1
+    if trial_snr < incumbent_snr:
+        return -1
+    return 0
+
+
 def _candidate_rate_mbps(rep: UEReport,
                          beam_index: int,
                          cfg: Dict,
@@ -491,7 +519,12 @@ def _sorted_report_copy(rep: UEReport,
                         tbar_mbps: Dict[int, float] | None,
                         link_adapter=None) -> UEReport:
     cands = sorted(rep.candidates,
-                   key=lambda c: _candidate_upper_bound(rep, c.beam_index, cfg, tbar_mbps, link_adapter),
+                   key=lambda c: (
+                       _candidate_upper_bound(
+                           rep, c.beam_index, cfg, tbar_mbps, link_adapter
+                       ),
+                       float(c.su_snr_db),
+                   ),
                    reverse=True)
     return UEReport(ue_id=rep.ue_id,
                     scheme=rep.scheme,
@@ -607,9 +640,16 @@ def exhaustive_schedule(reports: List[UEReport],
             current_val: float,
             current_links: List[ScheduledLink]) -> None:
         nonlocal best_val, best_links
-        if assignments and current_val > best_val:
-            best_val = float(current_val)
-            best_links = current_links
+        if assignments:
+            better_objective = current_val > best_val
+            better_equal_mcs_snr = (
+                current_val == best_val
+                and bool(best_links)
+                and _compare_equal_mcs_snr(current_links, best_links) == 1
+            )
+            if better_objective or better_equal_mcs_snr:
+                best_val = float(current_val)
+                best_links = current_links
         if len(assignments) >= min(max_q, len(reports)):
             return
         slots_left = int(max_q) - len(assignments)
@@ -733,24 +773,35 @@ def _choose_best_limited_candidate(eligible_indices: np.ndarray,
                                    delta: np.ndarray,
                                    adjacency: np.ndarray,
                                    active: np.ndarray,
-                                   ue_ids: np.ndarray) -> Tuple[int | None, float, int, int]:
-    """Choose max metric; exact ties prefer the smallest active conflict impact."""
+                                   ue_ids: np.ndarray,
+                                   candidate_mcs: np.ndarray,
+                                   candidate_snr_db: np.ndarray
+                                   ) -> Tuple[int | None, float, int, int, int | None, float | None]:
+    """Choose max metric, then SNR for equal-MCS candidates, then conflicts."""
     if eligible_indices.size == 0:
-        return None, 0.0, 0, 0
+        return None, 0.0, 0, 0, None, None
     best_delta = float(np.max(delta))
     if best_delta <= 0.0:
-        return None, 0.0, 0, 0
+        return None, 0.0, 0, 0, None, None
     tied = eligible_indices[np.flatnonzero(delta == best_delta)]
+    snr_tied = tied
+    tied_mcs = candidate_mcs[tied]
+    if tied.size > 1 and np.all(tied_mcs == tied_mcs[0]):
+        best_snr = float(np.max(candidate_snr_db[tied]))
+        snr_tied = tied[candidate_snr_db[tied] == best_snr]
     impacts = np.asarray([
         _candidate_conflict_impact(adjacency, int(i), active, ue_ids)
-        for i in tied
+        for i in snr_tied
     ], dtype=np.int32)
     chosen_position = int(np.argmin(impacts))
+    chosen = int(snr_tied[chosen_position])
     return (
-        int(tied[chosen_position]),
+        chosen,
         best_delta,
         int(tied.size),
         int(impacts[chosen_position]),
+        int(candidate_mcs[chosen]),
+        float(candidate_snr_db[chosen]),
     )
 
 
@@ -785,6 +836,12 @@ def _optimized_limited_greedy_schedule(reports: List[UEReport],
         reports, beam_ids, cfg, tbar_mbps, link_adapter,
     )
     count = len(nodes)
+    candidate_mcs = np.asarray(
+        [int(c.su_mcs) for _, c in nodes], dtype=np.int32
+    )
+    candidate_snr_db = np.asarray(
+        [float(c.su_snr_db) for _, c in nodes], dtype=float
+    )
     penalty_info = _resolve_conflict_penalty(
         reports, cfg, link_adapter, force_adaptive=force_adaptive_lambda,
     )
@@ -824,6 +881,8 @@ def _optimized_limited_greedy_schedule(reports: List[UEReport],
         best_delta = 0.0
         equal_metric_candidate_count = 0
         selected_conflict_impact = 0
+        selected_tiebreak_mcs = None
+        selected_tiebreak_snr_db = None
         if candidate_count:
             delta = base_utility[eligible_indices] - penalty_lambda * conflict_increment[eligible_indices]
             active = eligible & (base_utility > 0.0)
@@ -832,8 +891,11 @@ def _optimized_limited_greedy_schedule(reports: List[UEReport],
                 best_delta,
                 equal_metric_candidate_count,
                 selected_conflict_impact,
+                selected_tiebreak_mcs,
+                selected_tiebreak_snr_db,
             ) = _choose_best_limited_candidate(
                 eligible_indices, delta, adjacency, active, ue_ids,
+                candidate_mcs, candidate_snr_db,
             )
         elapsed = float(perf_counter() - started)
         rounds.append({
@@ -843,6 +905,8 @@ def _optimized_limited_greedy_schedule(reports: List[UEReport],
             "panel_pruned_count": pruned,
             "equal_metric_candidate_count": int(equal_metric_candidate_count),
             "selected_conflict_impact": int(selected_conflict_impact),
+            "selected_tiebreak_mcs": selected_tiebreak_mcs,
+            "selected_tiebreak_snr_db": selected_tiebreak_snr_db,
             "elapsed_s": elapsed,
         })
         _round_progress(progress_callback, domain_id, q, max_q, candidate_count, elapsed)
@@ -949,6 +1013,9 @@ def _optimized_full_gamma_greedy_schedule(reports: List[UEReport],
         chosen = None
         best_val = current_val
         best_delta = 0.0
+        equal_metric_candidate_count = 0
+        selected_tiebreak_mcs = None
+        selected_tiebreak_snr_db = None
         if candidate_count:
             new_sinr = signal[eligible_indices] / np.maximum(incoming_den[eligible_indices], 1e-30)
             if selected:
@@ -956,26 +1023,49 @@ def _optimized_full_gamma_greedy_schedule(reports: List[UEReport],
                 existing_den = selected_den[:, None] + interference[np.ix_(selected_idx, eligible_indices)]
                 existing_sinr = signal[selected_idx, None] / np.maximum(existing_den, 1e-30)
                 trial_sinr = np.vstack((existing_sinr, new_sinr[None, :]))
-                _, _, trial_rates = _map_scheduler_sinr_lin(trial_sinr, cfg, link_adapter)
+                trial_mcs, _, trial_rates = _map_scheduler_sinr_lin(
+                    trial_sinr, cfg, link_adapter
+                )
                 trial_utility = (
                     np.sum(weights[selected_idx, None] * trial_rates[:-1, :], axis=0)
                     + weights[eligible_indices] * trial_rates[-1, :]
                 )
             else:
-                _, _, trial_rates = _map_scheduler_sinr_lin(new_sinr, cfg, link_adapter)
+                trial_sinr = new_sinr[None, :]
+                trial_mcs, _, trial_rates = _map_scheduler_sinr_lin(
+                    trial_sinr, cfg, link_adapter
+                )
+                trial_rates = trial_rates[0]
                 trial_utility = weights[eligible_indices] * trial_rates
             delta = trial_utility - current_val
-            local = int(np.argmax(delta))
-            if float(delta[local]) > 0.0:
+            best_delta = float(np.max(delta))
+            tied_local = np.flatnonzero(delta == best_delta)
+            equal_metric_candidate_count = int(tied_local.size)
+            candidate_local = tied_local
+            if tied_local.size > 1:
+                profiles = np.sort(trial_mcs[:, tied_local], axis=0)
+                if np.all(profiles == profiles[:, [0]]):
+                    snr_scores = np.sum(
+                        np.asarray(lin_to_db(trial_sinr[:, tied_local]), dtype=float),
+                        axis=0,
+                    )
+                    best_snr_score = float(np.max(snr_scores))
+                    candidate_local = tied_local[snr_scores == best_snr_score]
+            local = int(candidate_local[0])
+            if best_delta > 0.0:
                 chosen = int(eligible_indices[local])
-                best_delta = float(delta[local])
                 best_val = float(trial_utility[local])
+                selected_tiebreak_mcs = int(trial_mcs[-1, local])
+                selected_tiebreak_snr_db = float(lin_to_db(trial_sinr[-1, local]))
         elapsed = float(perf_counter() - started)
         rounds.append({
             "q": int(q),
             "remaining_candidate_count": remaining_count,
             "evaluated_candidate_count": candidate_count,
             "panel_pruned_count": pruned,
+            "equal_metric_candidate_count": int(equal_metric_candidate_count),
+            "selected_tiebreak_mcs": selected_tiebreak_mcs,
+            "selected_tiebreak_snr_db": selected_tiebreak_snr_db,
             "elapsed_s": elapsed,
         })
         _round_progress(progress_callback, domain_id, q, max_q, candidate_count, elapsed)
@@ -1116,8 +1206,11 @@ def _legacy_greedy_schedule(reports: List[UEReport],
         best_delta = 0.0
         best_assignment = None
         best_val = current_val
+        best_links: List[ScheduledLink] = []
         best_conflict_impact = 0
         equal_metric_candidate_count = 0
+        selected_tiebreak_mcs = None
+        selected_tiebreak_snr_db = None
         for r in reports:
             if r.ue_id in used_ues:
                 continue
@@ -1126,7 +1219,7 @@ def _legacy_greedy_schedule(reports: List[UEReport],
                 if not _panel_constraint_ok(trial, reports, beam_ids, cfg):
                     stats["panel_pruned_count"] += 1
                     continue
-                val, _ = _evaluate_assignments(
+                val, trial_links = _evaluate_assignments(
                     trial, reports, beam_ids, cfg, tbar_mbps, link_adapter,
                     penalty_lambda=penalty_lambda,
                 )
@@ -1140,14 +1233,35 @@ def _legacy_greedy_schedule(reports: List[UEReport],
                     best_delta = delta
                     best_assignment = (r.ue_id, c.beam_index)
                     best_val = val
+                    best_links = trial_links
                     best_conflict_impact = conflict_impact
                     equal_metric_candidate_count = 1
+                    selected_tiebreak_mcs = int(trial_links[-1].predicted_mcs)
+                    selected_tiebreak_snr_db = float(
+                        trial_links[-1].predicted_sinr_db
+                    )
                 elif delta == best_delta and delta > 0.0:
                     equal_metric_candidate_count += 1
-                    if conflict_impact < best_conflict_impact:
+                    snr_comparison = _compare_equal_mcs_snr(
+                        trial_links, best_links
+                    )
+                    if (
+                        snr_comparison == 1
+                        or (
+                            snr_comparison in (None, 0)
+                            and conflict_impact < best_conflict_impact
+                        )
+                    ):
                         best_assignment = (r.ue_id, c.beam_index)
                         best_val = val
+                        best_links = trial_links
                         best_conflict_impact = conflict_impact
+                        selected_tiebreak_mcs = int(
+                            trial_links[-1].predicted_mcs
+                        )
+                        selected_tiebreak_snr_db = float(
+                            trial_links[-1].predicted_sinr_db
+                        )
         candidate_count = int(stats["evaluated_assignment_count"]) - evaluated_before
         elapsed = float(perf_counter() - started)
         rounds.append({
@@ -1157,6 +1271,8 @@ def _legacy_greedy_schedule(reports: List[UEReport],
             "panel_pruned_count": int(stats["panel_pruned_count"]) - pruned_before,
             "equal_metric_candidate_count": int(equal_metric_candidate_count),
             "selected_conflict_impact": int(best_conflict_impact),
+            "selected_tiebreak_mcs": selected_tiebreak_mcs,
+            "selected_tiebreak_snr_db": selected_tiebreak_snr_db,
             "elapsed_s": elapsed,
         })
         _round_progress(progress_callback, domain_id, q, max_q, candidate_count, elapsed)
@@ -1236,21 +1352,37 @@ def hard_conflict_greedy_schedule(reports: List[UEReport],
         removed_panel_before = removed_panel
         best_weight = max(pool.values())
         tied = [node for node in pool if pool[node] == best_weight]
+        snr_tied = tied
+        tied_candidates = [
+            rep_by_ue[ue_id].candidate_by_beam(beam_index)
+            for ue_id, beam_index in tied
+        ]
+        tied_mcs = [int(candidate.su_mcs) for candidate in tied_candidates]
+        if len(tied) > 1 and all(mcs == tied_mcs[0] for mcs in tied_mcs):
+            best_snr_db = max(
+                float(candidate.su_snr_db) for candidate in tied_candidates
+            )
+            snr_tied = [
+                node
+                for node, candidate in zip(tied, tied_candidates)
+                if float(candidate.su_snr_db) == best_snr_db
+            ]
         conflict_impacts = {
             node: sum(
                 1
                 for other in pool
                 if other[0] != node[0] and conflicts(node, other)
             )
-            for node in tied
+            for node in snr_tied
         }
-        # Equal-weight nodes first minimize damage to the active candidate pool;
-        # the tuple suffix keeps the remaining tie deterministic across runs.
+        # Equal-MCS/equal-weight nodes first prefer higher SNR, then minimize
+        # damage to the active candidate pool. The tuple suffix is deterministic.
         chosen = min(
-            tied,
+            snr_tied,
             key=lambda node: (conflict_impacts[node], node[0], node[1]),
         )
         selected_conflict_impact = int(conflict_impacts[chosen])
+        chosen_candidate = rep_by_ue[chosen[0]].candidate_by_beam(chosen[1])
         selected.append(chosen)
         chosen_ue, chosen_beam = chosen
         chosen_panel = _resource_key(beam_ids[chosen_beam], cfg)
@@ -1279,6 +1411,8 @@ def hard_conflict_greedy_schedule(reports: List[UEReport],
             "panel_pruned_count": int(removed_panel - removed_panel_before),
             "equal_metric_candidate_count": int(len(tied)),
             "selected_conflict_impact": selected_conflict_impact,
+            "selected_tiebreak_mcs": int(chosen_candidate.su_mcs),
+            "selected_tiebreak_snr_db": float(chosen_candidate.su_snr_db),
             "elapsed_s": elapsed,
         })
         _round_progress(progress_callback, domain_id, q, max_q, candidate_count, elapsed)

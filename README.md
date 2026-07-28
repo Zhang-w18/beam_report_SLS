@@ -617,6 +617,8 @@ metrics/summary.csv
 metrics/link_tti.csv
 metrics/schedules.csv
 metrics/scheduler_stats.csv
+metrics/scheduler_iterations.csv
+metrics/scheduled_ue_su_throughput.csv
 metrics/ue_goodput.csv
 metrics/system_tti_goodput.csv
 metrics/system_drop_avg_goodput.csv
@@ -639,6 +641,14 @@ figures/reported_max_su_snr_per_ue_cdf.png
 ```
 
 `baseline_no_interference_upper_bound` 是 baseline 原调度集合在“波束间干扰强制为零”条件下重新运行链路层得到的诊断上界，并出现在 `link_tti.csv`、`summary.csv` 和吞吐 CDF 中。`ue_goodput.csv` 对每个 `(drop, UE)` 跨全部正式 TTI 求平均，未调度 UE 按零吞吐计入。`system_tti_goodput.csv` 显式保留零吞吐 TTI；`system_drop_avg_goodput.csv` 对每个 drop 的完整正式统计窗口求平均，因此这些 CDF 不会产生幸存者偏差。
+
+`metrics/link_tti.csv` 按“已调度链路 × 正式 TTI”记录中间结果：
+`predicted_sinr_db`/`predicted_mcs` 是调度器预测值，
+`effective_sinr_db`/`actual_mcs` 是加入实际共调度干扰并执行链路自适应后的值。
+`metrics/scheduled_ue_su_throughput.csv` 另按已调度波束记录调度前的
+`su_snr_db`/`su_mcs`。`metrics/scheduler_iterations.csv` 的
+`selected_tiebreak_snr_db`/`selected_tiebreak_mcs` 记录 greedy 每轮最终选中候选
+用于平局判定的预测值。
 
 已有 run 可以用独立脚本重新选择曲线和样式，无需重跑仿真：
 

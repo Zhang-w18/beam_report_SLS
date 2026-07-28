@@ -372,8 +372,10 @@ def test_v212_baseline_topk_config_enables_requested_comparison_modes():
     assert cfg["feedback"]["service_beam_top_k1"] == 2
     assert cfg["feedback"]["conflict_top_k2"] == 2
     assert rf.dynamic_beam_assignment is True
-    assert rf.max_parallel_beams_per_trp == 1
-    assert resolved_max_mu_order(cfg, rf) == 3
+    assert tx.num_ant == 512
+    assert tx.num_array_panels == 2
+    assert rf.max_parallel_beams_per_trp == 2
+    assert resolved_max_mu_order(cfg, rf) == 6
 
 
 def test_three_site_global_36ue_config_exposes_36_tx_units():

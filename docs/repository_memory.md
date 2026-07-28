@@ -258,7 +258,9 @@ g[t+1] = rho*g[t] + sqrt(1-rho^2)*z[t]
 optimized greedy 与 legacy/reference 路径需要保持回归一致。穷举路径包含候选排序、
 零上界剪枝和 branch-and-bound。
 有限反馈 greedy 与 hard-conflict greedy 在调度指标完全相同时，使用候选对当前
-仍可选的其他 UE 节点造成的双向冲突数量作为次级排序键，优先选择冲突影响较小者。
+若候选 MCS 相同则先按预测 SNR 打破平局，优先选择 SNR 较高者；SNR 也相同时，
+再使用候选对当前仍可选的其他 UE 节点造成的双向冲突数量作为后续排序键，
+优先选择冲突影响较小者。
 
 所有算法都必须使用当前 `scheduler.objective`。PF 模式下，普通 greedy、
 full-Gamma greedy、exhaustive 和 hard-conflict greedy 均使用
@@ -330,7 +332,7 @@ NACK: b <- b + delta*(1-target_bler)/target_bler
 
 | 文件 | 粒度与用途 |
 |---|---|
-| `metrics/link_tti.csv` | 每条已调度链路、每个正式 TTI；看真实 SINR、MCS、TBLER、ACK、goodput、OLLA |
+| `metrics/link_tti.csv` | 每条已调度链路、每个正式 TTI；看调度预测 SNR/MCS、真实 SINR/MCS、TBLER、ACK、goodput、OLLA |
 | `metrics/schedules.csv` | 调度结果；连续模式含每 TTI schedule |
 | `metrics/ue_goodput.csv` | 每 `(drop, UE)` 跨全部正式 TTI 的平均 goodput；未调度 UE 计零 |
 | `metrics/system_tti_goodput.csv` | 每 `(scheme, drop, TTI)` 的系统总 goodput；显式包含零吞吐 TTI |
@@ -357,7 +359,7 @@ NACK: b <- b + delta*(1-target_bler)/target_bler
   `system_drop_avg_goodput_cdf.png`；
 - 5% UE 边缘吞吐和公平性看 `ue_goodput.csv`，不要只看已调度 UE；
 - MCS/OLLA 问题看 `link_tti.csv` 中
-  `predicted_mcs`、`actual_mcs`、`effective_sinr_db`、
+  `predicted_sinr_db`、`predicted_mcs`、`actual_mcs`、`effective_sinr_db`、
   `mcs_selection_sinr_db`、`tbler`、`ack`、`olla_offset_db`；
 - 调度复杂度看 `scheduler_stats.csv` 和 `runtime_phases.csv`；
 - 方案增益异常时先看 `schedule_similarity`，排除“相同 schedule、仅 ACK 随机噪声”。

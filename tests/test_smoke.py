@@ -69,6 +69,14 @@ def test_smoke(tmp_path: Path):
         "link_evaluation",
     } <= phases
     assert all(float(row["elapsed_s"]) >= 0.0 for row in runtime_rows)
+    with (tmp_path / "out" / "metrics" / "link_tti.csv").open(
+        encoding="utf-8", newline=""
+    ) as handle:
+        link_rows = list(csv.DictReader(handle))
+    assert link_rows
+    assert {"predicted_sinr_db", "predicted_mcs", "effective_sinr_db", "actual_mcs"} <= set(
+        link_rows[0]
+    )
 
 
 def test_scheduled_ue_su_throughput_uses_selected_beam_standalone_mcs():
