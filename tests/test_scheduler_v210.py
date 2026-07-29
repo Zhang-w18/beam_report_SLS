@@ -71,7 +71,47 @@ def test_dynamic_beam_pool_allows_any_n_codewords_per_trp():
     ]
 
     assert _panel_constraint_ok([(0, 0), (1, 1)], [], beams, cfg)
+    assert not _panel_constraint_ok([(0, 0), (1, 0)], [], beams, cfg)
     assert not _panel_constraint_ok([(0, 0), (1, 1), (2, 2)], [], beams, cfg)
+
+
+def test_all_schedulers_prevent_dynamic_trp_beam_reuse():
+    beams = [
+        BeamId(cell=0, trp=0, panel=0, beam=i, global_index=i, tx_unit=0)
+        for i in range(2)
+    ]
+    reports = [
+        UEReport(0, "topk_conflict_id", [ServiceCandidate(0, 10.0, 3)]),
+        UEReport(1, "topk_conflict_id", [ServiceCandidate(0, 10.0, 3)]),
+        UEReport(2, "topk_conflict_id", [ServiceCandidate(1, 10.0, 3)]),
+    ]
+
+    for algorithm in (
+        "greedy",
+        "adaptive_lambda_greedy",
+        "hard_conflict_greedy",
+        "exhaustive",
+    ):
+        cfg = load_config(None)
+        cfg["scheduler"].update({
+            "algorithm": algorithm,
+            "cluster_mode": "global",
+            "objective": "sum_rate",
+            "use_panel_constraint": True,
+        })
+        cfg["_resolved"] = {
+            "dynamic_beam_assignment": True,
+            "max_parallel_beams_per_trp": 2,
+            "max_mu_order": 2,
+        }
+
+        result = schedule(
+            reports, beams, cfg, link_adapter=_PiecewiseAdapter()
+        )
+
+        selected_beams = [link.beam_index for link in result.links]
+        assert len(selected_beams) == 2, algorithm
+        assert len(set(selected_beams)) == 2, algorithm
 
 
 def test_scheduler_lookup_matches_reference_across_decision_boundaries():
@@ -175,6 +215,88 @@ def test_equal_rate_prefers_candidate_with_smallest_conflict_impact():
         round_stats = result.metadata["stats"]["rounds"][0]
         assert round_stats["equal_metric_candidate_count"] == 2
         assert round_stats["selected_conflict_impact"] == 0
+
+
+def test_hard_conflict_close_same_mcs_snr_prefers_lower_conflict_impact():
+    beams = _beam_ids(3)
+    reports = [
+        UEReport(0, "topk_conflict_id", [
+            ServiceCandidate(0, 10.0, 3, conflict_beams={2}),
+        ]),
+        UEReport(1, "topk_conflict_id", [
+            ServiceCandidate(1, 9.4, 3),
+        ]),
+        UEReport(2, "topk_conflict_id", [
+            ServiceCandidate(2, 5.0, 1),
+        ]),
+    ]
+    cfg = load_config(None)
+    cfg["scheduler"].update({
+        "algorithm": "hard_conflict_greedy",
+        "cluster_mode": "global",
+        "objective": "sum_rate",
+        "use_panel_constraint": True,
+        "hard_conflict_snr_close_db": 1.0,
+    })
+    cfg["_resolved"] = {"max_mu_order": 1}
+
+    result = schedule(reports, beams, cfg, link_adapter=_PiecewiseAdapter())
+
+    assert [(link.ue_id, link.beam_index) for link in result.links] == [(1, 1)]
+    assert (
+        result.metadata["stats"]["rounds"][0]["tiebreak_rule"]
+        == "low_conflict_for_close_same_mcs_snr"
+    )
+
+
+def test_hard_conflict_large_snr_gap_prefers_higher_snr():
+    beams = _beam_ids(3)
+    reports = [
+        UEReport(0, "topk_conflict_id", [
+            ServiceCandidate(0, 10.0, 3, conflict_beams={2}),
+        ]),
+        UEReport(1, "topk_conflict_id", [
+            ServiceCandidate(1, 8.8, 3),
+        ]),
+        UEReport(2, "topk_conflict_id", [
+            ServiceCandidate(2, 5.0, 1),
+        ]),
+    ]
+    cfg = load_config(None)
+    cfg["scheduler"].update({
+        "algorithm": "hard_conflict_greedy",
+        "cluster_mode": "global",
+        "objective": "sum_rate",
+        "use_panel_constraint": True,
+        "hard_conflict_snr_close_db": 1.0,
+    })
+    cfg["_resolved"] = {"max_mu_order": 1}
+
+    result = schedule(reports, beams, cfg, link_adapter=_PiecewiseAdapter())
+
+    assert [(link.ue_id, link.beam_index) for link in result.links] == [(0, 0)]
+    assert result.metadata["stats"]["rounds"][0]["tiebreak_rule"] == "high_snr"
+
+
+def test_hard_conflict_equal_impact_uses_stable_ue_beam_ids():
+    beams = _beam_ids(2)
+    reports = [
+        UEReport(1, "topk_conflict_id", [ServiceCandidate(1, 9.5, 3)]),
+        UEReport(0, "topk_conflict_id", [ServiceCandidate(0, 10.0, 3)]),
+    ]
+    cfg = load_config(None)
+    cfg["scheduler"].update({
+        "algorithm": "hard_conflict_greedy",
+        "cluster_mode": "global",
+        "objective": "sum_rate",
+        "use_panel_constraint": True,
+        "hard_conflict_snr_close_db": 1.0,
+    })
+    cfg["_resolved"] = {"max_mu_order": 1}
+
+    result = schedule(reports, beams, cfg, link_adapter=_PiecewiseAdapter())
+
+    assert [(link.ue_id, link.beam_index) for link in result.links] == [(0, 0)]
 
 
 def test_equal_mcs_prefers_candidate_with_higher_snr_for_all_algorithms():

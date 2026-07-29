@@ -41,10 +41,16 @@ system:
   # Preserve approximately 33 dBm/TRP and 30 dBm/independent TX resource:
   # 33 dBm + 10*log10(21 TRPs) = 46.222 dBm network-wide.
   tx_power_dbm: 46.222
-  num_drops: 1
-  # This is 50 measured TTIs per drop. The 50 OLLA warmup TTIs below are
-  # additional, so the link loop executes 100 TTIs per drop.
-  num_tti_per_drop: 50
+  num_drops: 50
+  # Kept consistent with continuous_tti.num_tti as the non-continuous fallback.
+  num_tti_per_drop: 200
+  # Continuous mode re-runs scheduling and updates PF Tbar on every TTI.
+  # Each drop has 50 warmup TTIs plus 200 measured TTIs.
+  continuous_tti:
+    enabled: true
+    duration_ms: 25.0
+    num_tti: 200
+    warmup_tti: 50
   random_seed: 20260725
   target_bler: 0.1
 
@@ -181,7 +187,10 @@ scheduler:
   conflict_penalty_mode: adaptive
   adaptive_lambda_alpha: 0.20
   unknown_interference_policy: zero
+  hard_conflict_snr_close_db: 1.0
   pf_tbar_init_mbps: 1.0
+  # Tbar EWMA alpha = 1/100; scheduled and unscheduled UEs update every TTI.
+  pf_averaging_window_tti: 100
 
 analysis:
   # Keep exactly the two requested evaluation schemes; do not add the derived

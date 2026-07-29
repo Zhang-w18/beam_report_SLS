@@ -362,6 +362,14 @@ def test_v212_baseline_topk_config_enables_requested_comparison_modes():
     rf = resolve_rf_architecture(cfg, tx)
 
     assert cfg["scheduler"]["objective"] == "proportional_fair"
+    assert cfg["system"]["num_drops"] == 50
+    assert cfg["system"]["continuous_tti"] == {
+        "enabled": True,
+        "duration_ms": 25.0,
+        "num_tti": 200,
+        "warmup_tti": 50,
+    }
+    assert cfg["scheduler"]["pf_averaging_window_tti"] == 100
     assert cfg["evaluation"]["matrix"] == {
         "baseline": ["greedy"],
         "topk_conflict_id": [

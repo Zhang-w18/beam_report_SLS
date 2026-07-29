@@ -112,7 +112,8 @@ RF architecture：
 
 - 兼容/固定 panel 模式通常按 `panel_key()` 限制；
 - 动态波束分配模式按 `trp_key()` 计数，并使用
-  `_resolved.max_parallel_beams_per_trp` 作为容量。
+  `_resolved.max_parallel_beams_per_trp` 作为容量；此外，同一 TRP 的同一个本地
+  beam/codeword 在一个 TTI 内最多分配给一个 UE。
 
 不要假设“一个 beam 永久绑定一个 TXRU/panel”；当前共享码本模式支持调度后动态
 分配物理 panel。
@@ -257,10 +258,10 @@ g[t+1] = rho*g[t] + sqrt(1-rho^2)*z[t]
 
 optimized greedy 与 legacy/reference 路径需要保持回归一致。穷举路径包含候选排序、
 零上界剪枝和 branch-and-bound。
-有限反馈 greedy 与 hard-conflict greedy 在调度指标完全相同时，使用候选对当前
-若候选 MCS 相同则先按预测 SNR 打破平局，优先选择 SNR 较高者；SNR 也相同时，
-再使用候选对当前仍可选的其他 UE 节点造成的双向冲突数量作为后续排序键，
-优先选择冲突影响较小者。
+hard-conflict greedy 每轮先比较候选加入当前集合后的边际效用。边际效用相同时，
+若候选 MCS 相同且 SNR 跨度不超过 `scheduler.hard_conflict_snr_close_db`
+（默认 1 dB），优先选择对当前候选池冲突影响较小者；SNR 跨度更大时优先高 SNR；
+剩余平局按 UE ID、beam index 确定性排序。
 
 所有算法都必须使用当前 `scheduler.objective`。PF 模式下，普通 greedy、
 full-Gamma greedy、exhaustive 和 hard-conflict greedy 均使用
@@ -343,7 +344,7 @@ NACK: b <- b + delta*(1-target_bler)/target_bler
 | `metrics/runtime_phases.csv` | feedback、scheduler、link evaluation 等阶段耗时 |
 | `metrics/drops.csv` | 每 drop 网络规模、后端、TTI 模式和信道诊断 |
 | `metrics/reports.csv` | UE feedback report JSON |
-| `metrics/topk_interference_details.csv` | 每个 Top-K `(drop, UE, service beam, interferer beam)` 的服务 SNR、pair SINR 和 SINR 下降 dB |
+| `metrics/topk_interference_details.csv` | 每个 Top-K `(drop, UE, service beam, interferer beam)` 的服务 SNR/MCS、pair SINR/MCS、SINR/MCS 降幅和 outage；每 drop 测量一次 |
 | `metrics/measurement_domains.csv` | 每 `(drop, UE)` 的服务 cell、测量域 cells、服务/测量/总上报波束数量 |
 | `metrics/su_snr_samples.csv` | 所有上报候选的 SU-SNR |
 | `metrics/su_snr_max_per_ue.csv` | 每 UE 最大上报 SU-SNR |

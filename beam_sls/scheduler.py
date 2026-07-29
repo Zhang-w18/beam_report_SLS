@@ -306,11 +306,18 @@ def _panel_constraint_ok(assignments: Sequence[Tuple[int, int]],
     dynamic = bool(cfg.get("_resolved", {}).get("dynamic_beam_assignment", False))
     capacity = int(cfg.get("_resolved", {}).get("max_parallel_beams_per_trp", 1)) if dynamic else 1
     used: Dict[Tuple, int] = {}
+    used_beams: set[Tuple] = set()
     for ue_id, b in assignments:
-        key = beam_ids[b].trp_key() if dynamic else beam_ids[b].panel_key()
+        beam_id = beam_ids[b]
+        key = beam_id.trp_key() if dynamic else beam_id.panel_key()
         used[key] = used.get(key, 0) + 1
         if used[key] > capacity:
             return False
+        if dynamic:
+            beam_key = _beam_occupancy_key(beam_id, cfg)
+            if beam_key in used_beams:
+                return False
+            used_beams.add(beam_key)
     return True
 
 
@@ -323,6 +330,23 @@ def _resource_capacity(cfg: Dict) -> int:
     if bool(cfg.get("_resolved", {}).get("dynamic_beam_assignment", False)):
         return max(1, int(cfg.get("_resolved", {}).get("max_parallel_beams_per_trp", 1)))
     return 1
+
+
+def _beam_occupancy_key(beam_id: BeamId, cfg: Dict) -> Tuple | None:
+    """Return the dynamic-TRP codeword resource, or None in fixed-panel mode."""
+    if not bool(cfg.get("_resolved", {}).get("dynamic_beam_assignment", False)):
+        return None
+    return (*beam_id.trp_key(), int(beam_id.beam))
+
+
+def _resource_available(resource_key: Tuple,
+                        beam_key: Tuple | None,
+                        used_resource_counts: Dict[Tuple, int],
+                        used_beam_keys: set[Tuple],
+                        cfg: Dict) -> bool:
+    if used_resource_counts.get(resource_key, 0) >= _resource_capacity(cfg):
+        return False
+    return beam_key is None or beam_key not in used_beam_keys
 
 
 def _reported_interference_power(rep: UEReport,
@@ -636,7 +660,8 @@ def exhaustive_schedule(reports: List[UEReport],
 
     def dfs(start_index: int,
             assignments: List[Tuple[int, int]],
-            used_panel_keys: Dict[Tuple, int],
+            used_resource_counts: Dict[Tuple, int],
+            used_beam_keys: set[Tuple],
             current_val: float,
             current_links: List[ScheduledLink]) -> None:
         nonlocal best_val, best_links
@@ -664,8 +689,15 @@ def exhaustive_schedule(reports: List[UEReport],
                     continue
             r = reports[i]
             for c in r.candidates:
-                key = _resource_key(beam_ids[c.beam_index], cfg)
-                if use_panel_constraint and used_panel_keys.get(key, 0) >= _resource_capacity(cfg):
+                beam_id = beam_ids[c.beam_index]
+                key = _resource_key(beam_id, cfg)
+                beam_key = _beam_occupancy_key(beam_id, cfg)
+                if (
+                    use_panel_constraint
+                    and not _resource_available(
+                        key, beam_key, used_resource_counts, used_beam_keys, cfg
+                    )
+                ):
                     stats["panel_pruned_count"] += 1
                     continue
                 trial = assignments + [(r.ue_id, c.beam_index)]
@@ -676,12 +708,17 @@ def exhaustive_schedule(reports: List[UEReport],
                 stats["evaluated_assignment_count"] += 1
                 if not np.isfinite(val):
                     continue
-                next_keys = dict(used_panel_keys)
+                next_counts = dict(used_resource_counts)
+                next_beam_keys = set(used_beam_keys)
                 if use_panel_constraint:
-                    next_keys[key] = next_keys.get(key, 0) + 1
-                dfs(i + 1, trial, next_keys, float(val), links)
+                    next_counts[key] = next_counts.get(key, 0) + 1
+                    if beam_key is not None:
+                        next_beam_keys.add(beam_key)
+                dfs(
+                    i + 1, trial, next_counts, next_beam_keys, float(val), links
+                )
 
-    dfs(0, [], {}, 0.0, [])
+    dfs(0, [], {}, set(), 0.0, [])
     stats["best_objective_value"] = float(best_val)
     stats["num_scheduled"] = int(len(best_links))
     stats["num_scheduled_outage"] = int(sum(link.predicted_outage for link in best_links))
@@ -729,6 +766,7 @@ def _node_arrays(reports: Sequence[UEReport],
     ue_ids = np.asarray([r.ue_id for r, _ in nodes], dtype=np.int32)
     beam_indices = np.asarray([c.beam_index for _, c in nodes], dtype=np.int32)
     panel_keys = [_resource_key(beam_ids[int(b)], cfg) for b in beam_indices]
+    beam_keys = [_beam_occupancy_key(beam_ids[int(b)], cfg) for b in beam_indices]
     weights = np.asarray([_pf_weight(r.ue_id, cfg, tbar_mbps) for r, _ in nodes], dtype=float)
     rates = np.asarray([
         0.0 if c.su_outage else (
@@ -737,7 +775,7 @@ def _node_arrays(reports: Sequence[UEReport],
         )
         for _, c in nodes
     ], dtype=float)
-    return nodes, ue_ids, beam_indices, panel_keys, weights, rates
+    return nodes, ue_ids, beam_indices, panel_keys, beam_keys, weights, rates
 
 
 def _limited_feedback_adjacency(nodes,
@@ -832,7 +870,7 @@ def _optimized_limited_greedy_schedule(reports: List[UEReport],
     num_reports_input = len(reports)
     reports = [r for r in reports if r.candidates]
     scheme = reports[0].scheme if reports else "unknown"
-    nodes, ue_ids, beam_indices, panel_keys, weights, rates = _node_arrays(
+    nodes, ue_ids, beam_indices, panel_keys, beam_keys, weights, rates = _node_arrays(
         reports, beam_ids, cfg, tbar_mbps, link_adapter,
     )
     count = len(nodes)
@@ -855,6 +893,7 @@ def _optimized_limited_greedy_schedule(reports: List[UEReport],
     selected: List[int] = []
     used_ues: set[int] = set()
     used_panel_keys: Dict[Tuple, int] = {}
+    used_beam_keys: set[Tuple] = set()
     current_val = 0.0
     use_panel_constraint = bool(cfg["scheduler"].get("use_panel_constraint", True))
     rounds: List[Dict] = []
@@ -866,8 +905,12 @@ def _optimized_limited_greedy_schedule(reports: List[UEReport],
         remaining = np.asarray([int(u) not in used_ues for u in ue_ids], dtype=bool)
         remaining_count = int(np.count_nonzero(remaining))
         if use_panel_constraint:
-            capacity = _resource_capacity(cfg)
-            panel_legal = np.asarray([used_panel_keys.get(key, 0) < capacity for key in panel_keys], dtype=bool)
+            panel_legal = np.asarray([
+                _resource_available(
+                    key, beam_key, used_panel_keys, used_beam_keys, cfg
+                )
+                for key, beam_key in zip(panel_keys, beam_keys)
+            ], dtype=bool)
             pruned = int(np.count_nonzero(remaining & ~panel_legal))
         else:
             panel_legal = np.ones(count, dtype=bool)
@@ -917,6 +960,9 @@ def _optimized_limited_greedy_schedule(reports: List[UEReport],
         if use_panel_constraint:
             key = panel_keys[chosen]
             used_panel_keys[key] = used_panel_keys.get(key, 0) + 1
+            beam_key = beam_keys[chosen]
+            if beam_key is not None:
+                used_beam_keys.add(beam_key)
         current_val += best_delta
         if count:
             conflict_increment += adjacency[:, chosen].astype(float) + adjacency[chosen, :].astype(float)
@@ -965,7 +1011,7 @@ def _optimized_full_gamma_greedy_schedule(reports: List[UEReport],
     num_reports_input = len(reports)
     reports = [r for r in reports if r.candidates]
     scheme = reports[0].scheme if reports else "unknown"
-    nodes, ue_ids, beam_indices, panel_keys, weights, _ = _node_arrays(
+    nodes, ue_ids, beam_indices, panel_keys, beam_keys, weights, _ = _node_arrays(
         reports, beam_ids, cfg, tbar_mbps, link_adapter,
     )
     count = len(nodes)
@@ -989,6 +1035,7 @@ def _optimized_full_gamma_greedy_schedule(reports: List[UEReport],
     incoming_den = noise.copy()
     used_ues: set[int] = set()
     used_panel_keys: Dict[Tuple, int] = {}
+    used_beam_keys: set[Tuple] = set()
     current_val = 0.0
     use_panel_constraint = bool(cfg["scheduler"].get("use_panel_constraint", True))
     rounds: List[Dict] = []
@@ -1000,8 +1047,12 @@ def _optimized_full_gamma_greedy_schedule(reports: List[UEReport],
         remaining = np.asarray([int(u) not in used_ues for u in ue_ids], dtype=bool)
         remaining_count = int(np.count_nonzero(remaining))
         if use_panel_constraint:
-            capacity = _resource_capacity(cfg)
-            panel_legal = np.asarray([used_panel_keys.get(key, 0) < capacity for key in panel_keys], dtype=bool)
+            panel_legal = np.asarray([
+                _resource_available(
+                    key, beam_key, used_panel_keys, used_beam_keys, cfg
+                )
+                for key, beam_key in zip(panel_keys, beam_keys)
+            ], dtype=bool)
             pruned = int(np.count_nonzero(remaining & ~panel_legal))
         else:
             panel_legal = np.ones(count, dtype=bool)
@@ -1082,6 +1133,9 @@ def _optimized_full_gamma_greedy_schedule(reports: List[UEReport],
         if use_panel_constraint:
             key = panel_keys[chosen]
             used_panel_keys[key] = used_panel_keys.get(key, 0) + 1
+            beam_key = beam_keys[chosen]
+            if beam_key is not None:
+                used_beam_keys.add(beam_key)
         current_val = best_val
 
     assignments = [(int(ue_ids[i]), int(beam_indices[i])) for i in selected]
@@ -1156,7 +1210,7 @@ def _legacy_greedy_schedule(reports: List[UEReport],
     reports = [r for r in reports if r.candidates]
     scheme = reports[0].scheme if reports else "unknown"
     num_su_outage_candidates = sum(int(c.su_outage) for r in reports for c in r.candidates)
-    tie_nodes, tie_ue_ids, tie_beam_indices, _, tie_weights, tie_rates = _node_arrays(
+    tie_nodes, tie_ue_ids, tie_beam_indices, _, _, tie_weights, tie_rates = _node_arrays(
         reports, beam_ids, cfg, tbar_mbps, link_adapter,
     )
     tie_adjacency = _limited_feedback_adjacency(
@@ -1330,10 +1384,17 @@ def hard_conflict_greedy_schedule(reports: List[UEReport],
     initial_pool_size = len(pool)
     selected: List[Tuple[int, int]] = []
     used_resource_counts: Dict[Tuple, int] = {}
+    used_beam_keys: set[Tuple] = set()
+    current_val = 0.0
     removed_same_ue = 0
     removed_conflict = 0
     removed_panel = 0
     use_panel_constraint = bool(cfg["scheduler"].get("use_panel_constraint", True))
+    snr_close_threshold_db = float(
+        cfg["scheduler"].get("hard_conflict_snr_close_db", 1.0)
+    )
+    if snr_close_threshold_db < 0.0:
+        raise ValueError("scheduler.hard_conflict_snr_close_db must be >= 0")
     rounds: List[Dict] = []
 
     def conflicts(a: Tuple[int, int], b: Tuple[int, int]) -> bool:
@@ -1350,43 +1411,76 @@ def hard_conflict_greedy_schedule(reports: List[UEReport],
         q = len(selected) + 1
         candidate_count = len(pool)
         removed_panel_before = removed_panel
-        best_weight = max(pool.values())
-        tied = [node for node in pool if pool[node] == best_weight]
-        snr_tied = tied
+        marginal_utility: Dict[Tuple[int, int], float] = {}
+        for node in pool:
+            trial_val, _ = _evaluate_assignments(
+                selected + [node], reports, beam_ids, cfg, tbar_mbps,
+                link_adapter, penalty_lambda=0.0,
+            )
+            marginal_utility[node] = float(trial_val - current_val)
+        best_delta = max(marginal_utility.values())
+        if best_delta <= 0.0:
+            break
+        tied = [
+            node for node in pool
+            if marginal_utility[node] == best_delta
+        ]
         tied_candidates = [
             rep_by_ue[ue_id].candidate_by_beam(beam_index)
             for ue_id, beam_index in tied
         ]
-        tied_mcs = [int(candidate.su_mcs) for candidate in tied_candidates]
-        if len(tied) > 1 and all(mcs == tied_mcs[0] for mcs in tied_mcs):
-            best_snr_db = max(
-                float(candidate.su_snr_db) for candidate in tied_candidates
-            )
-            snr_tied = [
-                node
-                for node, candidate in zip(tied, tied_candidates)
-                if float(candidate.su_snr_db) == best_snr_db
-            ]
         conflict_impacts = {
             node: sum(
                 1
                 for other in pool
                 if other[0] != node[0] and conflicts(node, other)
             )
-            for node in snr_tied
+            for node in tied
         }
-        # Equal-MCS/equal-weight nodes first prefer higher SNR, then minimize
-        # damage to the active candidate pool. The tuple suffix is deterministic.
-        chosen = min(
-            snr_tied,
-            key=lambda node: (conflict_impacts[node], node[0], node[1]),
+        tied_mcs = [int(candidate.su_mcs) for candidate in tied_candidates]
+        tied_snr_db = [
+            float(candidate.su_snr_db) for candidate in tied_candidates
+        ]
+        same_mcs = all(mcs == tied_mcs[0] for mcs in tied_mcs)
+        snr_is_close = (
+            same_mcs
+            and max(tied_snr_db) - min(tied_snr_db)
+            <= snr_close_threshold_db
         )
+        if snr_is_close:
+            # Nearly equivalent radio quality: preserve more future choices.
+            chosen = min(
+                tied,
+                key=lambda node: (
+                    conflict_impacts[node], node[0], node[1]
+                ),
+            )
+            tiebreak_rule = "low_conflict_for_close_same_mcs_snr"
+        else:
+            # Material SNR separation: retain the stronger link. Conflict
+            # impact and stable IDs only break any remaining equality.
+            candidate_by_node = dict(zip(tied, tied_candidates))
+            chosen = min(
+                tied,
+                key=lambda node: (
+                    -float(candidate_by_node[node].su_snr_db),
+                    conflict_impacts[node],
+                    node[0],
+                    node[1],
+                ),
+            )
+            tiebreak_rule = "high_snr"
         selected_conflict_impact = int(conflict_impacts[chosen])
         chosen_candidate = rep_by_ue[chosen[0]].candidate_by_beam(chosen[1])
         selected.append(chosen)
         chosen_ue, chosen_beam = chosen
-        chosen_panel = _resource_key(beam_ids[chosen_beam], cfg)
+        chosen_beam_id = beam_ids[chosen_beam]
+        chosen_panel = _resource_key(chosen_beam_id, cfg)
+        chosen_beam_key = _beam_occupancy_key(chosen_beam_id, cfg)
         used_resource_counts[chosen_panel] = used_resource_counts.get(chosen_panel, 0) + 1
+        if chosen_beam_key is not None:
+            used_beam_keys.add(chosen_beam_key)
+        current_val += best_delta
         del pool[chosen]
 
         for node in list(pool):
@@ -1398,8 +1492,13 @@ def hard_conflict_greedy_schedule(reports: List[UEReport],
                 removed_conflict += 1
             elif (
                 use_panel_constraint
-                and _resource_key(beam_ids[node[1]], cfg) == chosen_panel
-                and used_resource_counts[chosen_panel] >= _resource_capacity(cfg)
+                and not _resource_available(
+                    _resource_key(beam_ids[node[1]], cfg),
+                    _beam_occupancy_key(beam_ids[node[1]], cfg),
+                    used_resource_counts,
+                    used_beam_keys,
+                    cfg,
+                )
             ):
                 del pool[node]
                 removed_panel += 1
@@ -1413,6 +1512,8 @@ def hard_conflict_greedy_schedule(reports: List[UEReport],
             "selected_conflict_impact": selected_conflict_impact,
             "selected_tiebreak_mcs": int(chosen_candidate.su_mcs),
             "selected_tiebreak_snr_db": float(chosen_candidate.su_snr_db),
+            "selected_marginal_utility": float(best_delta),
+            "tiebreak_rule": tiebreak_rule,
             "elapsed_s": elapsed,
         })
         _round_progress(progress_callback, domain_id, q, max_q, candidate_count, elapsed)
@@ -1433,6 +1534,11 @@ def hard_conflict_greedy_schedule(reports: List[UEReport],
         "removed_conflicting_candidates": int(removed_conflict),
         "removed_panel_candidates": int(removed_panel),
         "panel_constraint_enabled": use_panel_constraint,
+        "hard_conflict_snr_close_db": float(snr_close_threshold_db),
+        "candidate_ordering": (
+            "current_marginal_utility_then_close_same_mcs_low_conflict_"
+            "else_high_snr_then_stable_id"
+        ),
         "node_weight": (
             "pf_weighted_su_rate"
             if cfg["scheduler"].get("objective", "sum_rate") == "proportional_fair"

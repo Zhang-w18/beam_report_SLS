@@ -228,6 +228,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "conflict_penalty_mode": "fixed",
         "adaptive_lambda_alpha": 0.2,
         "unknown_interference_policy": "zero",
+        # Hard-conflict tie-break: same-MCS candidates within this SNR span
+        # prefer lower conflict impact; larger separation prefers higher SNR.
+        "hard_conflict_snr_close_db": 1.0,
         "pf_tbar_init_mbps": 1.0,
         # Exponential PF throughput averaging: alpha=1/window_tti.
         "pf_averaging_window_tti": 100,

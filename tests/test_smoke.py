@@ -69,6 +69,21 @@ def test_smoke(tmp_path: Path):
         "link_evaluation",
     } <= phases
     assert all(float(row["elapsed_s"]) >= 0.0 for row in runtime_rows)
+    with (tmp_path / "out" / "metrics" / "topk_interference_details.csv").open(
+        encoding="utf-8", newline=""
+    ) as handle:
+        interference_rows = list(csv.DictReader(handle))
+    assert interference_rows
+    assert {
+        "service_snr_db",
+        "pair_sinr_db",
+        "sinr_loss_db",
+        "service_mcs",
+        "pair_mcs",
+        "mcs_loss",
+        "service_outage",
+        "pair_outage",
+    } <= set(interference_rows[0])
     with (tmp_path / "out" / "metrics" / "link_tti.csv").open(
         encoding="utf-8", newline=""
     ) as handle:
@@ -475,6 +490,15 @@ def test_domain_limited_measurement_uses_sparse_gamma():
 
 
 def test_service_and_measured_interference_beams_are_independent():
+    class DebugMcsAdapter:
+        @staticmethod
+        def map_sinr_lin(values):
+            sinr = np.asarray(values, dtype=float)
+            mcs = np.where(sinr >= 0.75, 5, 2).astype(np.int32)
+            outage = sinr < 0.25
+            rate = np.where(outage, 0.0, mcs.astype(float))
+            return mcs, outage, rate
+
     beam_ids = [
         BeamId(cell=i, trp=i, panel=0, beam=0, global_index=i, tx_unit=i)
         for i in range(3)
@@ -501,6 +525,7 @@ def test_service_and_measured_interference_beams_are_independent():
         k1=2, oracle_top_k=2, k2=2, threshold_db=0.0,
         service_beam_indices_by_ue={0: [0]},
         measured_beam_indices_by_ue={0: [1, 2]},
+        link_adapter=DebugMcsAdapter(),
     )["topk_conflict_id"][0]
     assert report.candidate_indices() == [0]
     assert report.measured_interference_beams == {1, 2}
@@ -511,6 +536,11 @@ def test_service_and_measured_interference_beams_are_independent():
         assert np.isclose(detail["service_snr_db"], 0.0)
         assert np.isclose(detail["pair_sinr_db"], -3.010299956639812)
         assert np.isclose(detail["sinr_loss_db"], 3.010299956639812)
+        assert detail["service_mcs"] == 5
+        assert detail["pair_mcs"] == 2
+        assert detail["mcs_loss"] == 3
+        assert detail["service_outage"] is False
+        assert detail["pair_outage"] is False
     serialized = report.to_dict(beam_ids)["candidates"][0]["interference_details"]
     assert [d["interferer_beam_id"] for d in serialized] == [
         beam_ids[1].short(), beam_ids[2].short(),
@@ -784,7 +814,7 @@ class _OutageAwareFakeAdapter:
         return float(mcs * 10.0)
 
 
-def test_report_link_adapts_only_top_k_service_beams_once_across_schemes():
+def test_report_link_adapts_service_beams_once_and_topk_interference_pairs():
     class CountingAdapter(_OutageAwareFakeAdapter):
         select_calls = []
         outage_calls = []
@@ -823,8 +853,15 @@ def test_report_link_adapts_only_top_k_service_beams_once_across_schemes():
     )
 
     assert [c.beam_index for c in reports["baseline"][0].candidates] == [5, 4, 3, 2]
-    assert len(CountingAdapter.select_calls) == 4
-    assert len(CountingAdapter.outage_calls) == 4
+    # Four unique service beams are adapted once across schemes, followed by
+    # one pair-SINR adaptation for each Top-K service candidate.
+    assert len(CountingAdapter.select_calls) == 8
+    assert len(CountingAdapter.outage_calls) == 8
+    np.testing.assert_allclose(
+        CountingAdapter.select_calls[:4],
+        10.0 ** (su_snr_db[0, 2:] / 10.0),
+    )
+    assert CountingAdapter.select_calls[4:] == [0.0] * 4
     assert np.all(meas.su_mcs[0, 2:] == 3)
     assert np.all(meas.su_mcs[0, :2] == -1)
 

@@ -721,9 +721,14 @@ candidates
 `topk_conflict_id` 的每个服务候选还包含 `interference_details`。每个上报的
 强干扰 beam 记录 `service_snr_db`（仅有噪声时的 \(S/N\)）、
 `pair_sinr_db`（该干扰 beam 存在时的 \(S/(I+N)\)）和
-`sinr_loss_db = service_snr_db - pair_sinr_db`。相同内容同时按每个
+`sinr_loss_db = service_snr_db - pair_sinr_db`，以及相同链路抽象后端得到的
+`service_mcs`、`pair_mcs` 和
+`mcs_loss = service_mcs - pair_mcs`。`service_outage`、`pair_outage`
+用于区分最低 MCS 与已经低于目标 BLER 的情况。相同内容同时按每个
 `(drop, UE, service beam, interferer beam)` 一行写入
-`metrics/topk_interference_details.csv`，并保留服务候选排名和干扰 beam 排名。
+`metrics/topk_interference_details.csv`，并保留 site/cell/cluster、服务候选排名
+和干扰 beam 排名。该文件基于每个 drop 唯一一次的 Gamma 测量，因此连续 TTI
+模式下不会为每个 TTI 重复写相同行。
 
 候选 beam 的 `beam_id` 形如：
 

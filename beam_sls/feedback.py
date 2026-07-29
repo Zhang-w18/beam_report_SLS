@@ -201,17 +201,71 @@ def make_reports(meas: MeasurementResult,
                     else:
                         candidates = sorted((int(i) for i in measured_set if int(i) != int(m)),
                                             key=lambda i: (float(row[i]), int(i)))
-                    conflicts = set(candidates[:int(k2)])
+                    selected_interferers = candidates[:int(k2)]
+                    conflicts = set(selected_interferers)
                     service_snr_db = float(lin_to_db(float(meas.gamma[u, m, m])))
-                    for interferer_beam in candidates[:int(k2)]:
-                        pair_sinr_db = float(
-                            lin_to_db(float(meas.gamma[u, m, interferer_beam]))
+                    service_mcs = int(meas.su_mcs[u, m])
+                    service_outage = (
+                        False if meas.su_outage is None
+                        else bool(meas.su_outage[u, m])
+                    )
+                    pair_sinr_lin = np.asarray([
+                        float(meas.gamma[u, m, interferer_beam])
+                        for interferer_beam in selected_interferers
+                    ], dtype=float)
+                    if pair_sinr_lin.size and link_adapter is not None and hasattr(
+                        link_adapter, "map_sinr_lin"
+                    ):
+                        pair_mcs_values, pair_outage_values, _ = (
+                            link_adapter.map_sinr_lin(pair_sinr_lin)
                         )
+                    else:
+                        pair_mcs_values = np.empty(
+                            pair_sinr_lin.size, dtype=np.int32
+                        )
+                        pair_outage_values = np.empty(
+                            pair_sinr_lin.size, dtype=bool
+                        )
+                        for i, sinr_lin in enumerate(pair_sinr_lin):
+                            if link_adapter is not None:
+                                pair_mcs = int(
+                                    link_adapter.select_mcs_from_sinr_lin(
+                                        float(sinr_lin)
+                                    )
+                                )
+                                pair_outage = bool(
+                                    link_adapter.is_outage_from_sinr_lin(
+                                        float(sinr_lin), pair_mcs
+                                    )
+                                )
+                            else:
+                                pair_mcs = int(
+                                    select_mcs_from_sinr_lin(
+                                        float(sinr_lin)
+                                    ).index
+                                )
+                                pair_outage = bool(
+                                    bler_from_sinr_db(
+                                        float(lin_to_db(sinr_lin)), pair_mcs
+                                    ) > 0.1
+                                )
+                            pair_mcs_values[i] = pair_mcs
+                            pair_outage_values[i] = pair_outage
+                    for i, interferer_beam in enumerate(selected_interferers):
+                        pair_sinr_db = float(
+                            lin_to_db(pair_sinr_lin[i])
+                        )
+                        pair_mcs = int(pair_mcs_values[i])
                         interference_details.append({
                             "interferer_beam_index": int(interferer_beam),
                             "service_snr_db": service_snr_db,
                             "pair_sinr_db": pair_sinr_db,
                             "sinr_loss_db": service_snr_db - pair_sinr_db,
+                            "service_mcs": service_mcs,
+                            "pair_mcs": pair_mcs,
+                            "mcs_loss": service_mcs - pair_mcs,
+                            "service_outage": service_outage,
+                            "pair_outage": bool(pair_outage_values[i]),
                         })
                 elif scheme == "threshold_conflict_set":
                     row = meas.gamma[u, m, :]

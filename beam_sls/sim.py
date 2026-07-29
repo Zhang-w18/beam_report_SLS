@@ -969,6 +969,17 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
                             "drop": int(drop),
                             "scheme": scheme,
                             "ue_id": int(r.ue_id),
+                            "site_id": (
+                                "" if r.site_id is None else int(r.site_id)
+                            ),
+                            "serving_cell": (
+                                "" if r.serving_cell is None
+                                else int(r.serving_cell)
+                            ),
+                            "scheduling_cluster": (
+                                "" if r.scheduling_cluster is None
+                                else int(r.scheduling_cluster)
+                            ),
                             "service_candidate_rank": int(rank),
                             "service_beam_index": int(cand.beam_index),
                             "service_beam_id": beam_ids[cand.beam_index].short(),
@@ -978,6 +989,11 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
                             "service_snr_db": float(detail["service_snr_db"]),
                             "pair_sinr_db": float(detail["pair_sinr_db"]),
                             "sinr_loss_db": float(detail["sinr_loss_db"]),
+                            "service_mcs": int(detail["service_mcs"]),
+                            "pair_mcs": int(detail["pair_mcs"]),
+                            "mcs_loss": int(detail["mcs_loss"]),
+                            "service_outage": bool(detail["service_outage"]),
+                            "pair_outage": bool(detail["pair_outage"]),
                         })
                     su_snr_sample_rows.append({
                         "drop": int(drop),

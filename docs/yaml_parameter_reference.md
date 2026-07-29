@@ -332,6 +332,7 @@ $$
 | `conflict_penalty_mode` | lambda 模式 | `fixed`, `adaptive` | `adaptive` 时忽略固定值，按候选 SU rate 中位数计算。 |
 | `adaptive_lambda_alpha` | 自适应 lambda 比例 | 非负数，常用 `0.1`, `0.2`, `0.5` | `lambda = alpha * median(candidate SU rate [Mbps])`，逐调度域计算。 |
 | `unknown_interference_policy` | 调度域内未测量干扰处理 | 当前 `zero` | `zero` 表示调度预测中未知干扰按 0；真实链路评估仍计算全网实际干扰。 |
+| `hard_conflict_snr_close_db` | hard-conflict 同 MCS 的近似等价 SNR 门限 | 非负 dB，默认 `1.0` | 当前边际效用相同时，同 MCS 且候选 SNR 跨度不超过该门限，优先冲突影响较小者；跨度更大时优先高 SNR，最后按 UE/beam ID 确定性排序。 |
 | `pf_tbar_init_mbps` | PF 初始平均吞吐 | 正数 | `objective=proportional_fair` 时使用。 |
 | `pf_averaging_window_tti` | PF 吞吐 EWMA 窗长 | 正整数 | 每 TTI 使用 `alpha=1/window` 更新；未调度 UE 的本 TTI 吞吐按 0 更新。 |
 
