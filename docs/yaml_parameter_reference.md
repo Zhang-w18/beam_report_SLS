@@ -365,8 +365,8 @@ $$
 
 | 参数 | 含义 | 取值范围 | 说明 |
 |---|---|---|---|
-| `mode` | 链路抽象模式 | `sionna_sys_precomputed_bler` | 优先 Sionna SYS；不可用则 fallback。 |
-| `mcs_table_index` | MCS table index | 整数 | 传给 Sionna SYS 或 fallback 记录；下行 NR PDSCH table 1 用 `1`。 |
+| `mode` | 链路抽象模式 | `sionna_sys_precomputed_bler` | 必须使用 Sionna SYS；不可用时直接报错。 |
+| `mcs_table_index` | MCS table index | 整数 | 传给 Sionna SYS；下行 NR PDSCH table 1 用 `1`。 |
 | `mcs_category` | MCS category | 整数 | Sionna SYS 中 `1=PDSCH`、`0=PUSCH`；本项目下行 PDSCH 默认用 `1`。 |
 | `sinr_mapping` | SINR mapping | 当前 `eesm` | 频选 SINR 到有效 SINR。 |
 | `eesm_beta_db` | EESM beta | 正数，dB | 默认 5 dB。 |
@@ -374,10 +374,6 @@ $$
 | `olla_step_db` | OLLA 步长 | 正数，dB | 默认 0.1 dB。 |
 | `olla_warmup_tti` | 每个 drop 的 OLLA 预热 TTI 数 | 非负整数 | 默认 `0`。预热期间正常抽样 ACK、更新 MCS/OLLA，但不写入 `link_tti.csv`，也不进入吞吐、BLER、CDF 等统计；`system.num_tti_per_drop` 始终只表示正式统计 TTI 数。 |
 | `harq_enabled` | HARQ 预留开关 | `true`/`false` | 当前为预留/记录字段。 |
-| `bler_curve_slope` | fallback logistic BLER 斜率 | 正数 | 仅 fallback 使用。 |
-| `fallback_snr_min_db` | fallback table 最小 SNR | dB | 仅 fallback 使用。 |
-| `fallback_snr_max_db` | fallback table 最大 SNR | dB | 仅 fallback 使用。 |
-| `fallback_snr_step_db` | fallback table SNR 步长 | 正数 dB | 仅 fallback 使用。 |
 
 下行 PDSCH、目标 BLER 10% 的推荐配置：
 
@@ -437,8 +433,7 @@ fixed_vertical_beam_selection.json
 | 参数 | 含义 | 取值范围 | 说明 |
 |---|---|---|---|
 | `enable_import_probe` | 是否记录 Sionna 模块导入状态 | `true`/`false` | 输出 `sionna_import_probe.json`。 |
-| `prefer_sionna_sys_phy_abstraction` | 是否优先 Sionna SYS | `true`/`false` | 不可用则 fallback。 |
-| `fallback_to_numpy_if_unavailable` | Sionna channel 不可用时是否 fallback | `true`/`false` | 默认 `true`，保证代码可跑。 |
+| `fallback_to_numpy_if_unavailable` | Sionna channel 不可用时是否 fallback | `true`/`false` | 默认 `false`；仅影响信道 backend，不会启用链路自适应 fallback。 |
 | `device` | Sionna/Torch device | `null` 或 device 字符串 | 默认 `null`。 |
 | `precision` | Sionna 精度 | `null`, `single`, `double` 等 | 取决于本地 Sionna API。 |
 | `bs_polarization` | BS 极化 | `single`, `dual` | 默认 `dual`。 |

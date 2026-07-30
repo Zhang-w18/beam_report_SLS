@@ -25,7 +25,7 @@ v2.4 的核心变化是新增了 **RF architecture** 配置层，代码会自动
 - 新增仿真进度输出；
 - 新增 `docs/yaml_parameter_reference.md`，自包含说明 YAML 参数含义、取值范围和注意事项。
 
-> 说明：默认配置要求使用真实 Sionna TR 38.901 UMa/UMi/RMa 信道和 Sionna SYS PDSCH BLER/ILLA 链路抽象；如果 Sionna 后端不可用会直接报错，避免静默回退。调试 fallback 可改用 `scenario.channel_model: numpy_geometric_uma` 和 `link_abstraction.mode: fallback_precomputed_table`。
+> 说明：默认配置要求使用真实 Sionna TR 38.901 UMa/UMi/RMa 信道和 Sionna SYS PDSCH BLER/ILLA 链路抽象；如果 Sionna SYS 后端不可用会直接报错。链路自适应不再提供本地 MCS/BLER fallback；仅信道调试仍可显式使用 `scenario.channel_model: numpy_geometric_uma`。
 
 ---
 
@@ -810,7 +810,7 @@ sionna:
   tensor_backend: tensorflow
 ```
 
-This means that if the requested Sionna TR38901/SYS backend cannot be initialized, the run stops with the real error instead of silently using the NumPy fallback. For fallback/debug runs, set `scenario.channel_model: numpy_geometric_uma` and `link_abstraction.mode: fallback_precomputed_table`.
+This means that if the requested Sionna SYS backend cannot be initialized, the run stops with the real error. Link adaptation has no local MCS/BLER fallback. For channel-only debugging, `scenario.channel_model: numpy_geometric_uma` remains available.
 
 ## v2.4.2 Sionna TR38901 adapter hotfix
 

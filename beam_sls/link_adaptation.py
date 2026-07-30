@@ -6,9 +6,6 @@ from typing import Dict, Tuple
 
 import numpy as np
 
-from .mcs import (MCS_TABLE, bler_from_sinr_db, rate_mbps_from_mcs,
-                  select_mcs_from_sinr_db, select_mcs_from_sinr_lin,
-                  tbs_bits_from_mcs)
 from .utils import lin_to_db
 
 
@@ -32,6 +29,7 @@ class BaseLinkAdapter:
         self.target_bler = float(cfg.get("system", {}).get("target_bler", la.get("target_bler", 0.1)))
         self.mcs_table_index = int(la.get("mcs_table_index", 1))
         self.mcs_category = int(la.get("mcs_category", 1))
+        self.num_mcs = 29
         self.status = LinkAdaptationStatus("unknown", "not initialized", self.target_bler,
                                            self.mcs_table_index, self.mcs_category)
         self._call_counters = {
@@ -61,14 +59,13 @@ class BaseLinkAdapter:
         return mcs.reshape(x.shape), outage.reshape(x.shape)
 
     def select_mcs_from_sinr_db(self, sinr_db: float, num_allocated_re: int | None = None) -> int:
-        return int(select_mcs_from_sinr_db(sinr_db).index)
+        raise NotImplementedError
 
     def select_mcs_from_sinr_lin(self, sinr_lin: float, num_allocated_re: int | None = None) -> int:
-        return int(select_mcs_from_sinr_lin(sinr_lin).index)
+        return self.select_mcs_from_sinr_db(float(lin_to_db(sinr_lin)), num_allocated_re)
 
     def tbler_from_sinr_db(self, sinr_db: float, mcs_index: int, num_allocated_re: int | None = None) -> float:
-        slope = float(self.cfg.get("link_abstraction", {}).get("bler_curve_slope", 1.1))
-        return float(bler_from_sinr_db(sinr_db, mcs_index, slope=slope))
+        raise NotImplementedError
 
     def tbler_from_sinr_lin(self, sinr_lin: float, mcs_index: int, num_allocated_re: int | None = None) -> float:
         return self.tbler_from_sinr_db(float(lin_to_db(sinr_lin)), mcs_index, num_allocated_re)
@@ -92,85 +89,17 @@ class BaseLinkAdapter:
         return (not np.isfinite(tbler)) or tbler > self.target_bler
 
     def tbs_bits(self, mcs_index: int) -> int:
-        pdsch = self.cfg.get("pdsch", {})
-        return tbs_bits_from_mcs(mcs_index,
-                                 num_prbs=int(pdsch.get("num_prbs", 132)),
-                                 num_symbols=int(pdsch.get("num_symbols", 12)),
-                                 dmrs_overhead_re_per_prb=int(pdsch.get("dmrs_overhead_re_per_prb", 18)),
-                                 num_layers=int(pdsch.get("num_layers_per_ue", 1)))
+        raise NotImplementedError
 
     def rate_mbps(self, mcs_index: int) -> float:
         pdsch = self.cfg.get("pdsch", {})
-        return rate_mbps_from_mcs(mcs_index,
-                                  num_prbs=int(pdsch.get("num_prbs", 132)),
-                                  num_symbols=int(pdsch.get("num_symbols", 12)),
-                                  dmrs_overhead_re_per_prb=int(pdsch.get("dmrs_overhead_re_per_prb", 18)),
-                                  slot_duration_ms=float(pdsch.get("slot_duration_ms", 0.125)),
-                                  num_layers=int(pdsch.get("num_layers_per_ue", 1)))
+        return self.tbs_bits(mcs_index) / (
+            float(pdsch.get("slot_duration_ms", 0.125)) * 1e-3
+        ) / 1e6
 
     def allocated_re(self) -> int:
         pdsch = self.cfg.get("pdsch", {})
         return max(0, int(pdsch.get("num_prbs", 132)) * (12 * int(pdsch.get("num_symbols", 12)) - int(pdsch.get("dmrs_overhead_re_per_prb", 18))) * int(pdsch.get("num_layers_per_ue", 1)))
-
-
-class PrecomputedTableFallbackAdapter(BaseLinkAdapter):
-    """Fast local fallback: precompute BLER curves on a grid and use interpolation.
-
-    This preserves the v2 call path (ILLA style: choose highest MCS whose table
-    TBLER <= target) even when Sionna SYS is not importable on the current host.
-    """
-
-    def __init__(self, cfg: Dict, reason: str = ""):
-        super().__init__(cfg)
-        la = cfg.get("link_abstraction", {})
-        self.snr_grid_db = np.arange(float(la.get("fallback_snr_min_db", -8.0)),
-                                     float(la.get("fallback_snr_max_db", 35.01)),
-                                     float(la.get("fallback_snr_step_db", 0.05)))
-        slope = float(la.get("bler_curve_slope", 1.1))
-        table = []
-        for m in range(len(MCS_TABLE)):
-            table.append([bler_from_sinr_db(x, m, slope=slope) for x in self.snr_grid_db])
-        self.tbler_table = np.asarray(table, dtype=float)
-        status = "OK" if not reason else f"FALLBACK: {reason}"
-        self.status = LinkAdaptationStatus("fallback_precomputed_table", status, self.target_bler,
-                                           self.mcs_table_index, self.mcs_category)
-
-    def _interp_tbler(self, sinr_db: float, mcs_index: int) -> float:
-        m = int(np.clip(mcs_index, 0, len(MCS_TABLE) - 1))
-        return float(np.interp(float(sinr_db), self.snr_grid_db, self.tbler_table[m], left=1.0, right=0.0))
-
-    def select_mcs_from_sinr_db(self, sinr_db: float, num_allocated_re: int | None = None) -> int:
-        # Sionna ILLA principle: highest MCS whose table TBLER <= target.
-        chosen = 0
-        found = False
-        for m in range(len(MCS_TABLE)):
-            if self._interp_tbler(sinr_db, m) <= self.target_bler:
-                chosen = m
-                found = True
-        if not found:
-            return 0
-        return int(chosen)
-
-    def tbler_from_sinr_db(self, sinr_db: float, mcs_index: int, num_allocated_re: int | None = None) -> float:
-        return self._interp_tbler(sinr_db, mcs_index)
-
-    def schedule_map_from_sinr_db(self, sinr_db) -> Tuple[np.ndarray, np.ndarray]:
-        x = np.asarray(sinr_db, dtype=float)
-        chosen = np.zeros(x.shape, dtype=np.int32)
-        found = np.zeros(x.shape, dtype=bool)
-        for m in range(len(MCS_TABLE)):
-            values = np.interp(x, self.snr_grid_db, self.tbler_table[m], left=1.0, right=0.0)
-            valid = values <= self.target_bler
-            chosen[valid] = int(m)
-            found |= valid
-        selected_tbler = np.empty(x.shape, dtype=float)
-        for m in range(len(MCS_TABLE)):
-            mask = chosen == m
-            if np.any(mask):
-                selected_tbler[mask] = np.interp(
-                    x[mask], self.snr_grid_db, self.tbler_table[m], left=1.0, right=0.0,
-                )
-        return chosen, (~found) | (~np.isfinite(selected_tbler)) | (selected_tbler > self.target_bler)
 
 
 class SionnaSYSAdapter(BaseLinkAdapter):
@@ -193,10 +122,13 @@ class SionnaSYSAdapter(BaseLinkAdapter):
         super().__init__(cfg)
         try:
             import tensorflow as tf  # type: ignore
+            from sionna.phy.nr import calculate_tb_size, decode_mcs_index  # type: ignore
             from sionna.sys import PHYAbstraction, InnerLoopLinkAdaptation  # type: ignore
         except Exception as e:
             raise LinkAdaptationBackendError(f"Sionna SYS unavailable: {type(e).__name__}: {e}") from e
         self.tf = tf
+        self.calculate_tb_size = calculate_tb_size
+        self.decode_mcs_index = decode_mcs_index
         la = cfg.get("link_abstraction", {})
         device = cfg.get("sionna", {}).get("device", None)
         precision = cfg.get("sionna", {}).get("precision", None)
@@ -241,6 +173,42 @@ class SionnaSYSAdapter(BaseLinkAdapter):
 
     def _to_int(self, x) -> int:
         return int(round(self._to_float(x)))
+
+    def _mcs_parameters(self, mcs_index: int) -> Tuple[int, float]:
+        try:
+            modulation_order, target_coderate = self.decode_mcs_index(
+                int(mcs_index),
+                table_index=int(self.mcs_table_index),
+                is_pusch=bool(self.mcs_category == 0),
+            )
+            return self._to_int(modulation_order), self._to_float(target_coderate)
+        except Exception as e:
+            raise LinkAdaptationBackendError(
+                f"Sionna MCS decoding failed for index {mcs_index}: "
+                f"{type(e).__name__}: {e}"
+            ) from e
+
+    def tbs_bits(self, mcs_index: int) -> int:
+        """Use Sionna's TS 38.214 MCS decoder and TBS calculation."""
+        modulation_order, target_coderate = self._mcs_parameters(mcs_index)
+        pdsch = self.cfg.get("pdsch", {})
+        try:
+            result = self.calculate_tb_size(
+                modulation_order=modulation_order,
+                target_coderate=target_coderate,
+                num_prbs=int(pdsch.get("num_prbs", 132)),
+                num_ofdm_symbols=int(pdsch.get("num_symbols", 12)),
+                num_dmrs_per_prb=int(
+                    pdsch.get("dmrs_overhead_re_per_prb", 18)
+                ),
+                num_layers=int(pdsch.get("num_layers_per_ue", 1)),
+            )
+            return self._to_int(result[0] if isinstance(result, (tuple, list)) else result)
+        except Exception as e:
+            raise LinkAdaptationBackendError(
+                f"Sionna TBS calculation failed for MCS {mcs_index}: "
+                f"{type(e).__name__}: {e}"
+            ) from e
 
     def select_mcs_from_sinr_lin(self, sinr_lin: float, num_allocated_re: int | None = None) -> int:
         nre = int(num_allocated_re or self.allocated_re())
@@ -431,7 +399,8 @@ class SchedulerLinkLookup:
         self.region_mcs = np.asarray([mcs[i] for i in region_indices], dtype=np.int32)
         self.region_outage = np.asarray([outage[i] for i in region_indices], dtype=bool)
         self.rate_by_mcs = np.asarray(
-            [self.backing.rate_mbps(m) for m in range(len(MCS_TABLE))], dtype=float,
+            [self.backing.rate_mbps(m) for m in range(int(self.backing.num_mcs))],
+            dtype=float,
         )
         validation = np.linspace(
             self.min_db, self.max_db, max(2, self.validation_points), dtype=float,
@@ -523,16 +492,5 @@ def make_scheduler_link_adapter(link_adapter: BaseLinkAdapter, cfg: Dict):
 def make_link_adapter(cfg: Dict) -> BaseLinkAdapter:
     mode = str(cfg.get("link_abstraction", {}).get("mode", "sionna_sys_precomputed_bler")).lower()
     if mode in ("sionna_sys_precomputed_bler", "sionna_sys", "sionna_illa"):
-        try:
-            return SionnaSYSAdapter(cfg)
-        except Exception as e:
-            if bool(cfg.get("sionna", {}).get("fallback_to_numpy_if_unavailable", True)):
-                return PrecomputedTableFallbackAdapter(cfg, reason=f"{type(e).__name__}: {e}")
-            raise
-    if mode in ("fallback_precomputed_table", "precomputed_table"):
-        return PrecomputedTableFallbackAdapter(cfg)
-    if mode in ("mcs_surrogate", "logistic_surrogate"):
-        adapter = BaseLinkAdapter(cfg)
-        adapter.status = LinkAdaptationStatus("v1_logistic_surrogate", "OK", adapter.target_bler)
-        return adapter
+        return SionnaSYSAdapter(cfg)
     raise ValueError(f"Unsupported link_abstraction.mode={mode}")

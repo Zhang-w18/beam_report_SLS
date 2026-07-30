@@ -1,4 +1,5 @@
 import csv
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -69,6 +70,44 @@ def test_continuous_tti_measures_once_and_schedules_each_tti(
     cfg["tx_array"].update({"num_beams_h": 1, "num_beams_v": 1, "max_beams": 1})
     cfg["ue_array"].update({"num_beams_h": 1, "num_beams_v": 1, "max_beams": 1})
     cfg["coverage_heatmap"]["enabled"] = False
+
+    class Adapter:
+        target_bler = 0.1
+        num_mcs = 29
+        status = SimpleNamespace(
+            backend="unit_test", status="OK", target_bler=0.1,
+            mcs_table_index=1, mcs_category=1,
+        )
+
+        @staticmethod
+        def select_mcs_from_sinr_lin(_sinr):
+            return 3
+
+        @staticmethod
+        def select_mcs_from_sinr_db(_sinr):
+            return 3
+
+        @staticmethod
+        def is_outage_from_sinr_lin(_sinr, _mcs):
+            return False
+
+        @staticmethod
+        def rate_mbps(mcs):
+            return float(mcs * 10)
+
+        @staticmethod
+        def tbler_from_sinr_db(_sinr, _mcs):
+            return 0.0
+
+        @staticmethod
+        def tbs_bits(mcs):
+            return int(mcs * 1000)
+
+    adapter = Adapter()
+    monkeypatch.setattr(sim, "make_link_adapter", lambda _cfg: adapter)
+    monkeypatch.setattr(
+        sim, "make_scheduler_link_adapter", lambda backing, _cfg: backing
+    )
 
     calls = {"measurement": 0, "reports": 0, "schedule": 0}
     original_measurement = sim.compute_gamma_measurement

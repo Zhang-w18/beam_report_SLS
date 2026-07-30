@@ -6,7 +6,6 @@ from typing import Dict, List, Mapping, Sequence, Set
 import numpy as np
 
 from .codebook import BeamId
-from .mcs import bler_from_sinr_db, select_mcs_from_sinr_lin
 from .measurement import MeasurementResult
 from .utils import lin_to_db
 
@@ -113,6 +112,8 @@ def make_reports(meas: MeasurementResult,
                  service_beam_indices_by_ue: Mapping[int, Sequence[int]] | None = None,
                  measured_beam_indices_by_ue: Mapping[int, Sequence[int]] | None = None,
                  ue_scheduling_clusters: Mapping[int, int] | None = None) -> Dict[str, List[UEReport]]:
+    if link_adapter is None:
+        raise ValueError("make_reports requires an explicit link-adaptation backend")
     out: Dict[str, List[UEReport]] = {s: [] for s in schemes}
     num_u = meas.service_power_w.shape[0]
     threshold_lin = float(10.0 ** (float(threshold_db) / 10.0))
@@ -146,14 +147,12 @@ def make_reports(meas: MeasurementResult,
             selected_for_adaptation[u].update(top)
 
     # Phase 2: call ILLA/MCS and outage only for the union of reportable beams.
-    # In the normal simulation link_adapter is always provided. The fallback
-    # keeps manually constructed MeasurementResult objects/tests compatible.
     for u, selected_beams in enumerate(selected_for_adaptation):
         beams = sorted(selected_beams)
         if not beams:
             continue
         sinr_values = np.asarray([float(meas.gamma[u, m, m]) for m in beams], dtype=float)
-        if link_adapter is not None and hasattr(link_adapter, "map_sinr_lin"):
+        if hasattr(link_adapter, "map_sinr_lin"):
             mcs_values, outage_values, _ = link_adapter.map_sinr_lin(sinr_values)
             for m, mcs, outage in zip(beams, np.asarray(mcs_values), np.asarray(outage_values)):
                 meas.su_mcs[u, m] = int(mcs)
@@ -161,19 +160,11 @@ def make_reports(meas: MeasurementResult,
                     meas.su_outage[u, m] = bool(outage)
         else:
             for m, sinr_lin in zip(beams, sinr_values):
-                if link_adapter is not None:
-                    mcs = int(link_adapter.select_mcs_from_sinr_lin(float(sinr_lin)))
-                    outage = bool(link_adapter.is_outage_from_sinr_lin(float(sinr_lin), mcs))
-                    meas.su_mcs[u, m] = mcs
-                    if meas.su_outage is not None:
-                        meas.su_outage[u, m] = outage
-                elif int(meas.su_mcs[u, m]) < 0:
-                    mcs = int(select_mcs_from_sinr_lin(float(sinr_lin)).index)
-                    meas.su_mcs[u, m] = mcs
-                    if meas.su_outage is not None:
-                        meas.su_outage[u, m] = bool(
-                            bler_from_sinr_db(float(meas.su_snr_db[u, m]), mcs) > 0.1
-                        )
+                mcs = int(link_adapter.select_mcs_from_sinr_lin(float(sinr_lin)))
+                outage = bool(link_adapter.is_outage_from_sinr_lin(float(sinr_lin), mcs))
+                meas.su_mcs[u, m] = mcs
+                if meas.su_outage is not None:
+                    meas.su_outage[u, m] = outage
 
     for scheme in schemes:
         for u in range(num_u):
@@ -213,7 +204,7 @@ def make_reports(meas: MeasurementResult,
                         float(meas.gamma[u, m, interferer_beam])
                         for interferer_beam in selected_interferers
                     ], dtype=float)
-                    if pair_sinr_lin.size and link_adapter is not None and hasattr(
+                    if pair_sinr_lin.size and hasattr(
                         link_adapter, "map_sinr_lin"
                     ):
                         pair_mcs_values, pair_outage_values, _ = (
@@ -227,28 +218,16 @@ def make_reports(meas: MeasurementResult,
                             pair_sinr_lin.size, dtype=bool
                         )
                         for i, sinr_lin in enumerate(pair_sinr_lin):
-                            if link_adapter is not None:
-                                pair_mcs = int(
-                                    link_adapter.select_mcs_from_sinr_lin(
-                                        float(sinr_lin)
-                                    )
+                            pair_mcs = int(
+                                link_adapter.select_mcs_from_sinr_lin(
+                                    float(sinr_lin)
                                 )
-                                pair_outage = bool(
-                                    link_adapter.is_outage_from_sinr_lin(
-                                        float(sinr_lin), pair_mcs
-                                    )
+                            )
+                            pair_outage = bool(
+                                link_adapter.is_outage_from_sinr_lin(
+                                    float(sinr_lin), pair_mcs
                                 )
-                            else:
-                                pair_mcs = int(
-                                    select_mcs_from_sinr_lin(
-                                        float(sinr_lin)
-                                    ).index
-                                )
-                                pair_outage = bool(
-                                    bler_from_sinr_db(
-                                        float(lin_to_db(sinr_lin)), pair_mcs
-                                    ) > 0.1
-                                )
+                            )
                             pair_mcs_values[i] = pair_mcs
                             pair_outage_values[i] = pair_outage
                     for i, interferer_beam in enumerate(selected_interferers):

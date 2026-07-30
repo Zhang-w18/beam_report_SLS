@@ -210,10 +210,6 @@ link_abstraction:
   olla_warmup_tti: 50
   olla_step_db: 0.1
   harq_enabled: true
-  bler_curve_slope: 1.1
-  fallback_snr_min_db: -8.0
-  fallback_snr_max_db: 35.0
-  fallback_snr_step_db: 0.05
 
 # The topology figure is always generated at figures/topology.png.
 coverage_heatmap:
@@ -224,7 +220,6 @@ progress:
 
 sionna:
   enable_import_probe: true
-  prefer_sionna_sys_phy_abstraction: true
   # Keep the configuration runnable on v2.12 installations without Sionna;
   # both the channel and link adapter will record the effective fallback.
   fallback_to_numpy_if_unavailable: true

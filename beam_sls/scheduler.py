@@ -9,7 +9,6 @@ import numpy as np
 
 from .codebook import BeamId
 from .feedback import UEReport
-from .mcs import bler_from_sinr_db, rate_mbps_from_mcs, select_mcs_from_sinr_lin
 from .utils import lin_to_db
 
 
@@ -129,6 +128,8 @@ def schedule(reports: List[UEReport],
              link_adapter=None,
              algorithm: str | None = None,
              progress_callback: Callable[[str], None] | None = None) -> ScheduleResult:
+    if link_adapter is None:
+        raise ValueError("schedule requires an explicit link-adaptation backend")
     cluster_mode = normalize_cluster_mode(cfg["scheduler"])
     domain_mode = {
         "per_cell": "per_sector_independent",
@@ -262,16 +263,6 @@ def _aggregate_domain_stats(domains: Sequence[Dict]) -> Dict:
     return totals
 
 
-def _rate_kwargs(cfg: Dict) -> Dict:
-    return {
-        "num_prbs": int(cfg["pdsch"]["num_prbs"]),
-        "num_symbols": int(cfg["pdsch"]["num_symbols"]),
-        "dmrs_overhead_re_per_prb": int(cfg["pdsch"].get("dmrs_overhead_re_per_prb", 0)),
-        "slot_duration_ms": float(cfg["pdsch"].get("slot_duration_ms", 0.125)),
-        "num_layers": int(cfg["pdsch"].get("num_layers_per_ue", 1)),
-    }
-
-
 def _pf_weight(ue_id: int, cfg: Dict, tbar_mbps: Dict[int, float] | None) -> float:
     if cfg["scheduler"].get("objective", "sum_rate") != "proportional_fair":
         return 1.0
@@ -388,7 +379,8 @@ def _evaluate_assignments(assignments: Sequence[Tuple[int, int]],
 
     rep_by_ue = {r.ue_id: r for r in reports}
     scheme = reports[0].scheme if reports else "unknown"
-    rate_kwargs = _rate_kwargs(cfg)
+    if link_adapter is None:
+        raise ValueError("_evaluate_assignments requires a link-adaptation backend")
     if penalty_lambda is None:
         penalty_lambda = float(cfg["scheduler"].get("conflict_penalty_lambda", 0.0))
 
@@ -412,12 +404,10 @@ def _evaluate_assignments(assignments: Sequence[Tuple[int, int]],
                     rep, b, other_b, s, float(rep.full_noise_power_w), cfg
                 )
             pred_sinr_lin = s / max(den, 1e-30)
-            if link_adapter is not None:
-                mcs = int(link_adapter.select_mcs_from_sinr_lin(float(pred_sinr_lin)))
-                outage = bool(link_adapter.is_outage_from_sinr_lin(float(pred_sinr_lin), mcs))
-            else:
-                mcs = select_mcs_from_sinr_lin(pred_sinr_lin).index
-                outage = bool(bler_from_sinr_db(float(lin_to_db(pred_sinr_lin)), mcs) > 0.1)
+            mcs = int(link_adapter.select_mcs_from_sinr_lin(float(pred_sinr_lin)))
+            outage = bool(
+                link_adapter.is_outage_from_sinr_lin(float(pred_sinr_lin), mcs)
+            )
             pred_sinr_db = float(lin_to_db(pred_sinr_lin))
         else:
             # Limited-feedback scheduler uses SU MCS/rate and an ID-only conflict
@@ -431,10 +421,8 @@ def _evaluate_assignments(assignments: Sequence[Tuple[int, int]],
 
         if outage:
             r_mbps = 0.0
-        elif link_adapter is not None:
-            r_mbps = float(link_adapter.rate_mbps(mcs))
         else:
-            r_mbps = rate_mbps_from_mcs(mcs, **rate_kwargs)
+            r_mbps = float(link_adapter.rate_mbps(mcs))
         utility += _pf_weight(ue_id, cfg, tbar_mbps) * r_mbps
         links.append(ScheduledLink(ue_id=ue_id,
                                    beam_index=b,
@@ -484,9 +472,9 @@ def _candidate_rate_mbps(rep: UEReport,
         return 0.0
     if cand.su_outage:
         return 0.0
-    if link_adapter is not None:
-        return float(link_adapter.rate_mbps(int(cand.su_mcs)))
-    return float(rate_mbps_from_mcs(int(cand.su_mcs), **_rate_kwargs(cfg)))
+    if link_adapter is None:
+        raise ValueError("_candidate_rate_mbps requires a link-adaptation backend")
+    return float(link_adapter.rate_mbps(int(cand.su_mcs)))
 
 
 def _resolve_conflict_penalty(reports: Sequence[UEReport],
@@ -741,16 +729,14 @@ def _map_scheduler_sinr_lin(sinr_lin: np.ndarray,
     mcs = np.empty(flat.size, dtype=np.int32)
     outage = np.empty(flat.size, dtype=bool)
     rates = np.empty(flat.size, dtype=float)
-    rate_kwargs = _rate_kwargs(cfg)
+    if link_adapter is None:
+        raise ValueError("_map_scheduler_sinr_lin requires a link-adaptation backend")
     for i, value in enumerate(flat):
-        if link_adapter is not None:
-            selected = int(link_adapter.select_mcs_from_sinr_lin(float(value)))
-            is_outage = bool(link_adapter.is_outage_from_sinr_lin(float(value), selected))
-            rate = 0.0 if is_outage else float(link_adapter.rate_mbps(selected))
-        else:
-            selected = int(select_mcs_from_sinr_lin(float(value)).index)
-            is_outage = bool(bler_from_sinr_db(float(lin_to_db(value)), selected) > 0.1)
-            rate = 0.0 if is_outage else float(rate_mbps_from_mcs(selected, **rate_kwargs))
+        selected = int(link_adapter.select_mcs_from_sinr_lin(float(value)))
+        is_outage = bool(
+            link_adapter.is_outage_from_sinr_lin(float(value), selected)
+        )
+        rate = 0.0 if is_outage else float(link_adapter.rate_mbps(selected))
         mcs[i] = selected
         outage[i] = is_outage
         rates[i] = rate
@@ -769,10 +755,7 @@ def _node_arrays(reports: Sequence[UEReport],
     beam_keys = [_beam_occupancy_key(beam_ids[int(b)], cfg) for b in beam_indices]
     weights = np.asarray([_pf_weight(r.ue_id, cfg, tbar_mbps) for r, _ in nodes], dtype=float)
     rates = np.asarray([
-        0.0 if c.su_outage else (
-            float(link_adapter.rate_mbps(int(c.su_mcs))) if link_adapter is not None
-            else float(rate_mbps_from_mcs(int(c.su_mcs), **_rate_kwargs(cfg)))
-        )
+        0.0 if c.su_outage else float(link_adapter.rate_mbps(int(c.su_mcs)))
         for _, c in nodes
     ], dtype=float)
     return nodes, ue_ids, beam_indices, panel_keys, beam_keys, weights, rates

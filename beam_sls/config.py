@@ -247,9 +247,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         },
     },
     "link_abstraction": {
-        # v2 preferred path: Sionna SYS PHYAbstraction + ILLA. If sionna.sys or
-        # torch is unavailable and sionna.fallback_to_numpy_if_unavailable=true,
-        # a local precomputed-table fallback is used and recorded in status JSON.
+        # Required path: Sionna SYS PHYAbstraction + ILLA. Link adaptation never
+        # falls back to the local MCS surrogate.
         "mode": "sionna_sys_precomputed_bler",
         "mcs_table_index": 1,
         # Sionna SYS category 1 is downlink PDSCH. Category 0 is PUSCH.
@@ -262,10 +261,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # evolves during warmup, but warmup rows are excluded from all metrics.
         "olla_warmup_tti": 0,
         "harq_enabled": True,
-        "bler_curve_slope": 1.1,
-        "fallback_snr_min_db": -8.0,
-        "fallback_snr_max_db": 35.0,
-        "fallback_snr_step_db": 0.05,
     },
     "coverage_heatmap": {
         "enabled": True,
@@ -287,8 +282,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "sionna": {
         "enable_import_probe": True,
-        "prefer_sionna_sys_phy_abstraction": True,
-        "fallback_to_numpy_if_unavailable": True,
+        "fallback_to_numpy_if_unavailable": False,
         "device": None,
         "precision": None,
         "bs_polarization": "dual",

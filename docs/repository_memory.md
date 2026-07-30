@@ -42,8 +42,8 @@ python -m beam_sls.run \
 | `beam_sls/feedback.py` | 从测量结果构造不同反馈方案的 UE report | `ServiceCandidate`, `UEReport`, `make_reports` |
 | `beam_sls/evaluation.py` | feedback × algorithm 实验矩阵和 case ID | `EvaluationCase`, `EvaluationPlan`, `resolve_evaluation_plan` |
 | `beam_sls/scheduler.py` | 调度域、greedy/exhaustive/硬冲突算法、PF 目标 | `schedule`, `_evaluate_assignments`, `update_pf_throughput` |
-| `beam_sls/link_adaptation.py` | Sionna SYS/本地 fallback 链路抽象、调度查表加速 | `BaseLinkAdapter`, `make_link_adapter`, `SchedulerLinkLookup` |
-| `beam_sls/mcs.py` | 本地 MCS、BLER、TBS、速率公式 | `select_mcs_from_sinr_db`, `bler_from_sinr_db`, `tbs_bits_from_mcs` |
+| `beam_sls/link_adaptation.py` | Sionna SYS 链路抽象、调度查表加速、标准 TBS | `SionnaSYSAdapter`, `make_link_adapter`, `SchedulerLinkLookup` |
+| `beam_sls/mcs.py` | TS 38.214 PDSCH Table 1 与独立标准 TBS/速率工具 | `MCS_TABLE`, `tbs_bits_from_mcs`, `rate_mbps_from_mcs` |
 | `beam_sls/link.py` | 调度后真实 SINR、EESM、ACK/NACK、OLLA、单/多 TTI 链路评估 | `realized_sinr_grid`, `run_tti_loop`, `run_one_tti` |
 | `beam_sls/sim.py` | 整合 drop/TTI/case 循环、状态生命周期、指标输出和绘图 | `run_simulation`, `summarize_results`, `make_plots` |
 | `beam_sls/coverage.py` | coverage heatmap、固定垂直波束 CDF | `compute_coverage_heatmap_standard_sampling`, `compute_fixed_vertical_beam_cdf` |
@@ -302,13 +302,13 @@ Tbar_i[t+1] = (1-alpha)*Tbar_i[t] + alpha*actual_goodput_i[t]
 OLLA 为每个 `(case_id, UE)` 维护 backoff `b`：
 
 ```text
-mcs_selection_sinr_db = effective_sinr_db - b
+mcs_selection_sinr_db = predicted_sinr_db - b
 
 ACK:  b <- b - delta
 NACK: b <- b + delta*(1-target_bler)/target_bler
 ```
 
-这种不对称步长使期望更新量在目标 BLER 处为零。OLLA 在同一 drop 的 TTI 间保持，
+`effective_sinr_db` 只用于给已选 MCS 查询 TBLER/ACK，不参与 MCS 选择。这种不对称步长使期望更新量在目标 BLER 处为零。OLLA 在同一 drop 的 TTI 间保持，
 新 drop 重置。warmup TTI 更新 OLLA，但不进入正式吞吐/BLER/CDF。
 
 ## 9. 共同随机数与对比
@@ -372,7 +372,7 @@ NACK: b <- b + delta*(1-target_bler)/target_bler
 | `tests/test_smoke.py` | 主流程、链路、OLLA warmup、输出与基础工具 |
 | `tests/test_array_config.py` | 阵列、panel、极化、码本和 Sionna 天线映射 |
 | `tests/test_scheduler_v210.py` | optimized/legacy 调度一致性和资源约束 |
-| `tests/test_sionna_link_adapter.py` | Sionna SYS/fallback 链路适配 |
+| `tests/test_sionna_link_adapter.py` | Sionna SYS 链路适配与标准 MCS/TBS |
 | `tests/test_evaluation.py` | evaluation matrix 和 case |
 | `tests/test_plot_cdf.py` | CDF 数据处理与绘图输入 |
 | `tests/test_pf_continuous_tti.py` | PF EWMA 和连续 TTI 多普勒状态 |

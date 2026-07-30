@@ -6,7 +6,6 @@ from typing import Dict, List, Sequence, Tuple
 import numpy as np
 
 from .codebook import ArrayConfig, BeamId, extract_panel_tx_dimension
-from .mcs import bler_from_sinr_db, select_mcs_from_sinr_db, tbs_bits_from_mcs
 from .measurement import MeasurementResult
 from .scheduler import ScheduleResult
 from .utils import lin_to_db
@@ -142,13 +141,14 @@ def run_tti_loop(schedule: ScheduleResult,
                  initial_olla: Dict[Tuple[str, int], float] | None = None,
                  link_adapter=None,
                  ignore_interference: bool = False) -> Tuple[List[LinkEvalRow], Dict[Tuple[str, int], float]]:
+    if link_adapter is None:
+        raise ValueError("run_tti_loop requires an explicit link-adaptation backend")
     num_tti = int(cfg["system"].get("num_tti_per_drop", 1))
     warmup_tti = int(cfg["link_abstraction"].get("olla_warmup_tti", 0))
     if warmup_tti < 0:
         raise ValueError("link_abstraction.olla_warmup_tti must be >= 0")
     slot_ms = float(cfg["pdsch"].get("slot_duration_ms", 0.125))
     beta_db = float(cfg["link_abstraction"].get("eesm_beta_db", 5.0))
-    slope = float(cfg["link_abstraction"].get("bler_curve_slope", 1.1))
     target = float(cfg["system"].get("target_bler", 0.1))
     olla_enabled = bool(cfg["link_abstraction"].get("olla_enabled", True))
     olla_step = float(cfg["link_abstraction"].get("olla_step_db", 0.1))
@@ -174,38 +174,21 @@ def run_tti_loop(schedule: ScheduleResult,
             off = float(olla.get(key, 0.0))
             sinr_eff_lin = eesm(sinr_grid[link.ue_id], beta_db=beta_db)
             eff_db = float(lin_to_db(sinr_eff_lin))
-            # Re-run link adaptation on the realized post-scheduling SINR. This
-            # is the actual-link evaluation stage; predicted MCS/SINR remain in
-            # the schedule for comparing scheduler expectation with outcome.
+            # MCS selection is causal: the scheduler only knows the reported /
+            # predicted SINR and its OLLA state. The realized post-scheduling
+            # SINR is simulator truth and is used only for TBLER/ACK evaluation.
             if olla_enabled:
-                mcs_selection_sinr_db = float(eff_db - off)
-                if link_adapter is not None:
-                    actual_mcs = int(link_adapter.select_mcs_from_sinr_db(mcs_selection_sinr_db))
-                else:
-                    actual_mcs = select_mcs_from_sinr_db(mcs_selection_sinr_db).index
+                mcs_selection_sinr_db = float(link.predicted_sinr_db - off)
             else:
-                mcs_selection_sinr_db = float(eff_db)
-                if link_adapter is not None:
-                    actual_mcs = int(link_adapter.select_mcs_from_sinr_db(mcs_selection_sinr_db))
-                else:
-                    actual_mcs = select_mcs_from_sinr_db(mcs_selection_sinr_db).index
-            if link_adapter is not None:
-                tbler = float(link_adapter.tbler_from_sinr_db(eff_db, actual_mcs))
-            else:
-                tbler = bler_from_sinr_db(eff_db, actual_mcs, slope=slope)
+                mcs_selection_sinr_db = float(link.predicted_sinr_db)
+            actual_mcs = int(
+                link_adapter.select_mcs_from_sinr_db(mcs_selection_sinr_db)
+            )
+            tbler = float(link_adapter.tbler_from_sinr_db(eff_db, actual_mcs))
             ack_random_uniform = float(rng.uniform())
             ack = int(ack_random_uniform > tbler)
             if ack:
-                if link_adapter is not None:
-                    goodput_bits = int(link_adapter.tbs_bits(actual_mcs))
-                else:
-                    goodput_bits = tbs_bits_from_mcs(
-                        actual_mcs,
-                        num_prbs=int(cfg["pdsch"]["num_prbs"]),
-                        num_symbols=int(cfg["pdsch"]["num_symbols"]),
-                        dmrs_overhead_re_per_prb=int(cfg["pdsch"].get("dmrs_overhead_re_per_prb", 0)),
-                        num_layers=int(cfg["pdsch"].get("num_layers_per_ue", 1)),
-                    )
+                goodput_bits = int(link_adapter.tbs_bits(actual_mcs))
             else:
                 goodput_bits = 0
             goodput_mbps = goodput_bits / (slot_ms * 1e-3) / 1e6
@@ -234,7 +217,9 @@ def run_tti_loop(schedule: ScheduleResult,
                     algorithm=schedule.algorithm or schedule.metadata.get("algorithm"),
                 ))
             if olla_enabled:
-                # off is a backoff subtracted from predicted_sinr_db.
+                # Positive off is a backoff; a negative value boosts the
+                # reported/predicted SINR. It is never applied to simulator
+                # truth (effective_sinr_db).
                 if ack:
                     off -= olla_step
                 else:

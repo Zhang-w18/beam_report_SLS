@@ -1,7 +1,9 @@
 import csv
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
+import beam_sls.sim as sim_module
 
 from beam_sls.codebook import BeamId
 from beam_sls.config import load_config
@@ -20,8 +22,9 @@ from beam_sls.topology import make_topology
 from beam_sls.utils import occupied_bandwidth_hz
 
 
-def test_smoke(tmp_path: Path):
+def test_smoke(tmp_path: Path, monkeypatch):
     cfg = load_config(None)
+    cfg["scenario"]["channel_model"] = "numpy_geometric_uma"
     cfg["system"]["num_drops"] = 1
     cfg["system"]["num_tti_per_drop"] = 1
     cfg["ue_drop"]["num_ut_per_sector"] = 1
@@ -34,6 +37,11 @@ def test_smoke(tmp_path: Path):
     cfg["ue_array"]["max_beams"] = 4
     cfg["scheduler"]["algorithm"] = "greedy"
     cfg["coverage_heatmap"]["enabled"] = False
+    adapter = _OutageAwareFakeAdapter()
+    monkeypatch.setattr(sim_module, "make_link_adapter", lambda _cfg: adapter)
+    monkeypatch.setattr(
+        sim_module, "make_scheduler_link_adapter", lambda backing, _cfg: backing
+    )
     summary = run_simulation(cfg, tmp_path / "out")
     assert "baseline" in summary
     assert (tmp_path / "out" / "metrics" / "summary.csv").exists()
@@ -190,7 +198,7 @@ def test_occupied_bandwidth_is_derived_from_prbs_and_scs():
     assert occupied_bandwidth_hz(cfg) == 190.08e6
 
 
-def test_actual_mcs_uses_realized_post_scheduling_sinr():
+def test_actual_mcs_uses_predicted_sinr_not_realized_post_scheduling_sinr():
     class RealizedSinrAdapter:
         selected_sinr_db = []
 
@@ -243,9 +251,11 @@ def test_actual_mcs_uses_realized_post_scheduling_sinr():
     )
 
     assert rows[0].effective_sinr_db > 50.0
-    assert rows[0].mcs_selection_sinr_db == rows[0].effective_sinr_db
-    assert RealizedSinrAdapter.selected_sinr_db == [rows[0].effective_sinr_db]
-    assert rows[0].actual_mcs == 7
+    assert rows[0].mcs_selection_sinr_db == schedule.links[0].predicted_sinr_db
+    assert RealizedSinrAdapter.selected_sinr_db == [
+        schedule.links[0].predicted_sinr_db
+    ]
+    assert rows[0].actual_mcs == 0
 
 
 def test_olla_warmup_updates_state_but_is_excluded_from_metrics():
@@ -385,11 +395,12 @@ def test_site_domain_feedback_and_schedule():
         ue_site_ids={0: 0, 1: 1},
         ue_serving_cells={0: 0, 1: 2},
         candidate_beam_indices_by_ue={0: [0, 1], 1: [2, 3]},
+        link_adapter=_OutageAwareFakeAdapter(),
     )["baseline"]
 
     assert reports[0].candidates[0].beam_index == 1
     assert reports[1].candidates[0].beam_index == 3
-    sched = schedule(reports, beam_ids, cfg)
+    sched = schedule(reports, beam_ids, cfg, link_adapter=_OutageAwareFakeAdapter())
     assert sched.metadata["domain_mode"] == "per_site_joint"
     assert len(sched.links) == 2
     assert {beam_ids[l.beam_index].trp for l in sched.links} == {0, 1}
@@ -420,11 +431,12 @@ def test_single_site_three_sector_independent_is_sector_domain():
         ue_site_ids={0: 0, 1: 0},
         ue_serving_cells={0: 0, 1: 1},
         candidate_beam_indices_by_ue={0: [0], 1: [1]},
+        link_adapter=_OutageAwareFakeAdapter(),
     )["baseline"]
 
     assert reports[0].candidates[0].beam_index == 0
     assert reports[1].candidates[0].beam_index == 1
-    sched = schedule(reports, beam_ids, cfg)
+    sched = schedule(reports, beam_ids, cfg, link_adapter=_OutageAwareFakeAdapter())
     assert sched.metadata["domain_mode"] == "per_sector_independent"
     assert len(sched.links) == 2
     assert {l.beam_index for l in sched.links} == {0, 1}
@@ -456,7 +468,7 @@ def test_scheduler_groups_reports_by_unique_static_cluster():
         {"cluster_id": 8, "cell_ids": [2]},
     ]
     cfg["_resolved"] = {"max_mu_order": 1}
-    result = schedule(reports, beam_ids, cfg)
+    result = schedule(reports, beam_ids, cfg, link_adapter=_OutageAwareFakeAdapter())
     assert result.links
     assert result.metadata["domain_mode"] == "static_cluster"
     assert result.metadata["num_domains"] == 1
@@ -683,8 +695,9 @@ def test_exhaustive_pruning_matches_unpruned_small_case():
         "branch_and_bound": False,
     }
 
-    pruned = exhaustive_schedule(reports, beam_ids, cfg_pruned)
-    unpruned = exhaustive_schedule(reports, beam_ids, cfg_unpruned)
+    adapter = _OutageAwareFakeAdapter()
+    pruned = exhaustive_schedule(reports, beam_ids, cfg_pruned, link_adapter=adapter)
+    unpruned = exhaustive_schedule(reports, beam_ids, cfg_unpruned, link_adapter=adapter)
     assert np.isclose(pruned.objective_value, unpruned.objective_value)
     assert pruned.metadata["stats"]["evaluated_assignment_count"] <= unpruned.metadata["stats"]["evaluated_assignment_count"]
 
@@ -709,7 +722,7 @@ def test_hard_conflict_greedy_removes_candidate_not_entire_ue():
         ]),
     ]
 
-    result = schedule(reports, beam_ids, cfg)
+    result = schedule(reports, beam_ids, cfg, link_adapter=_OutageAwareFakeAdapter())
 
     assert {(l.ue_id, l.beam_index) for l in result.links} == {(0, 0), (1, 2)}
     assert result.metadata["stats"]["removed_conflicting_candidates"] == 1
@@ -800,6 +813,14 @@ def test_system_goodput_helpers_include_zero_ttis_and_average_each_drop():
 
 class _OutageAwareFakeAdapter:
     target_bler = 0.1
+    num_mcs = 29
+    status = SimpleNamespace(
+        backend="unit_test",
+        status="OK",
+        target_bler=0.1,
+        mcs_table_index=1,
+        mcs_category=1,
+    )
 
     @staticmethod
     def select_mcs_from_sinr_lin(_sinr_lin):
@@ -812,6 +833,18 @@ class _OutageAwareFakeAdapter:
     @staticmethod
     def rate_mbps(mcs):
         return float(mcs * 10.0)
+
+    @staticmethod
+    def select_mcs_from_sinr_db(_sinr_db):
+        return 3
+
+    @staticmethod
+    def tbler_from_sinr_db(_sinr_db, _mcs):
+        return 0.0
+
+    @staticmethod
+    def tbs_bits(mcs):
+        return int(mcs * 1000)
 
 
 def test_report_link_adapts_service_beams_once_and_topk_interference_pairs():
@@ -934,6 +967,7 @@ def test_full_gamma_unknown_unmeasured_interference_uses_zero_policy():
 
     _utility, links = _evaluate_assignments(
         [(0, 0), (1, 1)], reports, beam_ids, cfg, None,
+        link_adapter=_OutageAwareFakeAdapter(),
     )
 
     assert len(links) == 2

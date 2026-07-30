@@ -184,11 +184,6 @@ link_abstraction:
   # Extra OLLA-only TTIs before the 50 measured TTIs; warmup is not counted.
   olla_warmup_tti: 0
   harq_enabled: true
-  # Fallback table parameters, used only if Sionna SYS is unavailable and fallback is enabled.
-  bler_curve_slope: 1.1
-  fallback_snr_min_db: -8.0
-  fallback_snr_max_db: 35.0
-  fallback_snr_step_db: 0.05
 
 coverage_heatmap:
   enabled: true
@@ -207,7 +202,6 @@ progress:
 
 sionna:
   enable_import_probe: true
-  prefer_sionna_sys_phy_abstraction: true
   fallback_to_numpy_if_unavailable: false
   device: null
   precision: null
