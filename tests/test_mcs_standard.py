@@ -43,13 +43,15 @@ def test_sionna_adapter_rate_and_tbs_use_sionna_nr_utilities():
     cfg = load_config(None)
     adapter = object.__new__(SionnaSYSAdapter)
     BaseLinkAdapter.__init__(adapter, cfg)
-    calls = {}
+    calls = {"decode_count": 0, "tbs_count": 0}
 
     def decode_mcs_index(mcs_index, **kwargs):
+        calls["decode_count"] += 1
         calls["decode"] = (mcs_index, kwargs)
         return 4, 340 / 1024
 
     def calculate_tb_size(**kwargs):
+        calls["tbs_count"] += 1
         calls["tbs"] = kwargs
         return 22032, 0, 0, 0, 0, 0
 
@@ -58,6 +60,9 @@ def test_sionna_adapter_rate_and_tbs_use_sionna_nr_utilities():
 
     assert adapter.tbs_bits(10) == 22032
     assert np.isclose(adapter.rate_mbps(10), 176.256)
+    assert adapter.tbs_bits(10) == 22032
+    assert calls["decode_count"] == 1
+    assert calls["tbs_count"] == 1
     assert calls["decode"][0] == 10
     assert calls["decode"][1] == {"table_index": 1, "is_pusch": False}
     assert calls["tbs"]["modulation_order"] == 4

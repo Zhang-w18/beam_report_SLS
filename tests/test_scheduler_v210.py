@@ -52,6 +52,16 @@ class _LookupReferenceAdapter(BaseLinkAdapter):
         return float((int(mcs_index) + 1) * 7.0)
 
 
+class _CountingLookupReferenceAdapter(_LookupReferenceAdapter):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.rate_call_count = 0
+
+    def rate_mbps(self, mcs_index):
+        self.rate_call_count += 1
+        return super().rate_mbps(mcs_index)
+
+
 def _beam_ids(count):
     return [
         BeamId(cell=0, trp=0, panel=i, beam=0, global_index=i, tx_unit=i)
@@ -137,6 +147,19 @@ def test_scheduler_lookup_matches_reference_across_decision_boundaries():
     assert np.array_equal(outage, expected_outage)
     assert np.array_equal(rates, expected_rates)
     assert lookup.status["num_boundaries"] == 3
+
+
+def test_scheduler_lookup_rate_uses_precomputed_cache():
+    cfg = load_config(None)
+    reference = _CountingLookupReferenceAdapter(cfg)
+    lookup = SchedulerLinkLookup(reference, cfg)
+    build_rate_calls = reference.rate_call_count
+
+    assert build_rate_calls == reference.num_mcs
+    for _ in range(100):
+        assert lookup.rate_mbps(10) == 77.0
+    assert reference.rate_call_count == build_rate_calls
+    assert lookup.status["rate_cache_size"] == reference.num_mcs
 
 
 def test_incremental_limited_feedback_matches_v29_reference_greedy():

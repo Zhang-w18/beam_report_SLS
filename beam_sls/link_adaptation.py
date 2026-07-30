@@ -129,6 +129,10 @@ class SionnaSYSAdapter(BaseLinkAdapter):
         self.tf = tf
         self.calculate_tb_size = calculate_tb_size
         self.decode_mcs_index = decode_mcs_index
+        # MCS decoding and TBS depend only on the adapter configuration and the
+        # MCS index. Keep TensorFlow/Sionna out of per-candidate/per-TTI paths.
+        self._mcs_parameters_cache: Dict[int, Tuple[int, float]] = {}
+        self._tbs_bits_cache: Dict[int, int] = {}
         la = cfg.get("link_abstraction", {})
         device = cfg.get("sionna", {}).get("device", None)
         precision = cfg.get("sionna", {}).get("precision", None)
@@ -175,22 +179,41 @@ class SionnaSYSAdapter(BaseLinkAdapter):
         return int(round(self._to_float(x)))
 
     def _mcs_parameters(self, mcs_index: int) -> Tuple[int, float]:
+        index = int(mcs_index)
+        cache = getattr(self, "_mcs_parameters_cache", None)
+        if cache is None:
+            cache = {}
+            self._mcs_parameters_cache = cache
+        if index in cache:
+            return cache[index]
         try:
             modulation_order, target_coderate = self.decode_mcs_index(
-                int(mcs_index),
+                index,
                 table_index=int(self.mcs_table_index),
                 is_pusch=bool(self.mcs_category == 0),
             )
-            return self._to_int(modulation_order), self._to_float(target_coderate)
+            parameters = (
+                self._to_int(modulation_order),
+                self._to_float(target_coderate),
+            )
+            cache[index] = parameters
+            return parameters
         except Exception as e:
             raise LinkAdaptationBackendError(
-                f"Sionna MCS decoding failed for index {mcs_index}: "
+                f"Sionna MCS decoding failed for index {index}: "
                 f"{type(e).__name__}: {e}"
             ) from e
 
     def tbs_bits(self, mcs_index: int) -> int:
         """Use Sionna's TS 38.214 MCS decoder and TBS calculation."""
-        modulation_order, target_coderate = self._mcs_parameters(mcs_index)
+        index = int(mcs_index)
+        cache = getattr(self, "_tbs_bits_cache", None)
+        if cache is None:
+            cache = {}
+            self._tbs_bits_cache = cache
+        if index in cache:
+            return cache[index]
+        modulation_order, target_coderate = self._mcs_parameters(index)
         pdsch = self.cfg.get("pdsch", {})
         try:
             result = self.calculate_tb_size(
@@ -203,10 +226,14 @@ class SionnaSYSAdapter(BaseLinkAdapter):
                 ),
                 num_layers=int(pdsch.get("num_layers_per_ue", 1)),
             )
-            return self._to_int(result[0] if isinstance(result, (tuple, list)) else result)
+            tbs_bits = self._to_int(
+                result[0] if isinstance(result, (tuple, list)) else result
+            )
+            cache[index] = tbs_bits
+            return tbs_bits
         except Exception as e:
             raise LinkAdaptationBackendError(
-                f"Sionna TBS calculation failed for MCS {mcs_index}: "
+                f"Sionna TBS calculation failed for MCS {index}: "
                 f"{type(e).__name__}: {e}"
             ) from e
 
@@ -354,6 +381,7 @@ class SchedulerLinkLookup:
             "num_decision_regions": int(len(self.region_mcs)),
             "num_boundaries": int(len(self.boundaries_db)),
             "validation_points": int(self.validated_point_count),
+            "rate_cache_size": int(len(self.rate_by_mcs)),
             "build_elapsed_s": self.build_elapsed_s,
         }
 
@@ -362,7 +390,13 @@ class SchedulerLinkLookup:
         return float(self.backing.target_bler)
 
     def rate_mbps(self, mcs_index: int) -> float:
-        return float(self.backing.rate_mbps(int(mcs_index)))
+        index = int(mcs_index)
+        if index < 0 or index >= len(self.rate_by_mcs):
+            raise ValueError(
+                f"MCS index {index} outside scheduler rate cache "
+                f"[0, {len(self.rate_by_mcs) - 1}]"
+            )
+        return float(self.rate_by_mcs[index])
 
     def tbs_bits(self, mcs_index: int) -> int:
         return int(self.backing.tbs_bits(int(mcs_index)))
