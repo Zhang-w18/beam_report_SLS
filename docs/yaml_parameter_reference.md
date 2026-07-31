@@ -374,6 +374,11 @@ $$
 | `olla_step_db` | OLLA 步长 | 正数，dB | 默认 0.1 dB。 |
 | `olla_warmup_tti` | 每个 drop 的 OLLA 预热 TTI 数 | 非负整数 | 默认 `0`。预热期间正常抽样 ACK、更新 MCS/OLLA，但不写入 `link_tti.csv`，也不进入吞吐、BLER、CDF 等统计；`system.num_tti_per_drop` 始终只表示正式统计 TTI 数。 |
 | `harq_enabled` | HARQ 预留开关 | `true`/`false` | 当前为预留/记录字段。 |
+| `tbler_lookup.enabled` | 是否启用 PHY TBLER 预计算表 | `true`/`false` | 默认 `true`。初始化时批量调用正式 Sionna `PHYAbstraction`，TTI 循环仅做 NumPy 插值；关闭后仍按 TTI 批量调用 PHY。 |
+| `tbler_lookup.sinr_min_db` | TBLER 表 SINR 下限 | 浮点数，dB | 默认 `-40.0`；低于下限的运行期值使用端点 TBLER。 |
+| `tbler_lookup.sinr_max_db` | TBLER 表 SINR 上限 | 浮点数，dB | 默认 `80.0`；高于上限的运行期值使用端点 TBLER。 |
+| `tbler_lookup.sinr_step_db` | TBLER 表 SINR 网格间隔 | 正数，dB | 默认 `0.1`；运行期对相邻网格点做线性插值。 |
+| `tbler_lookup.build_batch_size` | 初始化 Sionna PHY 批量大小 | 正整数 | 默认 `65536`；用于限制构表峰值内存。 |
 
 下行 PDSCH、目标 BLER 10% 的推荐配置：
 
@@ -386,6 +391,12 @@ link_abstraction:
   mcs_table_index: 1
   mcs_category: 1
   olla_warmup_tti: 100
+  tbler_lookup:
+    enabled: true
+    sinr_min_db: -40.0
+    sinr_max_db: 80.0
+    sinr_step_db: 0.1
+    build_batch_size: 65536
 ```
 
 ---

@@ -205,8 +205,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # v2.10 optimized greedy keeps the v2.9 implementation available as a
         # reference path for regression checks.
         "optimized_greedy": True,
-        # Scheduler-only SINR decision lookup. Actual TTI link evaluation keeps
-        # using the original link-abstraction backend.
+        # SINR decision lookup shared by scheduling and actual-MCS selection.
+        # Boundary/out-of-range fallbacks use the original Sionna ILLA backend.
         "link_lookup": {
             "enabled": True,
             "sinr_min_db": -40.0,
@@ -247,8 +247,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         },
     },
     "link_abstraction": {
-        # Required path: Sionna SYS PHYAbstraction + ILLA. Link adaptation never
-        # falls back to the local MCS surrogate.
+        # Required source: Sionna SYS PHYAbstraction + ILLA. Runtime TBLER can
+        # use the Sionna-generated interpolation table below.
         "mode": "sionna_sys_precomputed_bler",
         "mcs_table_index": 1,
         # Sionna SYS category 1 is downlink PDSCH. Category 0 is PUSCH.
@@ -261,6 +261,16 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # evolves during warmup, but warmup rows are excluded from all metrics.
         "olla_warmup_tti": 0,
         "harq_enabled": True,
+        # Precompute TBLER(SINR, MCS) with batched Sionna PHYAbstraction calls,
+        # then use NumPy interpolation in the TTI loop. When disabled, each TTI
+        # still evaluates all scheduled UEs in one batched PHY call.
+        "tbler_lookup": {
+            "enabled": True,
+            "sinr_min_db": -40.0,
+            "sinr_max_db": 80.0,
+            "sinr_step_db": 0.1,
+            "build_batch_size": 65536,
+        },
     },
     "coverage_heatmap": {
         "enabled": True,

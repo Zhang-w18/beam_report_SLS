@@ -22,7 +22,11 @@ from .coverage import compute_coverage_heatmap_standard_sampling, compute_fixed_
 from .evaluation import EvaluationCase, resolve_evaluation_plan
 from .feedback import make_reports
 from .link import LinkEvalRow, run_one_tti, run_tti_loop
-from .link_adaptation import make_link_adapter, make_scheduler_link_adapter
+from .link_adaptation import (
+    make_link_adapter,
+    make_phy_tbler_adapter,
+    make_scheduler_link_adapter,
+)
 from .measurement import associate_ues_by_average_rsrp, compute_gamma_measurement
 from .rf import resolve_rf_architecture, resolved_max_mu_order, trps_per_sector
 from .plotting import plot_bar, plot_best_beam_heatmap, plot_cdf, plot_heatmap, plot_topology
@@ -620,10 +624,21 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
         write_json(out_dir / "sionna_import_probe.json", SionnaImportProbe().run())
 
     link_adapter = make_link_adapter(cfg)
+    scheduler_build_before = _counter_snapshot(link_adapter)
     scheduler_link_adapter = make_scheduler_link_adapter(link_adapter, cfg)
+    scheduler_build_counters = _counter_delta(
+        scheduler_build_before, _counter_snapshot(link_adapter),
+    )
+    phy_lookup_build_before = _counter_snapshot(link_adapter)
+    phy_link_adapter = make_phy_tbler_adapter(link_adapter, cfg)
+    phy_lookup_build_counters = _counter_delta(
+        phy_lookup_build_before, _counter_snapshot(link_adapter),
+    )
     link_status = dict(link_adapter.status.__dict__)
     if scheduler_link_adapter is not link_adapter and hasattr(scheduler_link_adapter, "status"):
         link_status["scheduler_lookup"] = dict(scheduler_link_adapter.status)
+    if phy_link_adapter is not link_adapter:
+        link_status["phy_tbler_lookup"] = dict(phy_link_adapter.lookup_status)
     write_json(out_dir / "link_abstraction_status.json", link_status)
     if scheduler_link_adapter is not link_adapter:
         lookup_status = scheduler_link_adapter.status
@@ -631,6 +646,14 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             cfg,
             "[init] scheduler link lookup ready, "
             f"regions={lookup_status['num_decision_regions']}, "
+            f"elapsed={lookup_status['build_elapsed_s']:.3f}s",
+        )
+    if phy_link_adapter is not link_adapter:
+        lookup_status = phy_link_adapter.lookup_status
+        _progress(
+            cfg,
+            "[init] PHY TBLER lookup ready, "
+            f"shape={lookup_status['num_mcs']}x{lookup_status['num_sinr_points']}, "
             f"elapsed={lookup_status['build_elapsed_s']:.3f}s",
         )
 
@@ -714,7 +737,15 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             "case_id": "all",
             "phase": "scheduler_link_lookup_build",
             "elapsed_s": float(scheduler_link_adapter.status["build_elapsed_s"]),
-            **_counter_snapshot(scheduler_link_adapter),
+            **scheduler_build_counters,
+        })
+    if phy_link_adapter is not link_adapter:
+        runtime_phase_rows.append({
+            "drop": -1,
+            "case_id": "all",
+            "phase": "phy_tbler_lookup_build",
+            "elapsed_s": float(phy_link_adapter.lookup_status["build_elapsed_s"]),
+            **phy_lookup_build_counters,
         })
     tbar_by_scheme: Dict[str, Dict[int, float]] = {}
     channel_backend_rows: List[Dict[str, Any]] = []
@@ -1066,7 +1097,9 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
                     rows_tti, olla_state = run_one_tti(
                         sched, h_tti, tx_beams, rx_beams, beam_ids, meas,
                         tx_power_w_per_panel, cfg, drop, tti, case_rng, olla_state,
-                        link_adapter=link_adapter, record=True,
+                        link_adapter=phy_link_adapter,
+                        mcs_adapter=scheduler_link_adapter,
+                        record=True,
                     )
                     case_link_elapsed_s += float(perf_counter() - link_started)
                     if tti >= 0:
@@ -1115,7 +1148,8 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
                         upper_rows, upper_olla_state = run_one_tti(
                             upper_sched, h_tti, tx_beams, rx_beams, beam_ids, meas,
                             tx_power_w_per_panel, cfg, drop, tti, upper_rng,
-                            upper_olla_state, link_adapter=link_adapter,
+                            upper_olla_state, link_adapter=phy_link_adapter,
+                            mcs_adapter=scheduler_link_adapter,
                             ignore_interference=True, record=tti >= 0,
                         )
                         all_link_rows.extend(upper_rows)
@@ -1209,13 +1243,14 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             case_rng.bit_generator.state = copy.deepcopy(common_link_rng_state)
             rng_state_before_link_eval = copy.deepcopy(case_rng.bit_generator.state)
             link_eval_started = perf_counter()
-            link_counters_before = _counter_snapshot(link_adapter)
+            link_counters_before = _counter_snapshot(phy_link_adapter)
             link_rows, olla_state = run_tti_loop(sched, ch.h_freq, tx_beams, rx_beams, beam_ids, meas,
                                                  tx_power_w_per_panel, cfg, drop, case_rng, olla_state,
-                                                 link_adapter=link_adapter)
+                                                 link_adapter=phy_link_adapter,
+                                                 mcs_adapter=scheduler_link_adapter)
             link_eval_elapsed_s = float(perf_counter() - link_eval_started)
             link_counter_delta = _counter_delta(
-                link_counters_before, _counter_snapshot(link_adapter), prefix="link_evaluation_",
+                link_counters_before, _counter_snapshot(phy_link_adapter), prefix="link_evaluation_",
             )
             _attach_case_scheduler_metrics(sched, {
                 "link_evaluation_elapsed_s": link_eval_elapsed_s,
@@ -1249,7 +1284,9 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
                 upper_rows, _ = run_tti_loop(
                     upper_sched, ch.h_freq, tx_beams, rx_beams, beam_ids, meas,
                     tx_power_w_per_panel, cfg, drop, upper_rng, {},
-                    link_adapter=link_adapter, ignore_interference=True,
+                    link_adapter=phy_link_adapter,
+                    mcs_adapter=scheduler_link_adapter,
+                    ignore_interference=True,
                 )
                 all_link_rows.extend(upper_rows)
             if cfg["scheduler"].get("objective", "sum_rate") == "proportional_fair":

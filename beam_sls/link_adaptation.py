@@ -70,6 +70,23 @@ class BaseLinkAdapter:
     def tbler_from_sinr_lin(self, sinr_lin: float, mcs_index: int, num_allocated_re: int | None = None) -> float:
         return self.tbler_from_sinr_db(float(lin_to_db(sinr_lin)), mcs_index, num_allocated_re)
 
+    def tbler_from_sinr_db_batch(self, sinr_db, mcs_index,
+                                 num_allocated_re: int | None = None) -> np.ndarray:
+        """Return TBLER for broadcast-compatible SINR/MCS arrays.
+
+        The scalar fallback keeps custom and test adapters compatible. Native
+        backends should override this method to issue one vectorized PHY call.
+        """
+        sinr, mcs = np.broadcast_arrays(
+            np.asarray(sinr_db, dtype=float),
+            np.asarray(mcs_index, dtype=np.int32),
+        )
+        values = [
+            self.tbler_from_sinr_db(float(s), int(m), num_allocated_re)
+            for s, m in zip(sinr.reshape(-1), mcs.reshape(-1))
+        ]
+        return np.asarray(values, dtype=float).reshape(sinr.shape)
+
     def is_outage_from_sinr_db(self,
                                sinr_db: float,
                                mcs_index: int | None = None,
@@ -262,29 +279,89 @@ class SionnaSYSAdapter(BaseLinkAdapter):
     def select_mcs_from_sinr_db(self, sinr_db: float, num_allocated_re: int | None = None) -> int:
         return self.select_mcs_from_sinr_lin(float(10.0 ** (float(sinr_db) / 10.0)), num_allocated_re)
 
+    def select_mcs_from_sinr_db_batch(self, sinr_db,
+                                      num_allocated_re: int | None = None) -> np.ndarray:
+        x = np.asarray(sinr_db, dtype=float)
+        flat = x.reshape(-1)
+        if flat.size == 0:
+            return np.empty(x.shape, dtype=np.int32)
+        nre = int(num_allocated_re or self.allocated_re())
+        sinr_lin = np.power(10.0, flat / 10.0).astype(np.float32)
+        try:
+            self._call_counters["illa_invocations"] += 1
+            self._call_counters["illa_items"] += int(flat.size)
+            out = self.illa(
+                sinr_eff=self._tensor(sinr_lin, self.tf.float32),
+                num_allocated_re=self._tensor(
+                    np.full(flat.size, nre, dtype=np.int32), self.tf.int32,
+                ),
+                mcs_table_index=int(self.mcs_table_index),
+                mcs_category=int(self.mcs_category),
+                return_lowest_available_mcs=True,
+            )
+            if isinstance(out, (tuple, list)) and len(out) >= 2:
+                selected = self._to_numpy(out[0]).reshape(-1).astype(np.int32)
+                lowest = self._to_numpy(out[1]).reshape(-1).astype(np.int32)
+                if lowest.size == 1:
+                    lowest = np.full(selected.size, int(lowest[0]), dtype=np.int32)
+                selected = np.maximum(selected, lowest)
+            else:
+                selected = self._to_numpy(out).reshape(-1).astype(np.int32)
+            return selected.reshape(x.shape)
+        except Exception as e:
+            raise LinkAdaptationBackendError(
+                f"Batched Sionna ILLA call failed: {type(e).__name__}: {e}"
+            ) from e
+
     def tbler_from_sinr_lin(self, sinr_lin: float, mcs_index: int, num_allocated_re: int | None = None) -> float:
+        value = self.tbler_from_sinr_db_batch(
+            np.asarray([float(lin_to_db(sinr_lin))]),
+            np.asarray([int(mcs_index)]),
+            num_allocated_re,
+        )
+        return float(value[0])
+
+    def tbler_from_sinr_db_batch(self, sinr_db, mcs_index,
+                                 num_allocated_re: int | None = None) -> np.ndarray:
+        sinr, mcs = np.broadcast_arrays(
+            np.asarray(sinr_db, dtype=float),
+            np.asarray(mcs_index, dtype=np.int32),
+        )
+        flat_sinr = sinr.reshape(-1)
+        flat_mcs = mcs.reshape(-1)
+        if flat_sinr.size == 0:
+            return np.empty(sinr.shape, dtype=float)
         nre = int(num_allocated_re or self.allocated_re())
         try:
             self._call_counters["phy_abstraction_invocations"] += 1
-            self._call_counters["phy_abstraction_items"] += 1
-            res = self.phy_abs(mcs_index=self._tensor([int(mcs_index)], self.tf.int32),
-                               sinr_eff=self._tensor([float(sinr_lin)], self.tf.float32),
-                               num_allocated_re=self._tensor([nre], self.tf.int32),
+            self._call_counters["phy_abstraction_items"] += int(flat_sinr.size)
+            res = self.phy_abs(mcs_index=self._tensor(flat_mcs, self.tf.int32),
+                               sinr_eff=self._tensor(
+                                   np.power(10.0, flat_sinr / 10.0).astype(np.float32),
+                                   self.tf.float32,
+                               ),
+                               num_allocated_re=self._tensor(
+                                   np.full(flat_sinr.size, nre, dtype=np.int32),
+                                   self.tf.int32,
+                               ),
                                mcs_table_index=int(self.mcs_table_index),
                                mcs_category=int(self.mcs_category),
                                check_mcs_index_validity=False)
             # Documented output tuple: decoded bits, HARQ, sinr_eff, tbler, bler.
             if isinstance(res, (tuple, list)) and len(res) >= 4:
-                tbler = self._to_float(res[3])
-                if (not np.isfinite(tbler)) or tbler < 0.0:
-                    return 1.0
-                return float(np.clip(tbler, 0.0, 1.0))
-            if isinstance(res, dict) and "tbler" in res:
-                tbler = self._to_float(res["tbler"])
-                if (not np.isfinite(tbler)) or tbler < 0.0:
-                    return 1.0
-                return float(np.clip(tbler, 0.0, 1.0))
-            raise LinkAdaptationBackendError(f"Unexpected PHYAbstraction output type={type(res)}")
+                tbler = self._to_numpy(res[3]).reshape(-1).astype(float)
+            elif isinstance(res, dict) and "tbler" in res:
+                tbler = self._to_numpy(res["tbler"]).reshape(-1).astype(float)
+            else:
+                raise LinkAdaptationBackendError(
+                    f"Unexpected PHYAbstraction output type={type(res)}"
+                )
+            tbler = np.where(
+                np.isfinite(tbler) & (tbler >= 0.0),
+                np.clip(tbler, 0.0, 1.0),
+                1.0,
+            )
+            return tbler.reshape(sinr.shape)
         except Exception as e:
             if isinstance(e, LinkAdaptationBackendError):
                 raise
@@ -296,44 +373,9 @@ class SionnaSYSAdapter(BaseLinkAdapter):
     def schedule_map_from_sinr_db(self, sinr_db) -> Tuple[np.ndarray, np.ndarray]:
         x = np.asarray(sinr_db, dtype=float)
         flat = x.reshape(-1)
-        nre = int(self.allocated_re())
-        sinr_lin = np.power(10.0, flat / 10.0).astype(np.float32)
-        nre_values = np.full(flat.size, nre, dtype=np.int32)
         try:
-            self._call_counters["illa_invocations"] += 1
-            self._call_counters["illa_items"] += int(flat.size)
-            out = self.illa(
-                sinr_eff=self._tensor(sinr_lin, self.tf.float32),
-                num_allocated_re=self._tensor(nre_values, self.tf.int32),
-                mcs_table_index=int(self.mcs_table_index),
-                mcs_category=int(self.mcs_category),
-                return_lowest_available_mcs=True,
-            )
-            if isinstance(out, (tuple, list)) and len(out) >= 2:
-                selected = self._to_numpy(out[0]).reshape(-1).astype(np.int32)
-                lowest = self._to_numpy(out[1]).reshape(-1).astype(np.int32)
-                if lowest.size == 1:
-                    lowest = np.full(selected.size, int(lowest[0]), dtype=np.int32)
-                mcs = np.maximum(selected, lowest)
-            else:
-                mcs = self._to_numpy(out).reshape(-1).astype(np.int32)
-
-            self._call_counters["phy_abstraction_invocations"] += 1
-            self._call_counters["phy_abstraction_items"] += int(flat.size)
-            res = self.phy_abs(
-                mcs_index=self._tensor(mcs, self.tf.int32),
-                sinr_eff=self._tensor(sinr_lin, self.tf.float32),
-                num_allocated_re=self._tensor(nre_values, self.tf.int32),
-                mcs_table_index=int(self.mcs_table_index),
-                mcs_category=int(self.mcs_category),
-                check_mcs_index_validity=False,
-            )
-            if isinstance(res, (tuple, list)) and len(res) >= 4:
-                tbler = self._to_numpy(res[3]).reshape(-1).astype(float)
-            elif isinstance(res, dict) and "tbler" in res:
-                tbler = self._to_numpy(res["tbler"]).reshape(-1).astype(float)
-            else:
-                raise LinkAdaptationBackendError(f"Unexpected PHYAbstraction output type={type(res)}")
+            mcs = self.select_mcs_from_sinr_db_batch(flat)
+            tbler = self.tbler_from_sinr_db_batch(flat, mcs)
             outage = (~np.isfinite(tbler)) | (tbler < 0.0) | (tbler > self.target_bler)
             return mcs.reshape(x.shape), outage.reshape(x.shape)
         except Exception as e:
@@ -459,14 +501,8 @@ class SchedulerLinkLookup:
             out.update(self.backing.snapshot_counters())
         return {k: int(v) for k, v in out.items()}
 
-    def map_sinr_db(self, sinr_db) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        x = np.asarray(sinr_db, dtype=float)
-        flat = x.reshape(-1)
-        self._lookup_counters["lookup_queries"] += int(flat.size)
+    def _regions_and_fallback(self, flat: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         region = np.searchsorted(self.boundaries_db, flat, side="right")
-        mcs = self.region_mcs[region].copy()
-        outage = self.region_outage[region].copy()
-
         fallback = (flat < self.min_db) | (flat > self.max_db) | (~np.isfinite(flat))
         outside = fallback.copy()
         if self.boundaries_db.size and self.boundary_guard_db > 0.0:
@@ -474,12 +510,32 @@ class SchedulerLinkLookup:
             distance = np.full(flat.size, np.inf, dtype=float)
             left = pos > 0
             right = pos < self.boundaries_db.size
-            distance[left] = np.minimum(distance[left], np.abs(flat[left] - self.boundaries_db[pos[left] - 1]))
-            distance[right] = np.minimum(distance[right], np.abs(flat[right] - self.boundaries_db[pos[right]]))
+            distance[left] = np.minimum(
+                distance[left],
+                np.abs(flat[left] - self.boundaries_db[pos[left] - 1]),
+            )
+            distance[right] = np.minimum(
+                distance[right],
+                np.abs(flat[right] - self.boundaries_db[pos[right]]),
+            )
             near = distance <= self.boundary_guard_db
             fallback |= near
-            self._lookup_counters["lookup_boundary_fallback_items"] += int(np.count_nonzero(near))
-        self._lookup_counters["lookup_out_of_range_items"] += int(np.count_nonzero(outside))
+            self._lookup_counters["lookup_boundary_fallback_items"] += int(
+                np.count_nonzero(near)
+            )
+        self._lookup_counters["lookup_out_of_range_items"] += int(
+            np.count_nonzero(outside)
+        )
+        return region, fallback
+
+    def map_sinr_db(self, sinr_db) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        x = np.asarray(sinr_db, dtype=float)
+        flat = x.reshape(-1)
+        self._lookup_counters["lookup_queries"] += int(flat.size)
+        region, fallback = self._regions_and_fallback(flat)
+        mcs = self.region_mcs[region].copy()
+        outage = self.region_outage[region].copy()
+
         if np.any(fallback):
             fb_mcs, fb_outage = self.backing.schedule_map_from_sinr_db(flat[fallback])
             mcs[fallback] = np.asarray(fb_mcs, dtype=np.int32).reshape(-1)
@@ -495,12 +551,37 @@ class SchedulerLinkLookup:
         return self.map_sinr_db(db)
 
     def select_mcs_from_sinr_db(self, sinr_db: float, num_allocated_re: int | None = None) -> int:
-        mcs, _, _ = self.map_sinr_db(np.asarray([sinr_db], dtype=float))
+        mcs = self.select_mcs_from_sinr_db_batch(
+            np.asarray([sinr_db], dtype=float), num_allocated_re,
+        )
         return int(mcs[0])
 
     def select_mcs_from_sinr_lin(self, sinr_lin: float, num_allocated_re: int | None = None) -> int:
-        mcs, _, _ = self.map_sinr_lin(np.asarray([sinr_lin], dtype=float))
-        return int(mcs[0])
+        return self.select_mcs_from_sinr_db(
+            float(lin_to_db(sinr_lin)), num_allocated_re,
+        )
+
+    def select_mcs_from_sinr_db_batch(self, sinr_db,
+                                      num_allocated_re: int | None = None) -> np.ndarray:
+        x = np.asarray(sinr_db, dtype=float)
+        flat = x.reshape(-1)
+        self._lookup_counters["lookup_queries"] += int(flat.size)
+        region, fallback = self._regions_and_fallback(flat)
+        mcs = self.region_mcs[region].copy()
+        if np.any(fallback):
+            if hasattr(self.backing, "select_mcs_from_sinr_db_batch"):
+                fallback_mcs = self.backing.select_mcs_from_sinr_db_batch(
+                    flat[fallback], num_allocated_re,
+                )
+            else:
+                fallback_mcs = [
+                    self.backing.select_mcs_from_sinr_db(
+                        float(value), num_allocated_re,
+                    )
+                    for value in flat[fallback]
+                ]
+            mcs[fallback] = np.asarray(fallback_mcs, dtype=np.int32).reshape(-1)
+        return mcs.reshape(x.shape)
 
     def is_outage_from_sinr_db(self, sinr_db: float, mcs_index: int | None = None,
                                num_allocated_re: int | None = None) -> bool:
@@ -517,11 +598,190 @@ class SchedulerLinkLookup:
         return bool(outage[0])
 
 
+class PHYTblerLookup:
+    """Precomputed Sionna PHY TBLER(SINR, MCS) table with NumPy interpolation."""
+
+    def __init__(self, backing: BaseLinkAdapter, cfg: Dict):
+        self.backing = backing
+        self.cfg = cfg
+        lookup_cfg = (
+            cfg.get("link_abstraction", {}).get("tbler_lookup", {}) or {}
+        )
+        self.min_db = float(lookup_cfg.get("sinr_min_db", -40.0))
+        self.max_db = float(lookup_cfg.get("sinr_max_db", 80.0))
+        self.step_db = float(lookup_cfg.get("sinr_step_db", 0.1))
+        self.build_batch_size = int(lookup_cfg.get("build_batch_size", 65536))
+        if (
+            self.max_db <= self.min_db
+            or self.step_db <= 0.0
+            or self.build_batch_size <= 0
+        ):
+            raise ValueError(
+                "link_abstraction.tbler_lookup requires max>min, "
+                "sinr_step_db>0, and build_batch_size>0"
+            )
+        self.target_bler = float(backing.target_bler)
+        self.num_mcs = int(backing.num_mcs)
+        self.status = backing.status
+        self._lookup_counters = {
+            "tbler_lookup_queries": 0,
+            "tbler_lookup_items": 0,
+            "tbler_lookup_clipped_items": 0,
+        }
+        started = perf_counter()
+        self._build()
+        self.build_elapsed_s = float(perf_counter() - started)
+        self.lookup_status = {
+            "enabled": True,
+            "sinr_min_db": self.min_db,
+            "sinr_max_db": self.max_db,
+            "sinr_step_db": self.step_db,
+            "num_sinr_points": int(self.sinr_grid_db.size),
+            "num_mcs": self.num_mcs,
+            "num_table_points": int(self.tbler_table.size),
+            "build_batch_size": self.build_batch_size,
+            "build_elapsed_s": self.build_elapsed_s,
+        }
+
+    def _build(self) -> None:
+        count = int(np.ceil((self.max_db - self.min_db) / self.step_db))
+        self.sinr_grid_db = np.linspace(
+            self.min_db, self.max_db, count + 1, dtype=float,
+        )
+        sinr = np.tile(self.sinr_grid_db, self.num_mcs)
+        mcs = np.repeat(
+            np.arange(self.num_mcs, dtype=np.int32),
+            self.sinr_grid_db.size,
+        )
+        values = np.empty(sinr.size, dtype=float)
+        for start in range(0, sinr.size, self.build_batch_size):
+            stop = min(start + self.build_batch_size, sinr.size)
+            values[start:stop] = np.asarray(
+                self.backing.tbler_from_sinr_db_batch(
+                    sinr[start:stop], mcs[start:stop],
+                ),
+                dtype=float,
+            ).reshape(-1)
+        self.tbler_table = values.reshape(self.num_mcs, self.sinr_grid_db.size)
+
+    def snapshot_counters(self) -> Dict[str, int]:
+        out = dict(self._lookup_counters)
+        if hasattr(self.backing, "snapshot_counters"):
+            out.update(self.backing.snapshot_counters())
+        return {k: int(v) for k, v in out.items()}
+
+    def tbler_from_sinr_db_batch(self, sinr_db, mcs_index,
+                                 num_allocated_re: int | None = None) -> np.ndarray:
+        if num_allocated_re not in (None, self.allocated_re()):
+            return self.backing.tbler_from_sinr_db_batch(
+                sinr_db, mcs_index, num_allocated_re,
+            )
+        sinr, mcs = np.broadcast_arrays(
+            np.asarray(sinr_db, dtype=float),
+            np.asarray(mcs_index, dtype=np.int32),
+        )
+        flat_sinr = sinr.reshape(-1)
+        flat_mcs = mcs.reshape(-1)
+        if np.any((flat_mcs < 0) | (flat_mcs >= self.num_mcs)):
+            raise ValueError(f"MCS index outside PHY TBLER lookup [0, {self.num_mcs - 1}]")
+        self._lookup_counters["tbler_lookup_queries"] += 1
+        self._lookup_counters["tbler_lookup_items"] += int(flat_sinr.size)
+        clipped = (
+            (flat_sinr < self.min_db)
+            | (flat_sinr > self.max_db)
+            | (~np.isfinite(flat_sinr))
+        )
+        self._lookup_counters["tbler_lookup_clipped_items"] += int(
+            np.count_nonzero(clipped)
+        )
+        finite_sinr = np.nan_to_num(
+            flat_sinr,
+            nan=self.min_db,
+            neginf=self.min_db,
+            posinf=self.max_db,
+        )
+        values = np.empty(flat_sinr.size, dtype=float)
+        for selected_mcs in np.unique(flat_mcs):
+            mask = flat_mcs == selected_mcs
+            values[mask] = np.interp(
+                finite_sinr[mask],
+                self.sinr_grid_db,
+                self.tbler_table[int(selected_mcs)],
+            )
+        return np.clip(values, 0.0, 1.0).reshape(sinr.shape)
+
+    def tbler_from_sinr_db(self, sinr_db: float, mcs_index: int,
+                           num_allocated_re: int | None = None) -> float:
+        values = self.tbler_from_sinr_db_batch(
+            np.asarray([sinr_db], dtype=float),
+            np.asarray([mcs_index], dtype=np.int32),
+            num_allocated_re,
+        )
+        return float(values[0])
+
+    def tbler_from_sinr_lin(self, sinr_lin: float, mcs_index: int,
+                            num_allocated_re: int | None = None) -> float:
+        return self.tbler_from_sinr_db(
+            float(lin_to_db(sinr_lin)), mcs_index, num_allocated_re,
+        )
+
+    def select_mcs_from_sinr_db_batch(self, sinr_db,
+                                      num_allocated_re: int | None = None) -> np.ndarray:
+        if hasattr(self.backing, "select_mcs_from_sinr_db_batch"):
+            return np.asarray(
+                self.backing.select_mcs_from_sinr_db_batch(
+                    sinr_db, num_allocated_re,
+                ),
+                dtype=np.int32,
+            )
+        x = np.asarray(sinr_db, dtype=float)
+        return np.asarray([
+            self.backing.select_mcs_from_sinr_db(
+                float(value), num_allocated_re,
+            )
+            for value in x.reshape(-1)
+        ], dtype=np.int32).reshape(x.shape)
+
+    def select_mcs_from_sinr_db(self, sinr_db: float,
+                                num_allocated_re: int | None = None) -> int:
+        return int(self.select_mcs_from_sinr_db_batch(
+            np.asarray([sinr_db], dtype=float), num_allocated_re,
+        )[0])
+
+    def select_mcs_from_sinr_lin(self, sinr_lin: float,
+                                 num_allocated_re: int | None = None) -> int:
+        return self.select_mcs_from_sinr_db(
+            float(lin_to_db(sinr_lin)), num_allocated_re,
+        )
+
+    def tbs_bits(self, mcs_index: int) -> int:
+        return int(self.backing.tbs_bits(mcs_index))
+
+    def rate_mbps(self, mcs_index: int) -> float:
+        return float(self.backing.rate_mbps(mcs_index))
+
+    def allocated_re(self) -> int:
+        return int(self.backing.allocated_re())
+
+
 def make_scheduler_link_adapter(link_adapter: BaseLinkAdapter, cfg: Dict):
     lookup_cfg = cfg.get("scheduler", {}).get("link_lookup", {}) or {}
     if not bool(lookup_cfg.get("enabled", True)):
         return link_adapter
     return SchedulerLinkLookup(link_adapter, cfg)
+
+
+def make_phy_tbler_adapter(link_adapter: BaseLinkAdapter, cfg: Dict):
+    lookup_cfg = (
+        cfg.get("link_abstraction", {}).get("tbler_lookup", {}) or {}
+    )
+    if (
+        not bool(lookup_cfg.get("enabled", True))
+        or not hasattr(link_adapter, "tbler_from_sinr_db_batch")
+    ):
+        return link_adapter
+    return PHYTblerLookup(link_adapter, cfg)
+
 
 def make_link_adapter(cfg: Dict) -> BaseLinkAdapter:
     mode = str(cfg.get("link_abstraction", {}).get("mode", "sionna_sys_precomputed_bler")).lower()

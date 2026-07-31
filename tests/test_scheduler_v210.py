@@ -62,6 +62,18 @@ class _CountingLookupReferenceAdapter(_LookupReferenceAdapter):
         return super().rate_mbps(mcs_index)
 
 
+class _CountingPhyLookupReferenceAdapter(_LookupReferenceAdapter):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.tbler_call_count = 0
+
+    def tbler_from_sinr_db(self, sinr_db, mcs_index, num_allocated_re=None):
+        self.tbler_call_count += 1
+        return super().tbler_from_sinr_db(
+            sinr_db, mcs_index, num_allocated_re,
+        )
+
+
 def _beam_ids(count):
     return [
         BeamId(cell=0, trp=0, panel=i, beam=0, global_index=i, tx_unit=i)
@@ -160,6 +172,25 @@ def test_scheduler_lookup_rate_uses_precomputed_cache():
         assert lookup.rate_mbps(10) == 77.0
     assert reference.rate_call_count == build_rate_calls
     assert lookup.status["rate_cache_size"] == reference.num_mcs
+
+
+def test_actual_mcs_lookup_fallback_does_not_evaluate_tbler():
+    cfg = load_config(None)
+    cfg["scheduler"]["link_lookup"].update({
+        "sinr_min_db": -20.0,
+        "sinr_max_db": 20.0,
+        "scan_step_db": 0.25,
+    })
+    reference = _CountingPhyLookupReferenceAdapter(cfg)
+    lookup = SchedulerLinkLookup(reference, cfg)
+    build_tbler_calls = reference.tbler_call_count
+
+    actual = lookup.select_mcs_from_sinr_db_batch(
+        np.asarray([-30.0, 0.0, 30.0]),
+    )
+
+    assert np.array_equal(actual, [0, 1, 2])
+    assert reference.tbler_call_count == build_tbler_calls
 
 
 def test_incremental_limited_feedback_matches_v29_reference_greedy():

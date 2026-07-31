@@ -140,9 +140,12 @@ def run_tti_loop(schedule: ScheduleResult,
                  rng: np.random.Generator,
                  initial_olla: Dict[Tuple[str, int], float] | None = None,
                  link_adapter=None,
-                 ignore_interference: bool = False) -> Tuple[List[LinkEvalRow], Dict[Tuple[str, int], float]]:
+                 ignore_interference: bool = False,
+                 mcs_adapter=None) -> Tuple[List[LinkEvalRow], Dict[Tuple[str, int], float]]:
     if link_adapter is None:
         raise ValueError("run_tti_loop requires an explicit link-adaptation backend")
+    if mcs_adapter is None:
+        mcs_adapter = link_adapter
     num_tti = int(cfg["system"].get("num_tti_per_drop", 1))
     warmup_tti = int(cfg["link_abstraction"].get("olla_warmup_tti", 0))
     if warmup_tti < 0:
@@ -164,31 +167,72 @@ def run_tti_loop(schedule: ScheduleResult,
             else None
         ),
     )
+    links = list(schedule.links)
+    effective_sinr_db = np.asarray([
+        float(lin_to_db(eesm(sinr_grid[link.ue_id], beta_db=beta_db)))
+        for link in links
+    ], dtype=float)
 
     # Negative loop indices are warmup TTIs. They consume ACK randomness and
     # update OLLA exactly like measured TTIs, but are not written to link_tti.csv.
     # Measured rows retain the backward-compatible tti range [0, num_tti).
     for tti in range(-warmup_tti, num_tti):
-        for link_position, link in enumerate(schedule.links):
+        offsets = np.asarray([
+            float(olla.get(
+                (schedule.case_id or schedule.scheme, link.ue_id), 0.0,
+            ))
+            for link in links
+        ], dtype=float)
+        predicted_sinr_db = np.asarray(
+            [float(link.predicted_sinr_db) for link in links], dtype=float,
+        )
+        mcs_selection_sinr_db = (
+            predicted_sinr_db - offsets if olla_enabled else predicted_sinr_db
+        )
+        if hasattr(mcs_adapter, "select_mcs_from_sinr_db_batch"):
+            actual_mcs = np.asarray(
+                mcs_adapter.select_mcs_from_sinr_db_batch(
+                    mcs_selection_sinr_db,
+                ),
+                dtype=np.int32,
+            ).reshape(-1)
+        elif hasattr(mcs_adapter, "map_sinr_db"):
+            actual_mcs = np.asarray(
+                mcs_adapter.map_sinr_db(mcs_selection_sinr_db)[0],
+                dtype=np.int32,
+            ).reshape(-1)
+        else:
+            actual_mcs = np.asarray([
+                int(mcs_adapter.select_mcs_from_sinr_db(float(value)))
+                for value in mcs_selection_sinr_db
+            ], dtype=np.int32)
+        if hasattr(link_adapter, "tbler_from_sinr_db_batch"):
+            tbler_values = np.asarray(
+                link_adapter.tbler_from_sinr_db_batch(
+                    effective_sinr_db, actual_mcs,
+                ),
+                dtype=float,
+            ).reshape(-1)
+        else:
+            tbler_values = np.asarray([
+                float(link_adapter.tbler_from_sinr_db(float(sinr), int(mcs)))
+                for sinr, mcs in zip(effective_sinr_db, actual_mcs)
+            ], dtype=float)
+
+        for link_position, link in enumerate(links):
             key = (schedule.case_id or schedule.scheme, link.ue_id)
-            off = float(olla.get(key, 0.0))
-            sinr_eff_lin = eesm(sinr_grid[link.ue_id], beta_db=beta_db)
-            eff_db = float(lin_to_db(sinr_eff_lin))
+            off = float(offsets[link_position])
+            eff_db = float(effective_sinr_db[link_position])
             # MCS selection is causal: the scheduler only knows the reported /
             # predicted SINR and its OLLA state. The realized post-scheduling
             # SINR is simulator truth and is used only for TBLER/ACK evaluation.
-            if olla_enabled:
-                mcs_selection_sinr_db = float(link.predicted_sinr_db - off)
-            else:
-                mcs_selection_sinr_db = float(link.predicted_sinr_db)
-            actual_mcs = int(
-                link_adapter.select_mcs_from_sinr_db(mcs_selection_sinr_db)
-            )
-            tbler = float(link_adapter.tbler_from_sinr_db(eff_db, actual_mcs))
+            selection_db = float(mcs_selection_sinr_db[link_position])
+            selected_mcs = int(actual_mcs[link_position])
+            tbler = float(tbler_values[link_position])
             ack_random_uniform = float(rng.uniform())
             ack = int(ack_random_uniform > tbler)
             if ack:
-                goodput_bits = int(link_adapter.tbs_bits(actual_mcs))
+                goodput_bits = int(link_adapter.tbs_bits(selected_mcs))
             else:
                 goodput_bits = 0
             goodput_mbps = goodput_bits / (slot_ms * 1e-3) / 1e6
@@ -202,7 +246,7 @@ def run_tti_loop(schedule: ScheduleResult,
                     beam_id=beam_ids[link.beam_index].short(),
                     predicted_sinr_db=float(link.predicted_sinr_db),
                     predicted_mcs=int(link.predicted_mcs),
-                    actual_mcs=int(actual_mcs),
+                    actual_mcs=selected_mcs,
                     effective_sinr_db=eff_db,
                     tbler=float(tbler),
                     ack=ack,
@@ -211,7 +255,7 @@ def run_tti_loop(schedule: ScheduleResult,
                     ack_random_uniform=ack_random_uniform,
                     link_position=int(link_position),
                     olla_offset_db=off,
-                    mcs_selection_sinr_db=mcs_selection_sinr_db,
+                    mcs_selection_sinr_db=selection_db,
                     case_id=schedule.case_id or schedule.scheme,
                     feedback_scheme=schedule.feedback_scheme or schedule.scheme,
                     algorithm=schedule.algorithm or schedule.metadata.get("algorithm"),
@@ -242,7 +286,8 @@ def run_one_tti(schedule: ScheduleResult,
                 initial_olla: Dict[Tuple[str, int], float] | None = None,
                 link_adapter=None,
                 ignore_interference: bool = False,
-                record: bool = True) -> Tuple[List[LinkEvalRow], Dict[Tuple[str, int], float]]:
+                record: bool = True,
+                mcs_adapter=None) -> Tuple[List[LinkEvalRow], Dict[Tuple[str, int], float]]:
     """Evaluate one scheduled TTI and immediately update per-UE OLLA state."""
     one_tti_cfg = {
         **cfg,
@@ -255,7 +300,8 @@ def run_one_tti(schedule: ScheduleResult,
     rows, olla = run_tti_loop(
         schedule, h_freq, tx_beams, rx_beams, beam_ids, meas,
         tx_power_w_per_panel, one_tti_cfg, drop_idx, rng, initial_olla,
-        link_adapter=link_adapter, ignore_interference=ignore_interference,
+        link_adapter=link_adapter, mcs_adapter=mcs_adapter,
+        ignore_interference=ignore_interference,
     )
     for row in rows:
         row.tti = int(tti)

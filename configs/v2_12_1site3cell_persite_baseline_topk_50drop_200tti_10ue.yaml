@@ -1,0 +1,215 @@
+# v2.12-derived: one site, three cells, ten UEs per cell.
+#
+# Array/RF and evaluation settings follow
+# v2_12_7site21cell_persite_baseline_topk_50drop_200tti.yaml.
+# One site contains three TRPs/cells and six independently schedulable
+# polarization-panel/TXRU resources.
+
+scenario:
+  name: urban_macro_v2_12_1site3cell_persite_baseline_topk_50drop_200tti_10ue
+  carrier_frequency_ghz: 30.0
+  channel_model: sionna_tr38901_uma
+  min_ue_distance_m: 35.0
+  max_ue_distance_m: 250.0
+  num_clusters: 4
+  delay_spread_ns: 100.0
+  shadow_fading_std_db: 4.0
+  pathloss_exponent: 3.0
+  enable_pathloss: true
+  enable_shadow_fading: true
+  o2i_model: low
+
+topology:
+  layout: one_site_three_sector
+  num_sites: 1
+  sectors_per_site: 3
+  sector_azimuths_deg: [30.0, 150.0, 270.0]
+  sector_width_deg: 120.0
+  isd_m: 500.0
+  bs_height_m: 25.0
+  ue_height_m: 1.5
+
+system:
+  subcarrier_spacing_khz: 120.0
+  # Preserve 33 dBm/TRP and 30 dBm/independent TX resource:
+  # six 1 W resources give 37.782 dBm network-wide.
+  tx_power_dbm: 37.782
+  num_drops: 50
+  num_tti_per_drop: 200
+  continuous_tti:
+    enabled: true
+    duration_ms: 25.0
+    num_tti: 200
+    warmup_tti: 50
+  random_seed: 20260725
+  target_bler: 0.1
+
+pdsch:
+  num_prbs: 132
+  num_symbols: 12
+  dmrs_overhead_re_per_prb: 18
+  num_layers_per_ue: 1
+  slot_duration_ms: 0.125
+
+noise:
+  thermal_noise_density_dbm_per_hz: -174.0
+  ue_noise_figure_db: 7.0
+
+ue_drop:
+  # 10 UE/cell * 3 cells = 30 UEs/drop.
+  num_ut_per_sector: 10
+  distribution: uniform_in_sector
+  speed_kmh: 3.0
+
+trp:
+  num_trps_per_sector: 1
+  num_panels_per_sector: 1
+  panel_azimuth_offsets_deg: [0.0]
+  panel_power_mode: per_tx_unit_equal
+
+rf_architecture:
+  txru_connectivity: panel_polarization_subarray
+  allow_independent_polarization_beams: false
+  num_txru: 2
+  max_parallel_beams_per_trp: auto
+
+tx_array:
+  model: tr38901_panel
+  num_txru: 2
+  num_ae: 512
+  M: 8
+  N: 16
+  P: 2
+  Mg: 1
+  Ng: 2
+  Mp: 1
+  Np: 1
+  dH: 0.5
+  dV: 0.5
+  beam_scope: per_panel
+  sampling_mode: uniform
+  num_beams_h: 16
+  num_beams_v: 4
+  max_beams: 64
+  vertical_beam_mode: distance_range
+  fixed_v_index: null
+  vertical_beam:
+    min_horizontal_distance_m: 35.0
+    max_horizontal_distance_m: 250.0
+    height_difference_m: 23.5
+
+ue_array:
+  model: tr38901_panel
+  num_rxru: 2
+  num_ae: 8
+  M: 4
+  N: 1
+  P: 2
+  Mg: 1
+  Ng: 1
+  Mp: 1
+  Np: 1
+  dH: 0.5
+  dV: 0.5
+  beam_scope: joint
+  sampling_mode: uniform
+  num_beams_h: 1
+  num_beams_v: 4
+  max_beams: 4
+  vertical_beam_mode: scan
+  fixed_v_index: null
+
+beam:
+  tx_codebook: dft_2d
+  rx_codebook: dft_2d
+  one_beam_per_panel: true
+
+measurement:
+  num_freq_points: 16
+  compute_full_gamma: true
+  frequency_average: linear_power
+  tx_panel_index: 0
+  use_panel_channel_views: true
+  gamma_backend: auto
+  gamma_ue_batch_size: 4
+
+feedback:
+  schemes:
+    - baseline
+    - topk_conflict_id
+  cqi_mode: illa_target_bler
+  service_beam_top_k1: 2
+  oracle_service_beam_top_k: 2
+  conflict_top_k2: 2
+  conflict_sinr_threshold_db: 0.0
+
+evaluation:
+  matrix:
+    baseline: [greedy]
+    topk_conflict_id: [adaptive_lambda_greedy, hard_conflict_greedy]
+  references:
+    baseline: baseline__greedy
+
+scheduler:
+  cluster_mode: per_site
+  static_clusters: []
+  domain_mode: per_site_joint
+  objective: proportional_fair
+  # 3 TRPs/site * 2 independent resources/TRP = 6 concurrent beams.
+  max_mu_order: auto
+  cap_mu_order_by_rf: true
+  algorithm: adaptive_lambda_greedy
+  use_panel_constraint: true
+  exhaustive_pruning:
+    enabled: true
+    sort_by_upper_bound: true
+    zero_upper_bound: true
+    branch_and_bound: true
+  conflict_penalty_lambda: 0.35
+  conflict_penalty_mode: adaptive
+  adaptive_lambda_alpha: 0.20
+  unknown_interference_policy: zero
+  hard_conflict_snr_close_db: 1.0
+  pf_tbar_init_mbps: 1.0
+  pf_averaging_window_tti: 100
+
+analysis:
+  baseline_no_interference_upper_bound: false
+  paired_case_debug:
+    enabled: false
+    pairs: []
+
+link_abstraction:
+  mode: sionna_sys_precomputed_bler
+  mcs_table_index: 1
+  mcs_category: 1
+  sinr_mapping: eesm
+  eesm_beta_db: 5.0
+  olla_enabled: true
+  olla_warmup_tti: 50
+  olla_step_db: 0.1
+  harq_enabled: true
+  tbler_lookup:
+    enabled: true
+    sinr_min_db: -40.0
+    sinr_max_db: 80.0
+    sinr_step_db: 0.1
+    build_batch_size: 65536
+
+coverage_heatmap:
+  enabled: false
+
+progress:
+  enabled: true
+
+sionna:
+  enable_import_probe: true
+  fallback_to_numpy_if_unavailable: true
+  device: null
+  precision: null
+  bs_polarization: dual
+  bs_polarization_type: cross
+  bs_antenna_pattern: "38.901"
+  ut_polarization: dual
+  ut_polarization_type: cross
+  ut_antenna_pattern: omni

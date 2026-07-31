@@ -311,6 +311,18 @@ NACK: b <- b + delta*(1-target_bler)/target_bler
 `effective_sinr_db` 只用于给已选 MCS 查询 TBLER/ACK，不参与 MCS 选择。这种不对称步长使期望更新量在目标 BLER 处为零。OLLA 在同一 drop 的 TTI 间保持，
 新 drop 重置。warmup TTI 更新 OLLA，但不进入正式吞吐/BLER/CDF。
 
+actual MCS 复用初始化阶段的 `SchedulerLinkLookup`：
+`predicted_sinr_db - OLLA backoff -> actual MCS`，运行期不再逐 UE 调用 ILLA。
+TBLER 与 MCS 选择是两条独立路径：
+
+- 默认初始化 `PHYTblerLookup`，用正式 Sionna `PHYAbstraction` 批量生成
+  `TBLER(SINR, MCS)` 网格，TTI 循环用 NumPy 线性插值；
+- `link_abstraction.tbler_lookup.enabled=false` 时不构表，但同一 TTI 的全部已调度 UE
+  仍合并为一次批量 `PHYAbstraction` 调用。
+
+`link_abstraction_status.json` 记录 scheduler lookup 和 PHY TBLER lookup 的范围、
+表尺寸及构建耗时；`runtime_phases.csv` 记录两者的初始化阶段。
+
 ## 9. 共同随机数与对比
 
 - evaluation case 尽量从相同 ACK 随机流开始，降低方案对比方差。

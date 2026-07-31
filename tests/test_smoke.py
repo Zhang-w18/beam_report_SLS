@@ -258,6 +258,73 @@ def test_actual_mcs_uses_predicted_sinr_not_realized_post_scheduling_sinr():
     assert rows[0].actual_mcs == 0
 
 
+def test_one_tti_batches_actual_mcs_lookup_and_tbler_evaluation():
+    class BatchMcsAdapter:
+        calls = []
+
+        @classmethod
+        def select_mcs_from_sinr_db_batch(cls, sinr_db):
+            cls.calls.append(np.asarray(sinr_db, dtype=float).copy())
+            return np.asarray([3, 5], dtype=np.int32)
+
+    class BatchPhyAdapter:
+        calls = []
+
+        @classmethod
+        def tbler_from_sinr_db_batch(cls, sinr_db, mcs_index):
+            cls.calls.append((
+                np.asarray(sinr_db, dtype=float).copy(),
+                np.asarray(mcs_index, dtype=np.int32).copy(),
+            ))
+            return np.asarray([0.0, 1.0])
+
+        @staticmethod
+        def tbs_bits(mcs):
+            return int(mcs) + 1
+
+    cfg = load_config(None)
+    cfg["system"]["num_tti_per_drop"] = 1
+    cfg["link_abstraction"]["olla_enabled"] = False
+    schedule = ScheduleResult(
+        scheme="unit",
+        objective_value=0.0,
+        links=[
+            ScheduledLink(0, 0, -3.0, 0, 0.0),
+            ScheduledLink(1, 1, 6.0, 0, 0.0),
+        ],
+    )
+    h_freq = np.ones((2, 2, 1, 1, 1), dtype=np.complex128)
+    tx_beams = np.ones((2, 1), dtype=np.complex128)
+    rx_beams = np.ones((1, 1), dtype=np.complex128)
+    beam_ids = [
+        BeamId(cell=0, trp=0, panel=i, beam=0, global_index=i, tx_unit=i)
+        for i in range(2)
+    ]
+    meas = MeasurementResult(
+        service_power_w=np.ones((2, 2)),
+        interference_power_w=np.zeros((2, 2, 2)),
+        gamma=np.ones((2, 2, 2)),
+        noise_power_w=1.0,
+        selected_rx_beam=np.zeros((2, 2), dtype=int),
+        su_mcs=np.zeros((2, 2), dtype=int),
+        su_snr_db=np.zeros((2, 2)),
+    )
+
+    rows, _ = run_tti_loop(
+        schedule, h_freq, tx_beams, rx_beams, beam_ids, meas,
+        tx_power_w_per_panel=1.0, cfg=cfg, drop_idx=0,
+        rng=np.random.default_rng(1), link_adapter=BatchPhyAdapter(),
+        mcs_adapter=BatchMcsAdapter(),
+    )
+
+    assert len(BatchMcsAdapter.calls) == 1
+    assert np.array_equal(BatchMcsAdapter.calls[0], [-3.0, 6.0])
+    assert len(BatchPhyAdapter.calls) == 1
+    assert np.array_equal(BatchPhyAdapter.calls[0][1], [3, 5])
+    assert [row.actual_mcs for row in rows] == [3, 5]
+    assert [row.ack for row in rows] == [1, 0]
+
+
 def test_olla_warmup_updates_state_but_is_excluded_from_metrics():
     class AlwaysNackAdapter:
         @staticmethod
