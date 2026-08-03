@@ -29,7 +29,8 @@ from .link_adaptation import (
 )
 from .measurement import associate_ues_by_average_rsrp, compute_gamma_measurement
 from .rf import resolve_rf_architecture, resolved_max_mu_order, trps_per_sector
-from .plotting import plot_bar, plot_best_beam_heatmap, plot_cdf, plot_heatmap, plot_topology
+from .plotting import (plot_bar, plot_best_beam_heatmap, plot_cdf, plot_heatmap,
+                       plot_local_nack_rate, plot_topology)
 from .scheduler import (
     ScheduleResult,
     normalize_cluster_mode,
@@ -74,8 +75,19 @@ def _panels_per_cell(cfg: Dict[str, Any], tx_cfg: ArrayConfig | None = None, rf_
     return int(trp.get("num_trps_per_sector", trp.get("num_panels_per_sector", 1)))
 
 
-def _parallel_beams_per_cell(cfg: Dict[str, Any], rf_architecture) -> int:
-    return max(1, trps_per_sector(cfg)) * int(rf_architecture.max_parallel_beams_per_trp)
+def resolve_tx_power_w_per_panel(cfg: Dict[str, Any],
+                                 tx_cfg: ArrayConfig) -> float:
+    """Resolve one physical panel's power from the per-TRP YAML power.
+
+    ``system.tx_power_dbm`` is the total power of each TRP. Every TRP receives
+    that same budget, independently of the number of sites, cells, or TRPs in
+    the network. The budget is shared equally by the TRP's physical panels in
+    the linear-power domain.
+    """
+    total_tx_power_w_per_trp = float(
+        dbm_to_watt(float(cfg["system"]["tx_power_dbm"]))
+    )
+    return total_tx_power_w_per_trp / max(1, int(tx_cfg.num_array_panels))
 
 
 def _progress(cfg: Dict[str, Any], msg: str) -> None:
@@ -397,6 +409,83 @@ def summarize_scheduled_ue_su_throughput(
     return summary
 
 
+def build_cell_local_nack_rate_rows(
+        link_rows: List[Dict[str, Any]],
+        ue_rows: List[Dict[str, Any]],
+        schemes: List[str],
+        cell_id: int = 0,
+        window_size: int = 500,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Aggregate per-UE NACK rate over complete scheduled-TTI windows.
+
+    Windowing advances only when the UE is scheduled. An incomplete tail is
+    reported in the status rows, but is deliberately excluded from NACK-rate
+    curve samples so every plotted point has the same denominator.
+    """
+    if window_size <= 0:
+        raise ValueError("local NACK-rate window_size must be positive")
+
+    associated = sorted({
+        (int(row["drop"]), int(row["ue_id"]))
+        for row in ue_rows
+        if int(row.get("serving_cell", -1)) == int(cell_id)
+    })
+    samples_by_key: Dict[Tuple[str, int, int], List[Dict[str, Any]]] = {}
+    for row in link_rows:
+        key = (str(row.get("scheme")), int(row["drop"]), int(row["ue_id"]))
+        samples_by_key.setdefault(key, []).append(row)
+
+    rate_rows: List[Dict[str, Any]] = []
+    status_rows: List[Dict[str, Any]] = []
+    for scheme in schemes:
+        for drop, ue_id in associated:
+            samples = sorted(
+                samples_by_key.get((scheme, drop, ue_id), []),
+                key=lambda row: (
+                    int(row["tti"]), int(row.get("link_position", 0)),
+                ),
+            )
+            num_complete_windows = len(samples) // window_size
+            for zero_based_window in range(num_complete_windows):
+                first = zero_based_window * window_size
+                window = samples[first:first + window_size]
+                num_nack = sum(1 - int(row["ack"]) for row in window)
+                rate_rows.append({
+                    "scheme": scheme,
+                    "drop": drop,
+                    "cell_id": int(cell_id),
+                    "ue_id": ue_id,
+                    "window_index": zero_based_window + 1,
+                    "scheduled_tti_index_start": first + 1,
+                    "scheduled_tti_index_end": first + window_size,
+                    "simulation_tti_start": int(window[0]["tti"]),
+                    "simulation_tti_end": int(window[-1]["tti"]),
+                    "num_scheduled_tti": window_size,
+                    "num_nack": num_nack,
+                    "local_nack_rate": float(num_nack / window_size),
+                })
+            status_rows.append({
+                "scheme": scheme,
+                "drop": drop,
+                "cell_id": int(cell_id),
+                "ue_id": ue_id,
+                "window_size_scheduled_tti": window_size,
+                "num_scheduled_tti": len(samples),
+                "num_complete_windows": num_complete_windows,
+                "discarded_tail_scheduled_tti": len(samples) % window_size,
+                "tti_scope": "post_warmup_only",
+            })
+    return rate_rows, status_rows
+
+
+def _safe_output_component(value: str) -> str:
+    safe = "".join(
+        char if char.isalnum() or char in ("-", "_", ".") else "_"
+        for char in str(value)
+    )
+    return safe or "unnamed"
+
+
 def build_paired_case_debug_lines(
         scheduled_pair_lists: Dict[Tuple[int, str], List[Tuple[int, int]]],
         link_rows: List[Dict[str, Any]],
@@ -666,7 +755,22 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     cfg["_resolved"]["max_parallel_beams_per_trp"] = int(rf_arch.max_parallel_beams_per_trp)
     cfg["_resolved"]["dynamic_beam_assignment"] = bool(rf_arch.dynamic_beam_assignment)
     cfg["_resolved"]["rf_architecture"] = rf_arch.to_dict()
+    total_tx_power_w_per_trp = float(
+        dbm_to_watt(float(cfg["system"]["tx_power_dbm"]))
+    )
+    tx_power_w_per_panel = resolve_tx_power_w_per_panel(cfg, tx_cfg)
+    cfg["_resolved"]["tx_power_semantics"] = "total_per_trp_equal_physical_panels"
+    cfg["_resolved"]["tx_power_w_per_trp"] = total_tx_power_w_per_trp
+    cfg["_resolved"]["tx_power_w_per_panel"] = tx_power_w_per_panel
+    cfg["_resolved"]["num_physical_panels_per_trp"] = int(tx_cfg.num_array_panels)
+    save_config(out_dir / "resolved_config.yaml", cfg)
     _progress(cfg, f"[init] RF={rf_arch.connectivity}, tx_units/TRP={rf_arch.tx_units_per_trp}, max_mu_order={effective_mu_order}")
+    _progress(
+        cfg,
+        f"[init] tx_power_dbm={float(cfg['system']['tx_power_dbm']):.3f} dBm "
+        f"per TRP, physical_panels/TRP={tx_cfg.num_array_panels}, "
+        f"power/panel={float(watt_to_dbm(tx_power_w_per_panel)):.3f} dBm",
+    )
     write_json(out_dir / "rf_architecture_summary.json", rf_arch.to_dict())
     write_json(out_dir / "array_config_summary.json", {
         "tx_array": tx_cfg.to_dict(),
@@ -683,6 +787,9 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             if rf_arch.compact_panel_channel else tx_cfg.num_ant
         ),
         "tx_full_num_ant": tx_cfg.num_ant,
+        "tx_power_semantics": "total_per_trp_equal_physical_panels",
+        "tx_power_per_trp_dbm": float(cfg["system"]["tx_power_dbm"]),
+        "tx_power_per_panel_dbm": float(watt_to_dbm(tx_power_w_per_panel)),
         "channel_storage": "full_trp",
         "ue_rx_beams": _max_beams_from_cfg(cfg["ue_array"], rx_cfg),
         "rf_architecture": rf_arch.to_dict(),
@@ -703,15 +810,6 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     rx_beams = dft_codebook_from_array(rx_cfg,
                                        max_beams=_max_beams_from_cfg(cfg["ue_array"], rx_cfg))
 
-    total_tx_power_w = float(dbm_to_watt(float(cfg["system"]["tx_power_dbm"])))
-    # In dynamic codebook mode there is one channel axis per TRP, but each
-    # physical panel remains an independently powered simultaneous-beam resource.
-    num_tx_units = max(1, topo0.num_cells * _parallel_beams_per_cell(cfg, rf_arch))
-    power_mode = str(cfg["trp"].get("panel_power_mode", "per_tx_unit_equal")).lower()
-    if power_mode in ("per_panel_equal", "per_tx_unit_equal", "per_txru_equal"):
-        tx_power_w_per_panel = total_tx_power_w / num_tx_units
-    else:
-        tx_power_w_per_panel = total_tx_power_w
     noise_w = thermal_noise_watt(noise_bw_hz,
                                  noise_density_dbm_per_hz=float(cfg["noise"].get("thermal_noise_density_dbm_per_hz", -174.0)),
                                  noise_figure_db=float(cfg["noise"].get("ue_noise_figure_db", 7.0)))
@@ -1313,6 +1411,10 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             "num_scheduling_clusters": len(scheduling_clusters),
             "occupied_bandwidth_mhz": float(noise_bw_hz / 1e6),
             "noise_dbm": float(watt_to_dbm(noise_w)),
+            "tx_power_per_trp_dbm": float(cfg["system"]["tx_power_dbm"]),
+            "num_physical_panels_per_trp": int(tx_cfg.num_array_panels),
+            "tx_power_per_panel_dbm": float(watt_to_dbm(tx_power_w_per_panel)),
+            # Retained as a compatibility alias for older post-processing.
             "tx_power_per_tx_unit_dbm": float(watt_to_dbm(tx_power_w_per_panel)),
             "avg_su_snr_db": _domain_metric(meas.su_snr_db, service_beam_indices_by_ue, np.mean),
             "p95_su_snr_db": _domain_metric(meas.su_snr_db, service_beam_indices_by_ue, lambda x: np.percentile(x, 95)),
@@ -1397,6 +1499,38 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
         scheduled_ue_su_throughput_summary,
     )
 
+    local_nack_rate_rows, local_nack_status_rows = build_cell_local_nack_rate_rows(
+        link_dict_rows, ue_rows, analysis_schemes, cell_id=0, window_size=500,
+    )
+    write_csv(
+        out_dir / "metrics" / "cell0_local_nack_rate.csv",
+        local_nack_rate_rows,
+    )
+    write_csv(
+        out_dir / "metrics" / "cell0_local_nack_rate_status.csv",
+        local_nack_status_rows,
+    )
+    associated_ues_by_drop: Dict[int, List[int]] = {}
+    for row in ue_rows:
+        if int(row.get("serving_cell", -1)) == 0:
+            associated_ues_by_drop.setdefault(int(row["drop"]), []).append(
+                int(row["ue_id"])
+            )
+    for scheme in analysis_schemes:
+        for drop in range(num_drops):
+            plot_local_nack_rate(
+                [
+                    row for row in local_nack_rate_rows
+                    if row["scheme"] == scheme and int(row["drop"]) == drop
+                ],
+                sorted(associated_ues_by_drop.get(drop, [])),
+                scheme,
+                drop,
+                500,
+                out_dir / "figures" / "cell0_local_nack_rate"
+                / _safe_output_component(scheme) / f"drop_{drop:04d}.png",
+            )
+
     summary = summarize_results(
         link_dict_rows, analysis_schemes, ue_goodput_rows,
         system_tti_goodput_rows=system_tti_goodput_rows,
@@ -1409,6 +1543,29 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     summary["_schedule_similarity"] = similarity_summary
     summary["_su_snr"] = su_snr_summary
     summary["_scheduled_ue_su_throughput"] = scheduled_ue_su_throughput_summary
+    summary["_cell0_local_nack_rate"] = {
+        "cell_id": 0,
+        "window_size_scheduled_tti": 500,
+        "tti_scope": "post_warmup_only",
+        "num_complete_windows": len(local_nack_rate_rows),
+        "metrics_csv": "metrics/cell0_local_nack_rate.csv",
+        "status_csv": "metrics/cell0_local_nack_rate_status.csv",
+        "figures_dir": "figures/cell0_local_nack_rate",
+    }
+    print("[summary] post-warmup scheme KPIs", flush=True)
+    for scheme in analysis_schemes:
+        metrics = summary[scheme]
+        print(
+            f"[summary][{scheme}] tbler_zero_ratio="
+            f"{metrics['tbler_zero_ratio']:.6f}, "
+            f"avg_scheduled_users_per_tti="
+            f"{metrics['avg_scheduled_users_per_tti']:.6f}, "
+            "effective_sinr_db[p05,p50,p95]="
+            f"[{metrics['p05_effective_sinr_db']:.3f}, "
+            f"{metrics['p50_effective_sinr_db']:.3f}, "
+            f"{metrics['p95_effective_sinr_db']:.3f}]",
+            flush=True,
+        )
     write_json(out_dir / "metrics" / "summary.json", summary)
     write_csv(out_dir / "metrics" / "summary.csv", [{"scheme": k, **v} for k, v in summary.items() if isinstance(v, dict) and not k.startswith("_")])
 
@@ -1473,6 +1630,12 @@ def summarize_results(link_rows: List[Dict[str, Any]],
     summary: Dict[str, Any] = {}
     for scheme in schemes:
         rows = [r for r in link_rows if r.get("scheme") == scheme]
+        effective_sinr_values = [float(r["effective_sinr_db"]) for r in rows]
+        scheduled_ues_by_slot: Dict[Tuple[int, int], set] = {}
+        for row in rows:
+            scheduled_ues_by_slot.setdefault(
+                (int(row["drop"]), int(row["tti"])), set()
+            ).add(int(row["ue_id"]))
         if system_tti_goodput_rows is None:
             sys_by_slot: Dict[Tuple[int, int], float] = {}
             for r in rows:
@@ -1498,6 +1661,17 @@ def summarize_results(link_rows: List[Dict[str, Any]],
                 if r.get("scheme") == scheme
             ]
         case = (cases_by_id or {}).get(scheme)
+        if system_tti_goodput_rows is None:
+            measured_slots = sorted(scheduled_ues_by_slot)
+        else:
+            measured_slots = [
+                (int(row["drop"]), int(row["tti"]))
+                for row in system_tti_goodput_rows
+                if row.get("scheme") == scheme
+            ]
+        scheduled_user_counts = [
+            len(scheduled_ues_by_slot.get(slot, set())) for slot in measured_slots
+        ]
         summary[scheme] = {
             "case_id": scheme,
             "feedback_scheme": case.feedback_scheme if case is not None else scheme,
@@ -1506,11 +1680,21 @@ def summarize_results(link_rows: List[Dict[str, Any]],
             "avg_ue_goodput_mbps": float(np.mean(ue_mean)) if ue_mean else 0.0,
             "p05_ue_goodput_mbps": percentile(ue_mean, 5.0),
             "avg_eff_sinr_db": (
-                float(np.mean([float(r["effective_sinr_db"]) for r in rows]))
-                if rows else 0.0
+                float(np.mean(effective_sinr_values)) if rows else 0.0
             ),
+            "p05_effective_sinr_db": percentile(effective_sinr_values, 5.0),
+            "p50_effective_sinr_db": percentile(effective_sinr_values, 50.0),
+            "p95_effective_sinr_db": percentile(effective_sinr_values, 95.0),
             "avg_tbler": (
                 float(np.mean([float(r["tbler"]) for r in rows])) if rows else 0.0
+            ),
+            "tbler_zero_ratio": (
+                float(np.mean([float(r["tbler"]) == 0.0 for r in rows]))
+                if rows else 0.0
+            ),
+            "avg_scheduled_users_per_tti": (
+                float(np.mean(scheduled_user_counts))
+                if scheduled_user_counts else 0.0
             ),
             "ack_rate": (
                 float(np.mean([float(r["ack"]) for r in rows])) if rows else 0.0

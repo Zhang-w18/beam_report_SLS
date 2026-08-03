@@ -40,9 +40,8 @@ topology:
 
 system:
   subcarrier_spacing_khz: 120.0
-  # 42.542 dBm is the network-wide power for 9 TRPs.
-  # It gives approximately 33 dBm per TRP and 30 dBm per TXRU.
-  tx_power_dbm: 42.542
+  # Total power of each TRP; two physical panels receive 30 dBm each.
+  tx_power_dbm: 33.0
   num_drops: 1
   num_tti_per_drop: 10
   random_seed: 20260714
@@ -70,7 +69,6 @@ trp:
   num_trps_per_sector: 1
   num_panels_per_sector: 1
   panel_azimuth_offsets_deg: [0.0]
-  panel_power_mode: per_tx_unit_equal
 
 rf_architecture:
   txru_connectivity: panel_polarization_subarray

@@ -31,9 +31,8 @@ topology:
 
 system:
   subcarrier_spacing_khz: 120.0
-  # Preserve 33 dBm/TRP and 30 dBm/independent TX resource:
-  # six 1 W resources give 37.782 dBm network-wide.
-  tx_power_dbm: 37.782
+  # Total power of each TRP; two physical panels receive 30 dBm each.
+  tx_power_dbm: 33.0
   num_drops: 50
   num_tti_per_drop: 200
   continuous_tti:
@@ -65,7 +64,6 @@ trp:
   num_trps_per_sector: 1
   num_panels_per_sector: 1
   panel_azimuth_offsets_deg: [0.0]
-  panel_power_mode: per_tx_unit_equal
 
 rf_architecture:
   txru_connectivity: panel_polarization_subarray

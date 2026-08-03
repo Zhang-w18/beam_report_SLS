@@ -44,7 +44,7 @@
 | 参数 | 含义 | 典型取值 / 范围 | 说明 |
 |---|---|---|---|
 | `subcarrier_spacing_khz` | SCS | `15/30/60/120` 等 | 与 `pdsch.num_prbs` 一起唯一确定有效占用带宽。 |
-| `tx_power_dbm` | 发射功率 | dBm | 默认按 TX unit 平均分配。 |
+| `tx_power_dbm` | 每个 TRP 的总发射功率 | dBm | 每个 TRP 独立获得该总功率，并在线性功率域均分给该 TRP 的所有物理面板；不随站点、小区或 TRP 数量增加而再次分摊。 |
 | `num_drops` | 随机 drop 数 | 正整数 | 越大统计越稳定，仿真越慢。 |
 | `num_tti_per_drop` | 每个 drop 的 TTI 数 | 正整数 | OLLA/HARQ 风格随机 ACK 统计使用。 |
 | `continuous_tti.enabled` | 是否启用连续 TTI 模式 | `true`/`false` | 启用后每个 drop 只实例化一次信道并进行一次测量/上报；每个 warmup 和正式 TTI 都推进小尺度衰落、重新调度并更新 PF/OLLA。 |
@@ -106,7 +106,10 @@ B_{\mathrm{occupied}} =
 | `num_trps_per_sector` | 每 sector TRP 数 | 正整数，默认 `1` | v2.4 推荐使用此字段。 |
 | `num_panels_per_sector` | 兼容旧字段 | 正整数 | 建议与 `num_trps_per_sector` 保持一致；RF 架构才决定每 TRP 有多少 TX units。 |
 | `panel_azimuth_offsets_deg` | 物理阵列面板相对 sector boresight 的方位偏置 | 数组，单位 deg | 对 sub-connected 架构，不同物理面板可给不同 offset。默认 `[0,0]`。 |
-| `panel_power_mode` | 功率分配方式 | `per_tx_unit_equal`, `per_panel_equal`, `per_txru_equal`, `total_per_tx_unit` | 默认 `per_tx_unit_equal`，总功率除以全网 TX units。非 equal 模式会把 `tx_power_dbm` 作为每 TX unit 功率。 |
+| `panel_power_mode` | 已弃用的兼容字段 | 任意旧值 | 当前忽略该字段；`system.tx_power_dbm` 始终按“每 TRP 总功率、均分到物理面板”解释。 |
+
+例如一个 TRP 有 2 个物理面板，且 `tx_power_dbm: 40`（10 W），则每个面板
+使用 5 W（约 36.99 dBm）。网络中的每个 TRP 都采用同样的 10 W 总功率预算。
 
 ---
 

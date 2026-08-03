@@ -61,8 +61,6 @@ trp:
   # Boresight offsets for physical array panels. Default TRP has Mg*Ng*Mp*Np=2
   # vertical panels; both use the sector boresight here.
   panel_azimuth_offsets_deg: [0.0, 0.0]
-  # per_tx_unit_equal: total sector/TRP power is divided over all resolved TX units.
-  panel_power_mode: per_tx_unit_equal
 
 rf_architecture:
   # Case 1: sub-connected / panel-polarization connected.

@@ -54,6 +54,52 @@ def plot_bar(values: Dict[str, float], ylabel: str, title: str, path: str | Path
     plt.close(fig)
 
 
+def plot_local_nack_rate(rows: Sequence[Dict],
+                         associated_ue_ids: Sequence[int],
+                         scheme: str,
+                         drop: int,
+                         window_size: int,
+                         path: str | Path) -> None:
+    """Plot cell-local per-UE NACK-rate evolution for one scheme and drop."""
+    plt = _mpl()
+    ensure_dir(Path(path).parent)
+    fig = plt.figure(figsize=(8, 4.8))
+    plotted = 0
+    for ue_id in associated_ue_ids:
+        ue_rows = sorted(
+            (row for row in rows if int(row["ue_id"]) == int(ue_id)),
+            key=lambda row: int(row["window_index"]),
+        )
+        if not ue_rows:
+            continue
+        plt.plot(
+            [int(row["scheduled_tti_index_end"]) for row in ue_rows],
+            [float(row["local_nack_rate"]) for row in ue_rows],
+            marker="o", markersize=3, label=f"UE {ue_id}",
+        )
+        plotted += 1
+    if plotted == 0:
+        plt.text(
+            0.5, 0.5,
+            f"No complete {window_size}-scheduled-TTI window",
+            ha="center", va="center", transform=plt.gca().transAxes,
+        )
+    plt.ylim(0.0, 1.0)
+    plt.grid(True, alpha=0.3)
+    plt.xlabel("Cumulative scheduled TTI count per UE")
+    plt.ylabel("Local NACK rate")
+    plt.title(
+        f"Cell 0 local NACK rate - {scheme}, drop {drop}\n"
+        f"{window_size} scheduled TTIs per point; "
+        f"associated UEs={len(associated_ue_ids)}"
+    )
+    if plotted:
+        plt.legend(fontsize=7, ncol=2)
+    fig.tight_layout()
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+
+
 def plot_heatmap(x_grid: np.ndarray,
                  y_grid: np.ndarray,
                  power_dbm: np.ndarray,

@@ -5,17 +5,19 @@ from types import SimpleNamespace
 import numpy as np
 import beam_sls.sim as sim_module
 
-from beam_sls.codebook import BeamId
+from beam_sls.codebook import ArrayConfig, BeamId
 from beam_sls.config import load_config
 from beam_sls.feedback import ServiceCandidate, UEReport, make_reports
 from beam_sls.link import eesm, realized_sinr_grid, run_tti_loop
 from beam_sls.measurement import MeasurementResult, SparseGamma, compute_gamma_measurement
 from beam_sls.scheduler import ScheduledLink, ScheduleResult, _evaluate_assignments, exhaustive_schedule, normalize_domain_mode, schedule
-from beam_sls.sim import (build_paired_case_debug_lines,
+from beam_sls.sim import (build_cell_local_nack_rate_rows,
+                          build_paired_case_debug_lines,
                           build_scheduled_ue_su_throughput_rows,
                           build_system_drop_avg_goodput_rows,
                           build_system_tti_goodput_rows, build_ue_goodput_rows,
-                          run_simulation, schedule_similarity_rows,
+                          resolve_tx_power_w_per_panel, run_simulation,
+                          schedule_similarity_rows,
                           summarize_results,
                           summarize_scheduled_ue_su_throughput, summarize_su_snr)
 from beam_sls.topology import make_topology
@@ -37,7 +39,14 @@ def test_smoke(tmp_path: Path, monkeypatch):
     cfg["ue_array"]["max_beams"] = 4
     cfg["scheduler"]["algorithm"] = "greedy"
     cfg["coverage_heatmap"]["enabled"] = False
-    adapter = _OutageAwareFakeAdapter()
+    class SmokeAdapter(_OutageAwareFakeAdapter):
+        @staticmethod
+        def is_outage_from_sinr_lin(_sinr_lin, _mcs):
+            # This is an output-pipeline smoke test; keep it independent of
+            # random drop geometry and NumPy-version RNG details.
+            return False
+
+    adapter = SmokeAdapter()
     monkeypatch.setattr(sim_module, "make_link_adapter", lambda _cfg: adapter)
     monkeypatch.setattr(
         sim_module, "make_scheduler_link_adapter", lambda backing, _cfg: backing
@@ -54,6 +63,8 @@ def test_smoke(tmp_path: Path, monkeypatch):
     assert (tmp_path / "out" / "metrics" / "topk_interference_details.csv").exists()
     assert (tmp_path / "out" / "metrics" / "scheduled_ue_su_throughput.csv").exists()
     assert (tmp_path / "out" / "metrics" / "scheduled_ue_su_throughput_summary.csv").exists()
+    assert (tmp_path / "out" / "metrics" / "cell0_local_nack_rate.csv").exists()
+    assert (tmp_path / "out" / "metrics" / "cell0_local_nack_rate_status.csv").exists()
     assert (tmp_path / "out" / "metrics" / "scheduler_iterations.csv").exists()
     assert (tmp_path / "out" / "metrics" / "runtime_phases.csv").exists()
     assert (tmp_path / "out" / "metrics" / "measurement_domains.csv").exists()
@@ -61,6 +72,10 @@ def test_smoke(tmp_path: Path, monkeypatch):
     assert (tmp_path / "out" / "figures" / "system_tti_goodput_cdf.png").exists()
     assert (tmp_path / "out" / "figures" / "system_drop_avg_goodput_cdf.png").exists()
     assert (tmp_path / "out" / "figures" / "scheduled_ue_su_throughput_cdf.png").exists()
+    assert (
+        tmp_path / "out" / "figures" / "cell0_local_nack_rate"
+        / "baseline" / "drop_0000.png"
+    ).exists()
     with (tmp_path / "out" / "metrics" / "runtime_phases.csv").open(
         encoding="utf-8", newline=""
     ) as handle:
@@ -876,6 +891,87 @@ def test_system_goodput_helpers_include_zero_ttis_and_average_each_drop():
         system_tti_goodput_rows=tti_rows,
     )
     assert summary["a"]["avg_system_goodput_mbps"] == 5.75
+
+
+def test_tx_power_is_per_trp_and_equally_split_only_across_physical_panels():
+    cfg = load_config(None)
+    cfg["system"]["tx_power_dbm"] = 40.0  # 10 W for every TRP.
+    cfg["topology"]["num_sites"] = 7
+    cfg["trp"]["num_trps_per_sector"] = 3
+    tx_cfg = ArrayConfig.from_dict(cfg["tx_array"])
+
+    assert tx_cfg.num_array_panels == 2
+    assert np.isclose(resolve_tx_power_w_per_panel(cfg, tx_cfg), 5.0)
+
+
+def test_summary_post_warmup_kpis_include_zero_schedule_ttis():
+    link_rows = [
+        {"scheme": "a", "drop": 0, "tti": 0, "ue_id": 0,
+         "goodput_mbps": 1.0, "effective_sinr_db": 1.0,
+         "tbler": 0.0, "ack": 1},
+        {"scheme": "a", "drop": 0, "tti": 0, "ue_id": 1,
+         "goodput_mbps": 1.0, "effective_sinr_db": 2.0,
+         "tbler": 0.2, "ack": 1},
+        {"scheme": "a", "drop": 0, "tti": 1, "ue_id": 0,
+         "goodput_mbps": 1.0, "effective_sinr_db": 3.0,
+         "tbler": 0.0, "ack": 1},
+    ]
+    measured_ttis = [
+        {"scheme": "a", "drop": 0, "tti": tti,
+         "system_goodput_mbps": 0.0}
+        for tti in range(4)
+    ]
+
+    summary = summarize_results(
+        link_rows, ["a"], system_tti_goodput_rows=measured_ttis,
+    )["a"]
+
+    assert np.isclose(summary["tbler_zero_ratio"], 2.0 / 3.0)
+    assert np.isclose(summary["avg_scheduled_users_per_tti"], 0.75)
+    assert np.isclose(summary["p05_effective_sinr_db"], np.percentile([1, 2, 3], 5))
+    assert summary["p50_effective_sinr_db"] == 2.0
+    assert np.isclose(summary["p95_effective_sinr_db"], np.percentile([1, 2, 3], 95))
+
+
+def test_cell_local_nack_rate_uses_complete_500_scheduled_tti_windows():
+    link_rows = []
+    for tti in range(1001):
+        if tti < 500:
+            ack = int(tti >= 50)
+        elif tti < 1000:
+            ack = int(tti >= 600)
+        else:
+            ack = 0
+        link_rows.append({
+            "scheme": "a", "drop": 0, "tti": tti, "ue_id": 7,
+            "ack": ack, "link_position": 0,
+        })
+    # This UE is associated to another cell and must not enter cell-0 output.
+    link_rows.extend({
+        "scheme": "a", "drop": 0, "tti": tti, "ue_id": 8,
+        "ack": 0, "link_position": 0,
+    } for tti in range(500))
+
+    rows, status = build_cell_local_nack_rate_rows(
+        link_rows,
+        [
+            {"drop": 0, "ue_id": 7, "serving_cell": 0},
+            {"drop": 0, "ue_id": 8, "serving_cell": 1},
+        ],
+        ["a"],
+    )
+
+    assert [row["ue_id"] for row in rows] == [7, 7]
+    assert [row["num_scheduled_tti"] for row in rows] == [500, 500]
+    assert np.allclose([row["local_nack_rate"] for row in rows], [0.1, 0.2])
+    assert status == [{
+        "scheme": "a", "drop": 0, "cell_id": 0, "ue_id": 7,
+        "window_size_scheduled_tti": 500,
+        "num_scheduled_tti": 1001,
+        "num_complete_windows": 2,
+        "discarded_tail_scheduled_tti": 1,
+        "tti_scope": "post_warmup_only",
+    }]
 
 
 class _OutageAwareFakeAdapter:

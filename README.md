@@ -615,6 +615,8 @@ figures/best_beam_heatmap.png
 figures/fixed_vertical_beam_cdf.png
 metrics/summary.csv
 metrics/link_tti.csv
+metrics/cell0_local_nack_rate.csv
+metrics/cell0_local_nack_rate_status.csv
 metrics/schedules.csv
 metrics/scheduler_stats.csv
 metrics/scheduler_iterations.csv
@@ -638,6 +640,7 @@ figures/system_tti_goodput_cdf.png
 figures/system_drop_avg_goodput_cdf.png
 figures/reported_su_snr_cdf.png
 figures/reported_max_su_snr_per_ue_cdf.png
+figures/cell0_local_nack_rate/<scheme>/drop_<drop>.png
 ```
 
 `baseline_no_interference_upper_bound` 是 baseline 原调度集合在“波束间干扰强制为零”条件下重新运行链路层得到的诊断上界，并出现在 `link_tti.csv`、`summary.csv` 和吞吐 CDF 中。`ue_goodput.csv` 对每个 `(drop, UE)` 跨全部正式 TTI 求平均，未调度 UE 按零吞吐计入。`system_tti_goodput.csv` 显式保留零吞吐 TTI；`system_drop_avg_goodput.csv` 对每个 drop 的完整正式统计窗口求平均，因此这些 CDF 不会产生幸存者偏差。
@@ -649,6 +652,21 @@ figures/reported_max_su_snr_per_ue_cdf.png
 `su_snr_db`/`su_mcs`。`metrics/scheduler_iterations.csv` 的
 `selected_tiebreak_snr_db`/`selected_tiebreak_mcs` 记录 greedy 每轮最终选中候选
 用于平局判定的预测值。
+
+`system.tx_power_dbm` 表示每个 TRP 的总发射功率。代码先转换到线性功率，
+再均分给该 TRP 的所有物理面板；不会除以全网小区数、站点数或 TRP 数。
+`panel_power_mode` 是已弃用兼容字段，不再改变该语义。解析后的每 TRP/每面板功率
+会写入 `resolved_config.yaml`、`array_config_summary.json` 和 `metrics/drops.csv`。
+
+`summary.csv/json` 对每个方案新增 `tbler_zero_ratio`、
+`avg_scheduled_users_per_tti`、`p05_effective_sinr_db`、
+`p50_effective_sinr_db` 和 `p95_effective_sinr_db`。这些指标只使用 warm-up
+之后的正式 TTI；平均调度用户数的分母包含零调度 TTI。
+
+小区 0 的局部 NACK 统计以每个 drop 中实际关联到小区 0 的 UE 为对象，只沿该 UE
+被调度的正式 TTI 样本前进，每满 500 个样本计算一个 NACK rate 曲线点。
+不足 500 的尾段不进入曲线，数量记录在 `cell0_local_nack_rate_status.csv`；即使某个
+drop 没有完整窗口，也会生成说明性图片。
 
 已有 run 可以用独立脚本重新选择曲线和样式，无需重跑仿真：
 

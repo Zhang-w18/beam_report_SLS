@@ -41,6 +41,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "system": {
         "subcarrier_spacing_khz": 120.0,
+        # Total transmit power of each TRP. It is divided equally among that
+        # TRP's physical array panels in the linear-power domain.
         "tx_power_dbm": 33.0,
         "num_drops": 10,
         "num_tti_per_drop": 50,
@@ -79,7 +81,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # Backward-compatible alias; kept equal to num_trps_per_sector.
         "num_panels_per_sector": 1,
         "panel_azimuth_offsets_deg": [0.0, 0.0],
-        "panel_power_mode": "per_tx_unit_equal",
     },
     "rf_architecture": {
         # case 1: panel_polarization_subarray/sub-connected;

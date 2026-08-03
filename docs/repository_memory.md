@@ -208,6 +208,10 @@ g[t+1] = rho*g[t] + sqrt(1-rho^2)*z[t]
 - `scheduler.max_mu_order`；
 - `measurement.tx_panel_index` 和 compact panel view。
 
+`system.tx_power_dbm` 固定表示每个 TRP 的总功率，在线性功率域除以
+`tx_array.num_array_panels` 得到每物理面板功率；它不除以网络小区数、站点数、
+TRP 数或 TXRU 数。旧 `trp.panel_power_mode` 仅作为被忽略的兼容输入保留。
+
 `scheduler.max_mu_order: auto` 由 RF architecture 和调度域解析。修改阵列或 RF 逻辑时，
 至少检查：
 
@@ -351,6 +355,8 @@ TBLER 与 MCS 选择是两条独立路径：
 | `metrics/system_tti_goodput.csv` | 每 `(scheme, drop, TTI)` 的系统总 goodput；显式包含零吞吐 TTI |
 | `metrics/system_drop_avg_goodput.csv` | 每 `(scheme, drop)` 在完整正式统计窗口内的平均系统 goodput |
 | `metrics/summary.csv/json` | 方案级系统吞吐、UE 边缘吞吐、BLER、增益摘要 |
+| `metrics/cell0_local_nack_rate.csv` | 小区 0、每 drop、每方案、每 UE 的局部 NACK rate；每个点严格包含 500 个该 UE 被调度的正式 TTI |
+| `metrics/cell0_local_nack_rate_status.csv` | 小区 0 每 UE 的已调度样本数、完整 500-TTI 窗口数和未纳入曲线的尾段数 |
 | `metrics/scheduler_stats.csv` | 调度器候选数、剪枝、耗时和最终调度规模 |
 | `metrics/scheduler_iterations.csv` | greedy 逐轮选择信息 |
 | `metrics/runtime_phases.csv` | feedback、scheduler、link evaluation 等阶段耗时 |
