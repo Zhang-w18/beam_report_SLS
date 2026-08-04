@@ -51,6 +51,13 @@ from .utils import (dbm_to_watt, ensure_dir, occupied_bandwidth_hz, percentile,
 BASELINE_NO_INTERFERENCE_SCHEME = "baseline_no_interference_upper_bound"
 
 
+def _rng_for_drop(random_seed: int, drop: int) -> np.random.Generator:
+    """Return a reproducible, drop-specific RNG stream."""
+    return np.random.default_rng(
+        np.random.SeedSequence([int(random_seed), int(drop)])
+    )
+
+
 def _asdict_rows(rows: List[Any]) -> List[Dict[str, Any]]:
     out = []
     for r in rows:
@@ -746,7 +753,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             f"elapsed={lookup_status['build_elapsed_s']:.3f}s",
         )
 
-    rng_master = np.random.default_rng(int(cfg["system"].get("random_seed", 1)))
+    random_seed = int(cfg["system"].get("random_seed", 1))
     tx_cfg = ArrayConfig.from_dict(cfg["tx_array"])
     rx_cfg = ArrayConfig.from_dict(cfg["ue_array"])
     rf_arch = resolve_rf_architecture(cfg, tx_cfg)
@@ -797,7 +804,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     })
 
     # Build a representative topology once to determine network cells and draw topology.
-    topo0 = make_topology(cfg, np.random.default_rng(int(cfg["system"].get("random_seed", 1))))
+    topo0 = make_topology(cfg, np.random.default_rng(random_seed))
     site_id_by_cell = [topo0.sector_by_cell(c).site_id for c in range(topo0.num_cells)]
     beam_ids, tx_beams = build_network_tx_beams(
         num_cells=topo0.num_cells,
@@ -884,7 +891,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     _progress(cfg, f"[run] drops={num_drops}, warmup_tti/drop={olla_warmup_tti}, measured_tti/drop={num_tti}, cases={','.join(case_ids)}, beams={len(beam_ids)}, tx_units/sector={_panels_per_cell(cfg, tx_cfg, rf_arch)}")
     for drop in range(num_drops):
         _progress(cfg, f"[drop {drop+1}/{num_drops}] topology + channel generation")
-        rng = np.random.default_rng(int(rng_master.integers(0, 2**31 - 1)))
+        rng = _rng_for_drop(random_seed, drop)
         topology_started = perf_counter()
         topo = make_topology(cfg, rng)
         topology_elapsed_s = float(perf_counter() - topology_started)

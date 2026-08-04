@@ -20,6 +20,17 @@ class ChannelBackendError(RuntimeError):
     pass
 
 
+def _seed_sionna_from_rng(sionna_config: object,
+                          rng: np.random.Generator) -> int:
+    """Seed Sionna's dedicated RNGs from this drop's NumPy RNG stream."""
+    seed = int(rng.integers(0, 2**31 - 1))
+    # Sionna's public config.seed setter resets its TensorFlow, NumPy, and
+    # Python RNGs. Drawing the seed from ``rng`` preserves the master-seed ->
+    # drop-seed -> channel-seed hierarchy used by the rest of the simulator.
+    setattr(sionna_config, "seed", seed)
+    return seed
+
+
 @dataclass
 class ChannelRealization:
     # H[ue, tx_unit, freq, nrx, ntx]
@@ -330,10 +341,12 @@ class SionnaTR38901Adapter:
     def generate(self, topology: Topology, rng: np.random.Generator) -> ChannelRealization:
         try:
             import tensorflow as tf  # type: ignore
+            from sionna.phy import config as sionna_config  # type: ignore
             from sionna.phy.channel.tr38901 import PanelArray, UMa, UMi, RMa  # type: ignore
         except Exception as e:
             raise ChannelBackendError(f"Sionna TR38901 backend unavailable: {type(e).__name__}: {e}") from e
 
+        sionna_seed = _seed_sionna_from_rng(sionna_config, rng)
         sc = self.cfg["scenario"]
         meas = self.cfg["measurement"]
         sionna_cfg = self.cfg.get("sionna", {})
@@ -452,7 +465,8 @@ class SionnaTR38901Adapter:
         # Pathloss is already included by Sionna. Fill diagnostic arrays with NaN.
         status = (
             f"OK: Sionna CIR a={a_np.shape}, tau={tau_np.shape}, "
-            f"internal_h={h.shape}, time_index=0, antenna_order=explicitly_mapped"
+            f"internal_h={h.shape}, time_index=0, antenna_order=explicitly_mapped, "
+            f"sionna_seed={sionna_seed}"
         )
         return ChannelRealization(h_freq=h, freqs_hz=freqs,
                                   pathloss_db=np.full(num_u, np.nan),

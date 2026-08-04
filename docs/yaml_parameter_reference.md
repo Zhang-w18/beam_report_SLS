@@ -51,7 +51,7 @@
 | `continuous_tti.duration_ms` | 每个 drop 的正式统计时长 | 正数，单位 ms | `num_tti=null` 时使用，且必须是 `pdsch.slot_duration_ms` 的整数倍。例如 2 ms / 0.125 ms = 16 TTI。 |
 | `continuous_tti.num_tti` | 每个 drop 的正式统计 TTI 总数 | 正整数或 `null` | 非 `null` 时优先于 `duration_ms`；CLI `--num-tti` 可覆盖。 |
 | `continuous_tti.warmup_tti` | 每个 drop 的 warmup TTI 数 | 非负整数或 `null` | warmup 更新信道、PF、OLLA和调度，但不进入 CSV/CDF；`null` 时沿用 `link_abstraction.olla_warmup_tti`。 |
-| `random_seed` | 随机种子 | 整数 | 用于复现实验。 |
+| `random_seed` | 随机种子 | 整数 | 用于复现实验；与 drop 索引派生独立 drop RNG，并进一步控制 Sionna 信道 RNG。固定种子和其余配置会复现逐 drop 的撒点及信道，同时不同 drop 使用不同随机流。 |
 | `target_bler` | 目标 BLER | `(0,1)`，默认 `0.1` | ILLA/MCS 选择和 OLLA 使用。 |
 
 ---

@@ -1,8 +1,26 @@
 import numpy as np
 
+from beam_sls.channel import _seed_sionna_from_rng
 from beam_sls.codebook import (ArrayConfig, build_network_tx_beams,
                                dft_codebook_from_array, distance_range_vertical_samples,
                                steering_vector_from_array)
+
+
+def test_sionna_seed_is_derived_reproducibly_from_simulation_rng():
+    class FakeSionnaConfig:
+        seed = None
+
+    expected_rng = np.random.default_rng(20260804)
+    expected_seed = int(expected_rng.integers(0, 2**31 - 1))
+
+    simulation_rng = np.random.default_rng(20260804)
+    sionna_config = FakeSionnaConfig()
+    actual_seed = _seed_sionna_from_rng(sionna_config, simulation_rng)
+
+    assert actual_seed == expected_seed
+    assert sionna_config.seed == expected_seed
+    # The Sionna seed is one owned draw from the same reproducible stream.
+    assert simulation_rng.integers(0, 2**31 - 1) == expected_rng.integers(0, 2**31 - 1)
 
 
 def test_requested_trp_array_config():

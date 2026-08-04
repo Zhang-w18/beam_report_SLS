@@ -24,6 +24,17 @@ from beam_sls.topology import make_topology
 from beam_sls.utils import occupied_bandwidth_hz
 
 
+def test_drop_rng_streams_are_reproducible_and_distinct():
+    seed = 20260804
+    first_run = [sim_module._rng_for_drop(seed, drop).random(8) for drop in range(4)]
+    second_run = [sim_module._rng_for_drop(seed, drop).random(8) for drop in range(4)]
+
+    for first, second in zip(first_run, second_run):
+        assert np.array_equal(first, second)
+    for drop in range(1, len(first_run)):
+        assert not np.array_equal(first_run[0], first_run[drop])
+
+
 def test_smoke(tmp_path: Path, monkeypatch):
     cfg = load_config(None)
     cfg["scenario"]["channel_model"] = "numpy_geometric_uma"

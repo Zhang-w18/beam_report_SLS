@@ -329,6 +329,9 @@ TBLER 与 MCS 选择是两条独立路径：
 
 ## 9. 共同随机数与对比
 
+- `system.random_seed` 与 drop 索引通过 `SeedSequence` 派生彼此独立的 drop RNG；
+  每个 drop 依次用于 UE 撒点和 NumPy 信道随机量。Sionna 后端再从该 drop RNG
+  派生 `sionna.phy.config.seed`，因此整次仿真可复现而不同 drop 不会复用同一随机流。
 - evaluation case 尽量从相同 ACK 随机流开始，降低方案对比方差。
 - baseline no-interference upper bound 复用 baseline schedule，并强制忽略波束间干扰。
 - 上界参考的 ACK 随机数应与原 schedule 对齐。
