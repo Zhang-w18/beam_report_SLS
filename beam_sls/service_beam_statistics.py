@@ -143,6 +143,78 @@ def _summary_rows(
     return rows
 
 
+def _global_collision_pmf_rows(
+    samples_by_beam: Mapping[int, List[int]],
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Build one PMF from all nonzero beam-observation samples.
+
+    A zero beam count means that no UE used that beam in that window and is
+    not a scheduled-beam sample.  The global collision PMF is therefore
+    conditioned on ``N_b > 0`` and has support 1, 2, 3, ... .
+    """
+    values = np.asarray(
+        [int(count) for samples in samples_by_beam.values() for count in samples if int(count) > 0],
+        dtype=int,
+    )
+    total_nonzero_samples = int(values.size)
+    if total_nonzero_samples == 0:
+        return [], {
+            "num_beam_observation_samples": int(
+                sum(len(samples) for samples in samples_by_beam.values())
+            ),
+            "num_nonzero_beam_observation_samples": 0,
+            "num_no_collision_samples": 0,
+            "num_collision_samples": 0,
+            "no_collision_probability": 0.0,
+            "collision_probability": 0.0,
+        }
+    rows = [
+        {
+            "ue_count": int(ue_count),
+            "sample_count": int(np.count_nonzero(values == ue_count)),
+            "probability": float(np.count_nonzero(values == ue_count) / total_nonzero_samples),
+        }
+        for ue_count in range(1, int(values.max()) + 1)
+    ]
+    no_collision_samples = int(np.count_nonzero(values == 1))
+    collision_samples = int(np.count_nonzero(values >= 2))
+    return rows, {
+        "num_beam_observation_samples": int(
+            sum(len(samples) for samples in samples_by_beam.values())
+        ),
+        "num_nonzero_beam_observation_samples": total_nonzero_samples,
+        "num_no_collision_samples": no_collision_samples,
+        "num_collision_samples": collision_samples,
+        "no_collision_probability": float(no_collision_samples / total_nonzero_samples),
+        "collision_probability": float(collision_samples / total_nonzero_samples),
+    }
+
+
+def _cell_arrival_summary_rows(
+    active_samples_by_cell: Mapping[int, List[int]],
+    arrival_samples_by_cell: Mapping[int, List[int]],
+    num_observations: int,
+) -> List[Dict[str, Any]]:
+    """Summarize unique active UEs and raw arrival events per serving cell."""
+    rows: List[Dict[str, Any]] = []
+    for cell in sorted(active_samples_by_cell):
+        active = np.asarray(active_samples_by_cell[cell], dtype=float)
+        arrivals = np.asarray(arrival_samples_by_cell.get(cell, []), dtype=float)
+        rows.append({
+            "cell": int(cell),
+            "num_observations": int(num_observations),
+            "mean_arriving_ue_count": float(np.mean(active)) if active.size else 0.0,
+            "mean_active_ue_count": float(np.mean(active)) if active.size else 0.0,
+            "variance_active_ue_count": float(np.var(active)) if active.size else 0.0,
+            "p50_active_ue_count": percentile(active, 50.0),
+            "p90_active_ue_count": percentile(active, 90.0),
+            "p95_active_ue_count": percentile(active, 95.0),
+            "mean_num_arrivals": float(np.mean(arrivals)) if arrivals.size else 0.0,
+            "total_num_arrivals": int(np.sum(arrivals)) if arrivals.size else 0,
+        })
+    return rows
+
+
 def _selection_rows(
     beam_ids: List[BeamId],
     selection_counts: Mapping[int, int],
@@ -258,6 +330,7 @@ def run_service_beam_statistics(cfg: Dict[str, Any], out_dir: str | Path) -> Dic
 
     cache_rows: List[Dict[str, Any]] = []
     arrival_rows: List[Dict[str, Any]] = []
+    cell_arrival_rows: List[Dict[str, Any]] = []
     candidate_count_rows: List[Dict[str, Any]] = []
     active_count_rows: List[Dict[str, Any]] = []
     selection_rows: List[Dict[str, Any]] = []
@@ -271,6 +344,12 @@ def run_service_beam_statistics(cfg: Dict[str, Any], out_dir: str | Path) -> Dic
     }
     active_samples_by_beam: Dict[int, List[int]] = {
         int(i): [] for i in range(len(beam_ids))
+    }
+    active_samples_by_cell: Dict[int, List[int]] = {
+        int(cell): [] for cell in range(topo0.num_cells)
+    }
+    arrival_samples_by_cell: Dict[int, List[int]] = {
+        int(cell): [] for cell in range(topo0.num_cells)
     }
     save_arrival_samples = bool(stats_cfg.get("save_per_ue_arrival_samples", False))
 
@@ -379,6 +458,12 @@ def run_service_beam_statistics(cfg: Dict[str, Any], out_dir: str | Path) -> Dic
                 "candidate_ue_count": int(count),
             })
 
+        ue_indices_by_cell: Dict[int, List[int]] = {
+            int(cell): [] for cell in range(topo.num_cells)
+        }
+        for ue_index, ue in enumerate(topo.ues):
+            ue_indices_by_cell[int(ue.serving_cell)].append(int(ue_index))
+
         for observation_with_warmup in range(warmup_observations + num_observations):
             num_arrivals = sample_ue_arrivals(traffic_rng, traffic, len(topo.ues))
             if observation_with_warmup < warmup_observations:
@@ -412,6 +497,24 @@ def run_service_beam_statistics(cfg: Dict[str, Any], out_dir: str | Path) -> Dic
                         "best_service_beam_index": int(beam_index),
                         "best_service_beam_id": beam_ids[beam_index].short(),
                     })
+            for cell in range(topo.num_cells):
+                cell_arrivals = [
+                    int(num_arrivals[ue_index])
+                    for ue_index in ue_indices_by_cell[cell]
+                ]
+                active_count = int(sum(value > 0 for value in cell_arrivals))
+                total_arrivals = int(sum(cell_arrivals))
+                active_samples_by_cell[cell].append(active_count)
+                arrival_samples_by_cell[cell].append(total_arrivals)
+                cell_arrival_rows.append({
+                    "drop": int(drop),
+                    "observation": int(observation),
+                    "cell": int(cell),
+                    "active_ue_count": active_count,
+                    "arriving_ue_count": active_count,
+                    "num_arrivals": total_arrivals,
+                    "candidate_ue_count": int(len(ue_indices_by_cell[cell])),
+                })
             counts_by_beam = count_arriving_ues_by_beam(
                 [ue.ue_id for ue in topo.ues],
                 num_arrivals,
@@ -453,6 +556,14 @@ def run_service_beam_statistics(cfg: Dict[str, Any], out_dir: str | Path) -> Dic
     active_summary_rows = _summary_rows(
         beam_ids, active_samples_by_beam, traffic, total_observations
     )
+    global_collision_pmf_rows, global_collision_summary = _global_collision_pmf_rows(
+        active_samples_by_beam
+    )
+    cell_arrival_summary_rows = _cell_arrival_summary_rows(
+        active_samples_by_cell,
+        arrival_samples_by_cell,
+        total_observations,
+    )
     metrics_dir = out_dir / "metrics"
     write_csv(metrics_dir / "service_beam_ue_cache.csv", cache_rows)
     write_csv(metrics_dir / "ftp_ue_arrival_samples.csv", arrival_rows)
@@ -479,6 +590,19 @@ def run_service_beam_statistics(cfg: Dict[str, Any], out_dir: str | Path) -> Dic
     write_csv(
         metrics_dir / "service_beam_active_ue_count_summary.csv",
         active_summary_rows,
+    )
+    write_csv(
+        metrics_dir / "service_beam_global_collision_pmf.csv",
+        global_collision_pmf_rows,
+    )
+    write_csv(
+        metrics_dir / "service_beam_global_collision_summary.csv",
+        [global_collision_summary],
+    )
+    write_csv(metrics_dir / "cell_arrival_ue_count_samples.csv", cell_arrival_rows)
+    write_csv(
+        metrics_dir / "cell_arrival_ue_count_summary.csv",
+        cell_arrival_summary_rows,
     )
     write_csv(metrics_dir / "service_beam_selection_probability.csv", selection_rows)
     write_csv(metrics_dir / "beams.csv", [beam.to_dict() for beam in beam_ids])
@@ -510,6 +634,21 @@ def run_service_beam_statistics(cfg: Dict[str, Any], out_dir: str | Path) -> Dic
             float(np.mean([row["busy_probability"] for row in active_summary_rows]))
             if active_summary_rows else 0.0
         ),
+        "global_no_collision_probability": global_collision_summary[
+            "no_collision_probability"
+        ],
+        "global_collision_probability": global_collision_summary[
+            "collision_probability"
+        ],
+        "global_collision_samples": global_collision_summary[
+            "num_nonzero_beam_observation_samples"
+        ],
+        "mean_arriving_ue_count_per_cell": (
+            float(np.mean([
+                row["mean_arriving_ue_count"] for row in cell_arrival_summary_rows
+            ]))
+            if cell_arrival_summary_rows else 0.0
+        ),
         "outputs": {
             "ue_cache": "metrics/service_beam_ue_cache.csv",
             "arrival_samples": "metrics/ftp_ue_arrival_samples.csv",
@@ -519,6 +658,10 @@ def run_service_beam_statistics(cfg: Dict[str, Any], out_dir: str | Path) -> Dic
             "active_count_samples": "metrics/service_beam_active_ue_count_samples.csv",
             "active_pmf": "metrics/service_beam_active_ue_count_pmf.csv",
             "active_summary": "metrics/service_beam_active_ue_count_summary.csv",
+            "global_collision_pmf": "metrics/service_beam_global_collision_pmf.csv",
+            "global_collision_summary": "metrics/service_beam_global_collision_summary.csv",
+            "cell_arrival_samples": "metrics/cell_arrival_ue_count_samples.csv",
+            "cell_arrival_summary": "metrics/cell_arrival_ue_count_summary.csv",
         },
     }
     write_json(metrics_dir / "summary.json", summary)

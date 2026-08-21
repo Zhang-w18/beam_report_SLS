@@ -104,7 +104,13 @@ def main() -> None:
             f"  mean_candidate_ue_count_per_beam="
             f"{summary['mean_candidate_ue_count_per_beam']:.6f} "
             f"mean_active_ue_count_per_beam="
-            f"{summary['mean_active_ue_count_per_beam']:.6f}"
+            f"{summary['mean_active_ue_count_per_beam']:.6f} "
+            f"no_collision_probability="
+            f"{summary['global_no_collision_probability']:.6f} "
+            f"collision_probability="
+            f"{summary['global_collision_probability']:.6f} "
+            f"mean_arriving_ue_count_per_cell="
+            f"{summary['mean_arriving_ue_count_per_cell']:.6f}"
         )
         print(f"Outputs written to: {Path(args.out).resolve()}")
         return

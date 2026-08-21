@@ -400,8 +400,12 @@ TBLER 与 MCS 选择是两条独立路径：
 | `metrics/service_beam_candidate_ue_count_pmf.csv` | 静态候选 UE beam sharing PMF，分母为 drop 数 |
 | `metrics/service_beam_candidate_ue_count_summary.csv` | 静态候选 UE beam sharing 的均值、方差和分位数 |
 | `metrics/service_beam_active_ue_count_samples.csv` | 每 `(drop, observation, beam)` 的窗口 active UE 数，含 0 |
-| `metrics/service_beam_active_ue_count_pmf.csv` | 窗口 active UE beam collision PMF，分母为 drop 数乘窗口数 |
+| `metrics/service_beam_active_ue_count_pmf.csv` | 逐 beam 窗口 active UE PMF，作为诊断，不是最终全局 collision PMF |
 | `metrics/service_beam_active_ue_count_summary.csv` | 窗口 active UE collision 的均值、方差和 idle/busy 概率 |
+| `metrics/service_beam_global_collision_pmf.csv` | 合并所有非零 beam-observation 样本的全局 collision PMF，支持 `ue_count=1,2,...` |
+| `metrics/service_beam_global_collision_summary.csv` | 全局无碰撞概率 `P(K=1)`、碰撞概率 `P(K>=2)` 和样本数 |
+| `metrics/cell_arrival_ue_count_samples.csv` | 每 `(drop, observation, cell)` 的唯一 active UE 数和 raw arrival event 数 |
+| `metrics/cell_arrival_ue_count_summary.csv` | 每小区平均 active/arriving UE 数和平均 raw arrival 次数 |
 
 解读原则：
 

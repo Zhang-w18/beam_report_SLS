@@ -11,6 +11,8 @@ from beam_sls.ftp_traffic import (
     sample_ue_arrivals,
 )
 from beam_sls.service_beam_statistics import (
+    _cell_arrival_summary_rows,
+    _global_collision_pmf_rows,
     _pmf_rows,
     _summary_rows,
     run_service_beam_statistics,
@@ -63,6 +65,29 @@ def test_zero_arrival_rate_and_pmf_normalization():
     assert all(row["probability"] == 1.0 for row in zero_pmf if row["ue_count"] == 0)
 
 
+def test_global_collision_pmf_pools_only_nonzero_beam_samples():
+    rows, summary = _global_collision_pmf_rows({0: [0, 1, 2], 1: [1, 1, 0]})
+    assert rows == [
+        {"ue_count": 1, "sample_count": 3, "probability": 0.75},
+        {"ue_count": 2, "sample_count": 1, "probability": 0.25},
+    ]
+    assert summary["num_beam_observation_samples"] == 6
+    assert summary["num_nonzero_beam_observation_samples"] == 4
+    assert summary["no_collision_probability"] == 0.75
+    assert summary["collision_probability"] == 0.25
+
+
+def test_cell_arrival_summary_reports_active_and_raw_arrivals():
+    rows = _cell_arrival_summary_rows(
+        {0: [1, 0, 2], 1: [0, 1, 0]},
+        {0: [2, 0, 3], 1: [0, 4, 0]},
+        3,
+    )
+    assert rows[0]["mean_arriving_ue_count"] == 1.0
+    assert rows[0]["mean_num_arrivals"] == 5.0 / 3.0
+    assert rows[1]["mean_active_ue_count"] == 1.0 / 3.0
+
+
 def test_statistics_mode_does_not_contain_anonymous_multinomial_call():
     source = inspect.getsource(run_service_beam_statistics)
     assert "allocate_arrivals_to_beams" not in source
@@ -78,6 +103,10 @@ def test_statistics_smoke_binds_arrivals_to_cached_ues_and_writes_zero_rows(tmp_
     candidate_pmf = _read_csv(metrics / "service_beam_candidate_ue_count_pmf.csv")
     active_counts = _read_csv(metrics / "service_beam_active_ue_count_samples.csv")
     active_pmf = _read_csv(metrics / "service_beam_active_ue_count_pmf.csv")
+    global_pmf = _read_csv(metrics / "service_beam_global_collision_pmf.csv")
+    global_summary = _read_csv(metrics / "service_beam_global_collision_summary.csv")
+    cell_samples = _read_csv(metrics / "cell_arrival_ue_count_samples.csv")
+    cell_summary = _read_csv(metrics / "cell_arrival_ue_count_summary.csv")
     assert summary["ftp_model"] == "3gpp_ftp_model_3_arrival_only"
     assert len(cache) == 210
     cache_by_key = {(int(row["drop"]), int(row["ue_id"])): row for row in cache}
@@ -107,6 +136,26 @@ def test_statistics_smoke_binds_arrivals_to_cached_ues_and_writes_zero_rows(tmp_
     for beam_index in {int(row["beam_index"]) for row in candidate_pmf}:
         rows = [row for row in candidate_pmf if int(row["beam_index"]) == beam_index]
         assert abs(sum(float(row["probability"]) for row in rows) - 1.0) < 1e-12
+    assert global_pmf[0]["ue_count"] == "1"
+    assert abs(sum(float(row["probability"]) for row in global_pmf) - 1.0) < 1e-12
+    assert abs(
+        float(global_summary[0]["no_collision_probability"])
+        + float(global_summary[0]["collision_probability"])
+        - 1.0
+    ) < 1e-12
+    assert abs(float(global_summary[0]["no_collision_probability"]) - sum(
+        float(row["probability"]) for row in global_pmf if int(row["ue_count"]) == 1
+    )) < 1e-12
+    assert len(cell_samples) == 20 * 3
+    assert len(cell_summary) == 3
+    for observation in range(20):
+        cell_rows = [
+            row for row in cell_samples if int(row["observation"]) == observation
+        ]
+        assert sum(int(row["active_ue_count"]) for row in cell_rows) == sum(
+            int(row["has_arrival"]) for row in arrivals
+            if int(row["observation"]) == observation
+        )
 
 
 def test_default_mode_remains_scheduling():
