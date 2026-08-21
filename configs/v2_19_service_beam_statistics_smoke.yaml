@@ -9,8 +9,8 @@ scenario:
 topology:
   layout: one_site_three_sector
   num_sites: 1
-  sectors_per_site: 1
-  sector_azimuths_deg: [0.0]
+  sectors_per_site: 3
+  sector_azimuths_deg: [0.0, 120.0, 240.0]
   sector_width_deg: 120.0
 
 system:
@@ -24,7 +24,7 @@ pdsch:
   num_prbs: 24
 
 ue_drop:
-  num_ut_per_sector: 4
+  num_ut_per_sector: 70
   distribution: uniform_in_sector
 
 trp:
@@ -78,6 +78,7 @@ service_beam_statistics:
   observations_per_drop: 20
   warmup_observations: 2
   observation_interval_ms: 100.0
+  candidate_ues_per_sector_per_drop: 70
   include_zero_count: true
   save_per_ue_arrival_samples: true
   traffic:

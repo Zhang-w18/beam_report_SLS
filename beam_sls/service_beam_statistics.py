@@ -19,6 +19,7 @@ from .config import save_config
 from .ftp_traffic import (
     FTPArrivalOnlyConfig,
     count_arriving_ues_by_beam,
+    count_ues_by_beam,
     sample_ue_arrivals,
 )
 from .measurement import associate_ues_by_average_rsrp, compute_gamma_measurement
@@ -257,14 +258,20 @@ def run_service_beam_statistics(cfg: Dict[str, Any], out_dir: str | Path) -> Dic
 
     cache_rows: List[Dict[str, Any]] = []
     arrival_rows: List[Dict[str, Any]] = []
-    count_rows: List[Dict[str, Any]] = []
+    candidate_count_rows: List[Dict[str, Any]] = []
+    active_count_rows: List[Dict[str, Any]] = []
     selection_rows: List[Dict[str, Any]] = []
     site_rows_all: List[Dict[str, Any]] = []
     sector_rows_all: List[Dict[str, Any]] = []
     channel_rows: List[Dict[str, Any]] = []
     runtime_rows: List[Dict[str, Any]] = []
     drop_rows: List[Dict[str, Any]] = []
-    all_samples: Dict[int, List[int]] = {int(i): [] for i in range(len(beam_ids))}
+    candidate_samples_by_beam: Dict[int, List[int]] = {
+        int(i): [] for i in range(len(beam_ids))
+    }
+    active_samples_by_beam: Dict[int, List[int]] = {
+        int(i): [] for i in range(len(beam_ids))
+    }
     save_arrival_samples = bool(stats_cfg.get("save_per_ue_arrival_samples", False))
 
     for drop in range(num_drops):
@@ -354,6 +361,24 @@ def run_service_beam_statistics(cfg: Dict[str, Any], out_dir: str | Path) -> Dic
             _selection_rows(beam_ids, selection_counts, candidate_counts_by_cell, drop)
         )
 
+        # Static beam sharing: all candidate UEs in this drop are counted once,
+        # independent of FTP arrivals.  This is the distribution of how many
+        # candidate UEs have the same best/service beam.
+        candidate_counts_by_beam = count_ues_by_beam(
+            [ue.ue_id for ue in topo.ues],
+            best_service_beam_by_ue,
+            len(beam_ids),
+        )
+        for beam_index, count in enumerate(candidate_counts_by_beam):
+            candidate_samples_by_beam[beam_index].append(int(count))
+            candidate_count_rows.append({
+                "drop": int(drop),
+                "beam_index": int(beam_index),
+                "beam_id": beam_meta[beam_index]["beam_id"],
+                "cell": beam_meta[beam_index]["cell"],
+                "candidate_ue_count": int(count),
+            })
+
         for observation_with_warmup in range(warmup_observations + num_observations):
             num_arrivals = sample_ue_arrivals(traffic_rng, traffic, len(topo.ues))
             if observation_with_warmup < warmup_observations:
@@ -394,13 +419,14 @@ def run_service_beam_statistics(cfg: Dict[str, Any], out_dir: str | Path) -> Dic
                 len(beam_ids),
             )
             for beam_index, count in enumerate(counts_by_beam):
-                all_samples[beam_index].append(int(count))
-                count_rows.append({
+                active_samples_by_beam[beam_index].append(int(count))
+                active_count_rows.append({
                     "drop": int(drop),
                     "observation": int(observation),
                     "beam_index": int(beam_index),
                     "beam_id": beam_meta[beam_index]["beam_id"],
                     "cell": beam_meta[beam_index]["cell"],
+                    "active_ue_count": int(count),
                     "ue_with_arrival_count": int(count),
                 })
         drop_rows.append({
@@ -415,14 +441,45 @@ def run_service_beam_statistics(cfg: Dict[str, Any], out_dir: str | Path) -> Dic
         })
 
     total_observations = int(num_drops * num_observations)
-    pmf_rows = _pmf_rows(beam_ids, all_samples, traffic, total_observations)
-    summary_rows = _summary_rows(beam_ids, all_samples, traffic, total_observations)
+    candidate_pmf_rows = _pmf_rows(
+        beam_ids, candidate_samples_by_beam, traffic, num_drops
+    )
+    candidate_summary_rows = _summary_rows(
+        beam_ids, candidate_samples_by_beam, traffic, num_drops
+    )
+    active_pmf_rows = _pmf_rows(
+        beam_ids, active_samples_by_beam, traffic, total_observations
+    )
+    active_summary_rows = _summary_rows(
+        beam_ids, active_samples_by_beam, traffic, total_observations
+    )
     metrics_dir = out_dir / "metrics"
     write_csv(metrics_dir / "service_beam_ue_cache.csv", cache_rows)
     write_csv(metrics_dir / "ftp_ue_arrival_samples.csv", arrival_rows)
-    write_csv(metrics_dir / "service_beam_ue_count_samples.csv", count_rows)
-    write_csv(metrics_dir / "service_beam_ue_count_pmf.csv", pmf_rows)
-    write_csv(metrics_dir / "service_beam_ue_count_summary.csv", summary_rows)
+    write_csv(
+        metrics_dir / "service_beam_candidate_ue_count_samples.csv",
+        candidate_count_rows,
+    )
+    write_csv(
+        metrics_dir / "service_beam_candidate_ue_count_pmf.csv",
+        candidate_pmf_rows,
+    )
+    write_csv(
+        metrics_dir / "service_beam_candidate_ue_count_summary.csv",
+        candidate_summary_rows,
+    )
+    write_csv(
+        metrics_dir / "service_beam_active_ue_count_samples.csv",
+        active_count_rows,
+    )
+    write_csv(
+        metrics_dir / "service_beam_active_ue_count_pmf.csv",
+        active_pmf_rows,
+    )
+    write_csv(
+        metrics_dir / "service_beam_active_ue_count_summary.csv",
+        active_summary_rows,
+    )
     write_csv(metrics_dir / "service_beam_selection_probability.csv", selection_rows)
     write_csv(metrics_dir / "beams.csv", [beam.to_dict() for beam in beam_ids])
     write_csv(metrics_dir / "sites.csv", site_rows_all)
@@ -441,14 +498,27 @@ def run_service_beam_statistics(cfg: Dict[str, Any], out_dir: str | Path) -> Dic
         "arrival_rate_per_ue_s": traffic.arrival_rate_per_ue_s,
         "observation_interval_ms": traffic.observation_interval_s * 1e3,
         "file_size_mbytes": traffic.file_size_mbytes,
-        "mean_beam_ue_count": float(np.mean([row["mean_ue_count"] for row in summary_rows])) if summary_rows else 0.0,
-        "mean_beam_busy_probability": float(np.mean([row["busy_probability"] for row in summary_rows])) if summary_rows else 0.0,
+        "mean_candidate_ue_count_per_beam": (
+            float(np.mean([row["mean_ue_count"] for row in candidate_summary_rows]))
+            if candidate_summary_rows else 0.0
+        ),
+        "mean_active_ue_count_per_beam": (
+            float(np.mean([row["mean_ue_count"] for row in active_summary_rows]))
+            if active_summary_rows else 0.0
+        ),
+        "mean_active_beam_busy_probability": (
+            float(np.mean([row["busy_probability"] for row in active_summary_rows]))
+            if active_summary_rows else 0.0
+        ),
         "outputs": {
             "ue_cache": "metrics/service_beam_ue_cache.csv",
             "arrival_samples": "metrics/ftp_ue_arrival_samples.csv",
-            "ue_count_samples": "metrics/service_beam_ue_count_samples.csv",
-            "pmf": "metrics/service_beam_ue_count_pmf.csv",
-            "summary": "metrics/service_beam_ue_count_summary.csv",
+            "candidate_count_samples": "metrics/service_beam_candidate_ue_count_samples.csv",
+            "candidate_pmf": "metrics/service_beam_candidate_ue_count_pmf.csv",
+            "candidate_summary": "metrics/service_beam_candidate_ue_count_summary.csv",
+            "active_count_samples": "metrics/service_beam_active_ue_count_samples.csv",
+            "active_pmf": "metrics/service_beam_active_ue_count_pmf.csv",
+            "active_summary": "metrics/service_beam_active_ue_count_summary.csv",
         },
     }
     write_json(metrics_dir / "summary.json", summary)

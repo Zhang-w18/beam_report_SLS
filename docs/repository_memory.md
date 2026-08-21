@@ -88,8 +88,9 @@ YAML
   → average-RSRP cell association
   → existing service-power beam measurement
   → per-UE best service beam cache
+  → static candidate UE beam-sharing counts / PMF
   → per-UE 3GPP FTP Model 3 arrival-only Poisson arrivals
-  → service-beam UE-count samples / PMF / summary
+  → per-window active UE beam-collision counts / PMF / summary
 ```
 
 该模式不进入 feedback、evaluation matrix、scheduler、link adaptation、OLLA、
@@ -395,10 +396,12 @@ TBLER 与 MCS 选择是两条独立路径：
 | `metrics/service_beam_ue_cache.csv` | 每 `(drop, ue_id)` 的位置、服务小区、最佳服务 TX/RX beam 和接收功率 |
 | `metrics/ftp_ue_arrival_samples.csv` | 每 `(drop, observation, ue_id)` 的实际到达次数和服务 beam；可配置为仅保存有到达 UE |
 | `metrics/service_beam_selection_probability.csv` | 每 `(drop, beam)` 的候选 UE 服务 beam 选择概率 |
-| `metrics/service_beam_ue_count_samples.csv` | 每 `(drop, observation, beam)` 的 `ue_with_arrival_count`，含 0 |
-| `metrics/service_beam_ue_count_pmf.csv` | 每 beam 的无条件 PMF 和非零条件概率 |
-| `metrics/service_beam_ue_count_summary.csv` | 每 beam 的均值、方差、空闲/繁忙概率和分位数 |
-| `metrics/service_beam_ue_count_pooled_pmf.csv` | 全 beam 样本合并后的参考 PMF，不替代逐 beam PMF |
+| `metrics/service_beam_candidate_ue_count_samples.csv` | 每 `(drop, beam)` 的全部候选 UE beam sharing 数，含 0 |
+| `metrics/service_beam_candidate_ue_count_pmf.csv` | 静态候选 UE beam sharing PMF，分母为 drop 数 |
+| `metrics/service_beam_candidate_ue_count_summary.csv` | 静态候选 UE beam sharing 的均值、方差和分位数 |
+| `metrics/service_beam_active_ue_count_samples.csv` | 每 `(drop, observation, beam)` 的窗口 active UE 数，含 0 |
+| `metrics/service_beam_active_ue_count_pmf.csv` | 窗口 active UE beam collision PMF，分母为 drop 数乘窗口数 |
+| `metrics/service_beam_active_ue_count_summary.csv` | 窗口 active UE collision 的均值、方差和 idle/busy 概率 |
 
 解读原则：
 

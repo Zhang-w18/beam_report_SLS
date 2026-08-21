@@ -76,3 +76,27 @@ def count_arriving_ues_by_beam(
             raise ValueError(f"Cached beam index {beam_index} is outside [0, {num_beams})")
         counts[beam_index] += 1
     return counts
+
+
+def count_ues_by_beam(
+    ue_ids: Sequence[int],
+    best_service_beam_by_ue: Mapping[int, int],
+    num_beams: int,
+) -> np.ndarray:
+    """Count every candidate UE once by its cached best service beam."""
+    if int(num_beams) < 0:
+        raise ValueError("num_beams must be >= 0")
+    counts = np.zeros(int(num_beams), dtype=int)
+    for ue_id in ue_ids:
+        try:
+            beam_index = int(best_service_beam_by_ue[int(ue_id)])
+        except KeyError as exc:
+            raise KeyError(f"No cached service beam for ue_id={ue_id}") from exc
+        if not 0 <= beam_index < int(num_beams):
+            raise ValueError(f"Cached beam index {beam_index} is outside [0, {num_beams})")
+        counts[beam_index] += 1
+    return counts
+
+
+# Explicit name for the window-level definition used by the collision metric.
+count_active_ues_by_beam = count_arriving_ues_by_beam

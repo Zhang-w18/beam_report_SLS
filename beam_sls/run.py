@@ -100,7 +100,12 @@ def main() -> None:
         print("Service-beam statistics finished. Summary:")
         print(f"  FTP model={summary['ftp_model']}")
         print(f"  drops={summary['num_drops']} observations/drop={summary['observations_per_drop']} beams={summary['num_beams']}")
-        print(f"  mean_beam_ue_count={summary['mean_beam_ue_count']:.6f} mean_beam_busy_probability={summary['mean_beam_busy_probability']:.6f}")
+        print(
+            f"  mean_candidate_ue_count_per_beam="
+            f"{summary['mean_candidate_ue_count_per_beam']:.6f} "
+            f"mean_active_ue_count_per_beam="
+            f"{summary['mean_active_ue_count_per_beam']:.6f}"
+        )
         print(f"Outputs written to: {Path(args.out).resolve()}")
         return
     # Keep the scheduler/link stack out of the statistics-only import path.

@@ -7,6 +7,7 @@ from beam_sls.config import load_config
 from beam_sls.ftp_traffic import (
     FTPArrivalOnlyConfig,
     count_arriving_ues_by_beam,
+    count_ues_by_beam,
     sample_ue_arrivals,
 )
 from beam_sls.service_beam_statistics import (
@@ -32,6 +33,7 @@ def test_arrivals_are_per_ue_and_a_ue_counts_once_per_window():
         [10, 11, 12], [3, 0, 2], {10: 1, 11: 0, 12: 1}, 2
     )
     assert counts.tolist() == [0, 2]
+    assert count_ues_by_beam([10, 11, 12], {10: 1, 11: 0, 12: 1}, 2).tolist() == [1, 2]
 
 
 def test_best_beam_tie_uses_smallest_global_index():
@@ -72,10 +74,12 @@ def test_statistics_smoke_binds_arrivals_to_cached_ues_and_writes_zero_rows(tmp_
     metrics = tmp_path / "metrics"
     cache = _read_csv(metrics / "service_beam_ue_cache.csv")
     arrivals = _read_csv(metrics / "ftp_ue_arrival_samples.csv")
-    counts = _read_csv(metrics / "service_beam_ue_count_samples.csv")
-    pmf = _read_csv(metrics / "service_beam_ue_count_pmf.csv")
+    candidate_counts = _read_csv(metrics / "service_beam_candidate_ue_count_samples.csv")
+    candidate_pmf = _read_csv(metrics / "service_beam_candidate_ue_count_pmf.csv")
+    active_counts = _read_csv(metrics / "service_beam_active_ue_count_samples.csv")
+    active_pmf = _read_csv(metrics / "service_beam_active_ue_count_pmf.csv")
     assert summary["ftp_model"] == "3gpp_ftp_model_3_arrival_only"
-    assert len(cache) == 4
+    assert len(cache) == 210
     cache_by_key = {(int(row["drop"]), int(row["ue_id"])): row for row in cache}
     assert arrivals
     for row in arrivals:
@@ -83,17 +87,25 @@ def test_statistics_smoke_binds_arrivals_to_cached_ues_and_writes_zero_rows(tmp_
         assert key in cache_by_key
         assert row["best_service_beam_index"] == cache_by_key[key]["best_service_beam_index"]
 
-    # 1 drop x 20 observations x 4 beams; zero counts are explicit rows.
-    assert len(counts) == 80
-    assert {int(row["ue_with_arrival_count"]) for row in counts} >= {0}
+    # Static collision distribution: all 210 candidate UEs are counted once.
+    assert len(candidate_counts) == summary["num_beams"]
+    assert sum(int(row["candidate_ue_count"]) for row in candidate_counts) == 210
+    assert sum(int(row["candidate_ue_count"]) for row in candidate_counts) == len(cache)
+
+    # 1 drop x 20 observations x all beams; zero active counts are explicit rows.
+    assert len(active_counts) == 20 * summary["num_beams"]
+    assert {int(row["active_ue_count"]) for row in active_counts} >= {0}
     for observation in range(20):
         observed = [row for row in arrivals if int(row["observation"]) == observation]
-        counted = [row for row in counts if int(row["observation"]) == observation]
-        assert sum(int(row["ue_with_arrival_count"]) for row in counted) == sum(
+        counted = [row for row in active_counts if int(row["observation"]) == observation]
+        assert sum(int(row["active_ue_count"]) for row in counted) == sum(
             int(row["has_arrival"]) for row in observed
         )
-    for beam_index in {int(row["beam_index"]) for row in pmf}:
-        rows = [row for row in pmf if int(row["beam_index"]) == beam_index]
+    for beam_index in {int(row["beam_index"]) for row in active_pmf}:
+        rows = [row for row in active_pmf if int(row["beam_index"]) == beam_index]
+        assert abs(sum(float(row["probability"]) for row in rows) - 1.0) < 1e-12
+    for beam_index in {int(row["beam_index"]) for row in candidate_pmf}:
+        rows = [row for row in candidate_pmf if int(row["beam_index"]) == beam_index]
         assert abs(sum(float(row["probability"]) for row in rows) - 1.0) < 1e-12
 
 
