@@ -40,6 +40,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "ue_height_m": 1.5,
     },
     "system": {
+        "run_mode": "scheduling",
         "subcarrier_spacing_khz": 120.0,
         # Total transmit power of each TRP. It is divided equally among that
         # TRP's physical array panels in the linear-power domain.
@@ -290,6 +291,19 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "progress": {
         "enabled": True,
+    },
+    "service_beam_statistics": {
+        "observations_per_drop": 10000,
+        "warmup_observations": 0,
+        "observation_interval_ms": 100.0,
+        "candidate_ues_per_sector_per_drop": None,
+        "include_zero_count": True,
+        "save_per_ue_arrival_samples": False,
+        "traffic": {
+            "model": "3gpp_ftp_model_3_arrival_only",
+            "arrival_rate_per_ue_s": 0.2,
+            "file_size_mbytes": 0.5,
+        },
     },
     "sionna": {
         "enable_import_probe": True,

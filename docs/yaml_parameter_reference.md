@@ -53,6 +53,47 @@
 | `continuous_tti.warmup_tti` | 每个 drop 的 warmup TTI 数 | 非负整数或 `null` | warmup 更新信道、PF、OLLA和调度，但不进入 CSV/CDF；`null` 时沿用 `link_abstraction.olla_warmup_tti`。 |
 | `random_seed` | 随机种子 | 整数 | 用于复现实验；与 drop 索引派生独立 drop RNG，并进一步控制 Sionna 信道 RNG。固定种子和其余配置会复现逐 drop 的撒点及信道，同时不同 drop 使用不同随机流。 |
 | `target_bler` | 目标 BLER | `(0,1)`，默认 `0.1` | ILLA/MCS 选择和 OLLA 使用。 |
+| `run_mode` | 顶层运行模式 | `scheduling` / `service_beam_statistics` | 默认 `scheduling` 保持原有调度仿真；统计模式只生成固定 UE 到达与服务波束 UE 数 PMF，不初始化调度、链路自适应或吞吐流程。 |
+
+### 3.1 `service_beam_statistics`
+
+当 `system.run_mode: service_beam_statistics` 时启用独立统计模式。每个 drop 固定
+`make_topology()` 生成的 UE、信道和每个 UE 的最佳服务 beam；每个窗口再对每个固定
+UE 独立抽样 `Poisson(arrival_rate_per_ue_s × observation_interval_s)`。业务到达通过
+`ue_id` 查询 beam 缓存，不做匿名 cell 到达或多项式分配。文件大小在此“只统计到达、
+不运行服务过程”的模式中只作为业务参数记录，不改变 UE 数 PMF。
+
+| 参数 | 含义 | 典型取值 / 范围 | 说明 |
+|---|---|---|---|
+| `observations_per_drop` | 每个 radio drop 的正式观察窗口数 | 正整数 | PMF 分母为 `num_drops × observations_per_drop`，所有 beam（包括 UE 数为 0）都会记录。 |
+| `warmup_observations` | 每个 drop 丢弃的预热窗口数 | 非负整数 | 预热窗口消耗独立业务随机流，但不进入输出 PMF。 |
+| `observation_interval_ms` | 观察窗口长度 | 正数，单位 ms | 与到达率相乘得到每 cell 每窗口的泊松均值。 |
+| `candidate_ues_per_sector_per_drop` | 每 sector 用于估计服务 beam 选择概率的候选 UE 数 | 正整数或 `null` | `null` 时复用 `ue_drop.num_ut_per_sector`；增加该值只增加无线环境采样量，不改变 FTP 到达率。 |
+| `include_zero_count` | 是否保留 UE 数为 0 的样本 | 必须为 `true` | 统计空闲概率 `P(N_b=0)`，否则 PMF 会产生条件采样偏差。 |
+| `traffic.model` | 业务模型 | `3gpp_ftp_model_3_arrival_only` | 当前统计模式唯一支持的模型。 |
+| `traffic.arrival_rate_per_ue_s` | 每 UE 到达率 | 非负数，单位 arrival/s/UE | 每个固定 UE 独立使用该泊松到达率。 |
+| `traffic.file_size_mbytes` | FTP 文件大小 | 正数，单位 MB | 默认 0.5 MB；当前不运行传输完成过程，只写入结果元数据。 |
+| `save_per_ue_arrival_samples` | 是否保存每个 UE 的窗口到达记录 | 布尔值，默认 `false` | `true` 时保存所有 UE；`false` 时仅保存 `num_arrivals > 0` 的 UE。 |
+
+示例：
+
+```yaml
+system:
+  run_mode: service_beam_statistics
+  num_drops: 10
+  random_seed: 20260610
+
+service_beam_statistics:
+  observations_per_drop: 10000
+  warmup_observations: 0
+  observation_interval_ms: 100.0
+  candidate_ues_per_sector_per_drop: 100
+  include_zero_count: true
+  traffic:
+    model: 3gpp_ftp_model_3_arrival_only
+    arrival_rate_per_ue_s: 0.2
+    file_size_mbytes: 0.5
+```
 
 ---
 

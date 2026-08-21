@@ -1,6 +1,6 @@
 # 仓库记忆：Sionna SLS Beam Management Platform
 
-最后更新：2026-07-24
+最后更新：2026-08-21
 
 本文件是供后续代码分析和修改任务快速建立上下文的稳定摘要。先看这里，再按函数
 和配置键定向读取源码。若本文与代码或测试冲突，以代码和测试为准，并在架构改动后
@@ -46,6 +46,8 @@ python -m beam_sls.run \
 | `beam_sls/mcs.py` | TS 38.214 PDSCH Table 1 与独立标准 TBS/速率工具 | `MCS_TABLE`, `tbs_bits_from_mcs`, `rate_mbps_from_mcs` |
 | `beam_sls/link.py` | 调度后真实 SINR、EESM、ACK/NACK、OLLA、单/多 TTI 链路评估 | `realized_sinr_grid`, `run_tti_loop`, `run_one_tti` |
 | `beam_sls/sim.py` | 整合 drop/TTI/case 循环、状态生命周期、指标输出和绘图 | `run_simulation`, `summarize_results`, `make_plots` |
+| `beam_sls/service_beam_statistics.py` | 独立固定 UE 到达统计、服务 beam 缓存和 UE 数 PMF | `run_service_beam_statistics` |
+| `beam_sls/ftp_traffic.py` | 每 UE arrival-only Poisson 抽样和按缓存 beam 计数 | `FTPArrivalOnlyConfig`, `sample_ue_arrivals`, `count_arriving_ues_by_beam` |
 | `beam_sls/coverage.py` | coverage heatmap、固定垂直波束 CDF | `compute_coverage_heatmap_standard_sampling`, `compute_fixed_vertical_beam_cdf` |
 | `beam_sls/plotting.py` | CDF、柱状图、heatmap、topology 图 | `plot_cdf`, `plot_topology` |
 | `beam_sls/utils.py` | 单位换算、噪声、随机数、CSV/JSON 写出 | `occupied_bandwidth_hz`, `write_csv`, `write_json` |
@@ -76,6 +78,23 @@ for each drop:
         ↓
   per-TTI rows → per-UE / per-drop / aggregate metrics and plots
 ```
+
+当 `system.run_mode=service_beam_statistics` 时，入口转到独立统计数据流：
+
+```text
+YAML
+  → topology / UE candidates
+  → channel
+  → average-RSRP cell association
+  → existing service-power beam measurement
+  → per-UE best service beam cache
+  → per-UE 3GPP FTP Model 3 arrival-only Poisson arrivals
+  → service-beam UE-count samples / PMF / summary
+```
+
+该模式不进入 feedback、evaluation matrix、scheduler、link adaptation、OLLA、
+ACK/NACK、TBLER、吞吐或 `run_tti_loop` 的调度链路。窗口内只统计新到达 UE，窗口
+结束时清空口径，不维护队列；文件大小只作为配置元数据保留。
 
 每个 drop 只执行一次“测量 → feedback → 调度”。连续 TTI 模式在后续 TTI
 复用该测量、report 和 schedule，仅推进小尺度信道并执行真实链路评估、
@@ -373,6 +392,13 @@ TBLER 与 MCS 选择是两条独立路径：
 | `metrics/scheduled_ue_su_throughput.csv` | 被调度 UE 在所选 beam 上的 standalone SU throughput |
 | `metrics/gamma_measurement_backend.csv` | Gamma CPU/GPU 后端与耗时 |
 | `metrics/channel_backend.csv` | 每 drop 实际信道后端和 fallback 信息 |
+| `metrics/service_beam_ue_cache.csv` | 每 `(drop, ue_id)` 的位置、服务小区、最佳服务 TX/RX beam 和接收功率 |
+| `metrics/ftp_ue_arrival_samples.csv` | 每 `(drop, observation, ue_id)` 的实际到达次数和服务 beam；可配置为仅保存有到达 UE |
+| `metrics/service_beam_selection_probability.csv` | 每 `(drop, beam)` 的候选 UE 服务 beam 选择概率 |
+| `metrics/service_beam_ue_count_samples.csv` | 每 `(drop, observation, beam)` 的 `ue_with_arrival_count`，含 0 |
+| `metrics/service_beam_ue_count_pmf.csv` | 每 beam 的无条件 PMF 和非零条件概率 |
+| `metrics/service_beam_ue_count_summary.csv` | 每 beam 的均值、方差、空闲/繁忙概率和分位数 |
+| `metrics/service_beam_ue_count_pooled_pmf.csv` | 全 beam 样本合并后的参考 PMF，不替代逐 beam PMF |
 
 解读原则：
 
