@@ -919,13 +919,13 @@ def test_summary_post_warmup_kpis_include_zero_schedule_ttis():
     link_rows = [
         {"scheme": "a", "drop": 0, "tti": 0, "ue_id": 0,
          "goodput_mbps": 1.0, "effective_sinr_db": 1.0,
-         "tbler": 0.0, "ack": 1},
+         "actual_mcs": 10, "tbler": 0.0, "ack": 1},
         {"scheme": "a", "drop": 0, "tti": 0, "ue_id": 1,
          "goodput_mbps": 1.0, "effective_sinr_db": 2.0,
-         "tbler": 0.2, "ack": 1},
+         "actual_mcs": 12, "tbler": 0.2, "ack": 1},
         {"scheme": "a", "drop": 0, "tti": 1, "ue_id": 0,
          "goodput_mbps": 1.0, "effective_sinr_db": 3.0,
-         "tbler": 0.0, "ack": 1},
+         "actual_mcs": 14, "tbler": 0.0, "ack": 1},
     ]
     measured_ttis = [
         {"scheme": "a", "drop": 0, "tti": tti,
@@ -942,6 +942,9 @@ def test_summary_post_warmup_kpis_include_zero_schedule_ttis():
     assert np.isclose(summary["p05_effective_sinr_db"], np.percentile([1, 2, 3], 5))
     assert summary["p50_effective_sinr_db"] == 2.0
     assert np.isclose(summary["p95_effective_sinr_db"], np.percentile([1, 2, 3], 95))
+    assert summary["avg_actual_mcs"] == 12.0
+    assert np.isclose(summary["p05_actual_mcs"], np.percentile([10, 12, 14], 5))
+    assert summary["p05_system_goodput_mbps"] == 0.0
 
 
 def test_cell_local_nack_rate_uses_complete_500_scheduled_tti_windows():

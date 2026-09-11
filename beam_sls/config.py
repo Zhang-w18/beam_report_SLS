@@ -292,6 +292,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "progress": {
         "enabled": True,
     },
+    # Optional parameter traversal. Each value is evaluated in an independent
+    # child run while all non-traversed settings (including random_seed) remain
+    # identical. Dotted paths address nested configuration keys.
+    "parameter_sweep": {
+        "enabled": False,
+        "parameter": "system.tx_power_dbm",
+        "values": [],
+    },
     "service_beam_statistics": {
         "observations_per_drop": 10000,
         "warmup_observations": 0,

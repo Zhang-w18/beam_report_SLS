@@ -114,6 +114,15 @@ def main() -> None:
         )
         print(f"Outputs written to: {Path(args.out).resolve()}")
         return
+    # Route scheduling sweeps before the ordinary single-run entry point.
+    if bool(cfg.get("parameter_sweep", {}).get("enabled", False)):
+        from .sweep import run_parameter_sweep
+
+        rows = run_parameter_sweep(cfg, Path(args.out))
+        print(f"Parameter sweep finished: {len(rows)} configurations.")
+        print(f"Combined outputs written to: {Path(args.out).resolve()}")
+        return
+
     # Keep the scheduler/link stack out of the statistics-only import path.
     from .sim import run_simulation
 

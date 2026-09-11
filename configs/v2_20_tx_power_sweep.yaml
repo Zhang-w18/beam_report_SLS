@@ -1,0 +1,149 @@
+# v2.20: seven sites, 21 cells, 10 UEs per cell. The two transmit-power
+# configurations use the same random seed and run baseline greedy only.
+
+scenario:
+  name: urban_macro_v2_20_tx_power_sweep
+  carrier_frequency_ghz: 30.0
+  channel_model: sionna_tr38901_uma
+  min_ue_distance_m: 35.0
+  max_ue_distance_m: 250.0
+  num_clusters: 4
+
+topology:
+  layout: seven_site_hex
+  num_sites: 7
+  sectors_per_site: 3
+  sector_azimuths_deg: [30.0, 150.0, 270.0]
+  sector_width_deg: 120.0
+  isd_m: 500.0
+  bs_height_m: 25.0
+  ue_height_m: 1.5
+
+system:
+  run_mode: scheduling
+  tx_power_dbm: 43.0
+  num_drops: 10
+  num_tti_per_drop: 200
+  random_seed: 20260725
+  continuous_tti:
+    enabled: false
+
+parameter_sweep:
+  enabled: true
+  parameter: system.tx_power_dbm
+  values: [43, 45.5]
+
+ue_drop:
+  num_ut_per_sector: 10
+  distribution: uniform_in_sector
+  speed_kmh: 3.0
+
+trp:
+  num_trps_per_sector: 1
+  num_panels_per_sector: 1
+  panel_azimuth_offsets_deg: [0.0]
+
+rf_architecture:
+  txru_connectivity: panel_polarization_subarray
+  allow_independent_polarization_beams: false
+  num_txru: 2
+  max_parallel_beams_per_trp: auto
+
+tx_array:
+  model: tr38901_panel
+  num_txru: 2
+  num_ae: 512
+  M: 8
+  N: 16
+  P: 2
+  Mg: 1
+  Ng: 2
+  Mp: 1
+  Np: 1
+  beam_scope: per_panel
+  sampling_mode: uniform
+  num_beams_h: 16
+  num_beams_v: 4
+  max_beams: 64
+  vertical_beam_mode: distance_range
+  fixed_v_index: null
+  vertical_beam:
+    min_horizontal_distance_m: 35.0
+    max_horizontal_distance_m: 250.0
+    height_difference_m: 23.5
+
+ue_array:
+  model: tr38901_panel
+  num_rxru: 2
+  num_ae: 8
+  M: 4
+  N: 1
+  P: 2
+  Mg: 1
+  Ng: 1
+  Mp: 1
+  Np: 1
+  beam_scope: joint
+  sampling_mode: uniform
+  num_beams_h: 1
+  num_beams_v: 4
+  max_beams: 4
+  vertical_beam_mode: scan
+
+measurement:
+  num_freq_points: 16
+  compute_full_gamma: false
+  tx_panel_index: 0
+  use_panel_channel_views: true
+  gamma_backend: numpy
+  gamma_ue_batch_size: 4
+
+feedback:
+  schemes: [baseline]
+  service_beam_top_k1: 2
+  oracle_service_beam_top_k: 2
+
+evaluation:
+  matrix:
+    baseline: [greedy]
+  references:
+    baseline: baseline__greedy
+
+scheduler:
+  cluster_mode: per_site
+  objective: proportional_fair
+  algorithm: greedy
+  max_mu_order: auto
+  cap_mu_order_by_rf: true
+  pf_tbar_init_mbps: 1.0
+  pf_averaging_window_tti: 100
+
+analysis:
+  baseline_no_interference_upper_bound: false
+
+link_abstraction:
+  mode: sionna_sys_precomputed_bler
+  mcs_table_index: 1
+  mcs_category: 1
+  sinr_mapping: eesm
+  eesm_beta_db: 5.0
+  olla_enabled: true
+  olla_warmup_tti: 50
+  olla_step_db: 0.1
+  harq_enabled: true
+
+coverage_heatmap:
+  enabled: false
+
+progress:
+  enabled: true
+
+sionna:
+  enable_import_probe: false
+  fallback_to_numpy_if_unavailable: true
+  bs_polarization: dual
+  bs_polarization_type: cross
+  bs_antenna_pattern: "38.901"
+  ut_polarization: dual
+  ut_polarization_type: cross
+  ut_antenna_pattern: omni

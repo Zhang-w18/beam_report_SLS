@@ -40,6 +40,12 @@ METRICS: Dict[str, Dict[str, str]] = {
         "xlabel": "Effective SINR [dB]",
         "title": "Effective SINR CDF",
     },
+    "actual_mcs": {
+        "file": "link_tti.csv",
+        "column": "actual_mcs",
+        "xlabel": "Actual scheduled MCS index",
+        "title": "Actual scheduled MCS CDF",
+    },
     "tbler": {
         "file": "link_tti.csv",
         "column": "tbler",

@@ -99,7 +99,8 @@ def resolve_tx_power_w_per_panel(cfg: Dict[str, Any],
 
 def _progress(cfg: Dict[str, Any], msg: str) -> None:
     if bool(cfg.get("progress", {}).get("enabled", True)):
-        print(msg, flush=True)
+        prefix = str(cfg.get("_sweep_progress_prefix", "")).strip()
+        print(f"{prefix} {msg}" if prefix else msg, flush=True)
 
 
 def resolve_tti_counts(cfg: Dict[str, Any]) -> Tuple[bool, int, int, float]:
@@ -1559,10 +1560,11 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
         "status_csv": "metrics/cell0_local_nack_rate_status.csv",
         "figures_dir": "figures/cell0_local_nack_rate",
     }
-    print("[summary] post-warmup scheme KPIs", flush=True)
+    _progress(cfg, "[summary] post-warmup scheme KPIs")
     for scheme in analysis_schemes:
         metrics = summary[scheme]
-        print(
+        _progress(
+            cfg,
             f"[summary][{scheme}] tbler_zero_ratio="
             f"{metrics['tbler_zero_ratio']:.6f}, "
             f"avg_scheduled_users_per_tti="
@@ -1571,7 +1573,6 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             f"[{metrics['p05_effective_sinr_db']:.3f}, "
             f"{metrics['p50_effective_sinr_db']:.3f}, "
             f"{metrics['p95_effective_sinr_db']:.3f}]",
-            flush=True,
         )
     write_json(out_dir / "metrics" / "summary.json", summary)
     write_csv(out_dir / "metrics" / "summary.csv", [{"scheme": k, **v} for k, v in summary.items() if isinstance(v, dict) and not k.startswith("_")])
@@ -1638,6 +1639,10 @@ def summarize_results(link_rows: List[Dict[str, Any]],
     for scheme in schemes:
         rows = [r for r in link_rows if r.get("scheme") == scheme]
         effective_sinr_values = [float(r["effective_sinr_db"]) for r in rows]
+        actual_mcs_values = [
+            float(r["actual_mcs"]) for r in rows
+            if r.get("actual_mcs") is not None
+        ]
         scheduled_ues_by_slot: Dict[Tuple[int, int], set] = {}
         for row in rows:
             scheduled_ues_by_slot.setdefault(
@@ -1684,8 +1689,13 @@ def summarize_results(link_rows: List[Dict[str, Any]],
             "feedback_scheme": case.feedback_scheme if case is not None else scheme,
             "algorithm": case.algorithm if case is not None else None,
             "avg_system_goodput_mbps": float(np.mean(system_values)) if system_values else 0.0,
+            "p05_system_goodput_mbps": percentile(system_values, 5.0),
             "avg_ue_goodput_mbps": float(np.mean(ue_mean)) if ue_mean else 0.0,
             "p05_ue_goodput_mbps": percentile(ue_mean, 5.0),
+            "avg_actual_mcs": (
+                float(np.mean(actual_mcs_values)) if actual_mcs_values else 0.0
+            ),
+            "p05_actual_mcs": percentile(actual_mcs_values, 5.0),
             "avg_eff_sinr_db": (
                 float(np.mean(effective_sinr_values)) if rows else 0.0
             ),
@@ -1753,8 +1763,16 @@ def make_plots(out_dir: Path,
                feedback_schemes: List[str] | None = None) -> None:
     sinr_by_scheme = {s: [float(r["effective_sinr_db"]) for r in link_rows if r.get("scheme") == s] for s in schemes}
     goodput_by_scheme = {s: [float(r["goodput_mbps"]) for r in link_rows if r.get("scheme") == s] for s in schemes}
+    actual_mcs_by_scheme = {
+        s: [
+            float(r["actual_mcs"]) for r in link_rows
+            if r.get("scheme") == s and r.get("actual_mcs") is not None
+        ]
+        for s in schemes
+    }
     plot_cdf(sinr_by_scheme, "Effective SINR [dB]", "Post-SINR CDF", out_dir / "figures" / "effective_sinr_cdf.png")
     plot_cdf(goodput_by_scheme, "TTI link goodput [Mbps]", "Link goodput CDF", out_dir / "figures" / "link_goodput_cdf.png")
+    plot_cdf(actual_mcs_by_scheme, "Actual scheduled MCS index", "Actual scheduled MCS CDF", out_dir / "figures" / "actual_mcs_cdf.png")
     if ue_goodput_rows is not None:
         ue_goodput_by_scheme = {
             s: [float(r["avg_goodput_mbps"]) for r in ue_goodput_rows if r.get("scheme") == s]

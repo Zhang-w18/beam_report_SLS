@@ -46,6 +46,7 @@ python -m beam_sls.run \
 | `beam_sls/mcs.py` | TS 38.214 PDSCH Table 1 与独立标准 TBS/速率工具 | `MCS_TABLE`, `tbs_bits_from_mcs`, `rate_mbps_from_mcs` |
 | `beam_sls/link.py` | 调度后真实 SINR、EESM、ACK/NACK、OLLA、单/多 TTI 链路评估 | `realized_sinr_grid`, `run_tti_loop`, `run_one_tti` |
 | `beam_sls/sim.py` | 整合 drop/TTI/case 循环、状态生命周期、指标输出和绘图 | `run_simulation`, `summarize_results`, `make_plots` |
+| `beam_sls/sweep.py` | 点分配置参数遍历、共同随机种子复用、跨配置汇总和合并 CDF | `run_parameter_sweep` |
 | `beam_sls/service_beam_statistics.py` | 独立固定 UE 到达统计、服务 beam 缓存和 UE 数 PMF | `run_service_beam_statistics` |
 | `beam_sls/ftp_traffic.py` | 每 UE arrival-only Poisson 抽样和按缓存 beam 计数 | `FTPArrivalOnlyConfig`, `sample_ue_arrivals`, `count_arriving_ues_by_beam` |
 | `beam_sls/coverage.py` | coverage heatmap、固定垂直波束 CDF | `compute_coverage_heatmap_standard_sampling`, `compute_fixed_vertical_beam_cdf` |
@@ -100,6 +101,10 @@ ACK/NACK、TBLER、吞吐或 `run_tti_loop` 的调度链路。窗口内只统计
 每个 drop 只执行一次“测量 → feedback → 调度”。连续 TTI 模式在后续 TTI
 复用该测量、report 和 schedule，仅推进小尺度信道并执行真实链路评估、
 HARQ 风格 ACK/NACK 和 OLLA 更新。
+
+启用 `parameter_sweep` 时，入口按值创建独立子运行；除被遍历键外配置完全复制，
+因此不同参数值使用相同 `system.random_seed`。扫描根目录保存跨参数 KPI 汇总及合并
+CDF，当前要求每个扫描配置只解析出一个 evaluation case。
 
 ## 4. 核心数组和索引约定
 

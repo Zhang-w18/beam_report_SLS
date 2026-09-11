@@ -621,3 +621,22 @@ CLI 可用 `--cluster-mode per_cell|per_site|global|custom` 覆盖模式；`cust
 `metrics/runtime_phases.csv` 的 `elapsed_s` 记录拓扑、信道、平均 RSRP 关联、
 静态簇准备、Gamma、反馈、逐 case 调度和逐 case 链路评估耗时；启用 progress
 时相同阶段会在完成后输出 elapsed time。
+
+## v2.20 参数遍历
+
+```yaml
+parameter_sweep:
+  enabled: true
+  parameter: system.tx_power_dbm
+  values: [43.0, 45.5]
+```
+
+`parameter` 使用点分 YAML 路径；`values` 必须是非空列表。每个值写入独立子目录，
+其余配置保持不变，因此不同功率会复用相同的 `system.random_seed`。当前扫描模式只支持
+`system.run_mode: scheduling`，且要求 evaluation matrix 最终只产生一个 case。
+
+扫描根目录生成 `metrics/parameter_sweep_summary.csv/json`，保存系统吞吐均值/P05、
+UE 吞吐均值/P05、实际调度 MCS 均值/P05，以及有效 SINR P05/P50/P95。根目录
+`figures/` 保存跨参数合并的 effective SINR、实际 MCS、link/UE/system 吞吐 CDF。
+单次运行也会生成 `figures/actual_mcs_cdf.png`，并在 `summary.csv/json` 中保存上述
+新增系统吞吐 P05 和实际 MCS 统计。
