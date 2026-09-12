@@ -904,14 +904,16 @@ def test_system_goodput_helpers_include_zero_ttis_and_average_each_drop():
     assert summary["a"]["avg_system_goodput_mbps"] == 5.75
 
 
-def test_tx_power_is_per_trp_and_equally_split_only_across_physical_panels():
+def test_tx_power_is_per_trp_and_split_across_spatial_txru_groups():
     cfg = load_config(None)
     cfg["system"]["tx_power_dbm"] = 40.0  # 10 W for every TRP.
     cfg["topology"]["num_sites"] = 7
     cfg["trp"]["num_trps_per_sector"] = 3
+    cfg["tx_array"].update({"Np": 2, "num_txru": 4})
     tx_cfg = ArrayConfig.from_dict(cfg["tx_array"])
 
     assert tx_cfg.num_array_panels == 2
+    assert tx_cfg.num_physical_panels == 1
     assert np.isclose(resolve_tx_power_w_per_panel(cfg, tx_cfg), 5.0)
 
 

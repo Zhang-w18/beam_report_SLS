@@ -71,10 +71,12 @@ class RFArchitecture:
     allow_independent_polarization_beams: bool
     num_txru: int
     num_array_panels: int
+    num_physical_panels: int
     polarization_count: int
     tx_units_per_trp: int
     max_parallel_beams_per_trp: int
     dynamic_beam_assignment: bool
+    fully_digital_partition: bool
     measurement_panel_index: Optional[int]
     compact_panel_channel: bool
     effective_beam_scope: str
@@ -87,10 +89,13 @@ class RFArchitecture:
             "allow_independent_polarization_beams": bool(self.allow_independent_polarization_beams),
             "num_txru": int(self.num_txru),
             "num_array_panels": int(self.num_array_panels),
+            "num_physical_panels": int(self.num_physical_panels),
+            "num_spatial_txru_groups": int(self.num_array_panels),
             "polarization_count": int(self.polarization_count),
             "tx_units_per_trp": int(self.tx_units_per_trp),
             "max_parallel_beams_per_trp": int(self.max_parallel_beams_per_trp),
             "dynamic_beam_assignment": bool(self.dynamic_beam_assignment),
+            "fully_digital_partition": bool(self.fully_digital_partition),
             "measurement_panel_index": (
                 None if self.measurement_panel_index is None
                 else int(self.measurement_panel_index)
@@ -107,12 +112,10 @@ def resolve_rf_architecture(cfg: Dict[str, Any], tx_array: ArrayConfig) -> RFArc
 
     Two modes are supported:
 
-    1. panel_polarization_subarray: when independent polarization beams are
-       enabled, each TXRU controls one panel-polarization subarray. When
-       disabled (the default), the TRP exposes a shared full-array codebook;
-       both polarizations share weights and selected codewords are dynamically
-       assigned to panel resources. The parallel-beam limit is then the number
-       of physical panels.
+    1. panel_polarization_subarray: Mp/Np divide each physical panel into
+       disjoint TXRU subarrays. When independent polarization beams are
+       disabled, matching TXRUs on the P polarizations share one spatial beam.
+       The parallel-beam limit is Mg*Ng*Mp*Np.
     2. fully_connected: each TXRU can apply independent analog weights over the
        whole TRP array. Every TXRU can form one full-array beam.
     """
@@ -124,7 +127,11 @@ def resolve_rf_architecture(cfg: Dict[str, Any], tx_array: ArrayConfig) -> RFArc
     panels = max(1, int(tx_array.num_array_panels))
     requested_txru = tx_array.num_txru
     default_txru = panels * p if conn == "panel_polarization_subarray" else max(1, panels * p)
-    num_txru = int(rf_cfg.get("num_txru", requested_txru if requested_txru is not None else default_txru))
+    if conn == "panel_polarization_subarray":
+        # The seven 3GPP array parameters are authoritative in this mode.
+        num_txru = int(tx_array.derived_num_txru)
+    else:
+        num_txru = int(rf_cfg.get("num_txru", requested_txru if requested_txru is not None else default_txru))
     if num_txru <= 0:
         raise ValueError("rf_architecture.num_txru must be positive")
 
@@ -132,9 +139,14 @@ def resolve_rf_architecture(cfg: Dict[str, Any], tx_array: ArrayConfig) -> RFArc
     dynamic_beam_assignment = False
     measurement_panel_index: Optional[int] = None
     compact_panel_channel = False
+    fully_digital_partition = bool(
+        conn == "panel_polarization_subarray"
+        and int(tx_array.Mp or 1) == int(tx_array.M or 1)
+        and int(tx_array.Np or 1) == int(tx_array.N or 1)
+    )
     if conn == "panel_polarization_subarray":
         if allow_pol:
-            # Each physical panel-polarization pair is an independent subarray.
+            # Each spatial TXRU-subarray/polarization pair is independent.
             candidates = []
             for panel_idx in range(panels):
                 for pol_idx in range(p):
@@ -159,9 +171,28 @@ def resolve_rf_architecture(cfg: Dict[str, Any], tx_array: ArrayConfig) -> RFArc
                 "one panel-polarization subarray; independent polarization beams are enabled; "
                 "therefore max_parallel_beams_per_trp equals num_txru."
             )
+        elif fully_digital_partition:
+            # Mp=M and Np=N gives one AE per TXRU/polarization. The digital
+            # weights can therefore span the full array; keep one shared joint
+            # codebook/channel axis and enforce stream capacity at TRP level.
+            tx_units.append(TxUnitDescriptor(
+                local_tx_unit=0,
+                beam_scope="joint",
+                array_panel_index=None,
+                polarization_index=None,
+                txru_index=None,
+            ))
+            effective_scope = "joint"
+            dynamic_beam_assignment = True
+            explanation = (
+                "fully-digital limit of the disjoint-partition model: Mp=M and "
+                "Np=N give one antenna element per TXRU/polarization; a shared "
+                "full-array codebook is used and simultaneous spatial streams "
+                "are capped by Mg*Ng*M*N."
+            )
         else:
-            # Build one shared single-panel codebook on a configurable reference
-            # panel for SLS measurement. The panel index is a measurement
+            # Build one shared TXRU-subarray codebook on a configurable reference
+            # subarray for SLS measurement. The index is a measurement
             # reference only; selected codewords are assigned to free panel/TXRU
             # resources after scheduling.
             measurement_panel_index = int(
@@ -189,10 +220,11 @@ def resolve_rf_architecture(cfg: Dict[str, Any], tx_array: ArrayConfig) -> RFArc
             effective_scope = "per_panel"
             dynamic_beam_assignment = True
             explanation = (
-                "shared single-panel codebook with dynamic beam-to-TXRU assignment: "
-                f"panel {measurement_panel_index} is used only as the SLS measurement "
+                "shared TXRU-subarray codebook with dynamic beam assignment: "
+                f"subarray {measurement_panel_index} is used only as the SLS measurement "
                 "reference, both polarizations use the same spatial weights, codewords "
-                "are not bound to a TXRU, and simultaneous beams equal physical panels. "
+                "are not bound to a fixed TXRU group, and simultaneous beams equal "
+                "Mg*Ng*Mp*Np. "
                 "The full TRP channel is retained; "
                 f"panel-only compute views are {compact_panel_channel}."
             )
@@ -218,10 +250,12 @@ def resolve_rf_architecture(cfg: Dict[str, Any], tx_array: ArrayConfig) -> RFArc
         allow_independent_polarization_beams=allow_pol,
         num_txru=num_txru,
         num_array_panels=panels,
+        num_physical_panels=int(tx_array.num_physical_panels),
         polarization_count=p,
         tx_units_per_trp=max_parallel,
         max_parallel_beams_per_trp=max_parallel,
         dynamic_beam_assignment=dynamic_beam_assignment,
+        fully_digital_partition=fully_digital_partition,
         measurement_panel_index=measurement_panel_index,
         compact_panel_channel=compact_panel_channel,
         effective_beam_scope=effective_scope,

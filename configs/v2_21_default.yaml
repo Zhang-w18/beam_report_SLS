@@ -1,0 +1,160 @@
+# v2.21 default: 7-site/21-TRP UMa at 30 GHz.
+# All 21 cells participate in channel generation, association, interference,
+# feedback, and scheduling. Aggregate KPIs include only center-site cells 0/1/2.
+
+scenario:
+  name: urban_macro_v2_21_7site_center_statistics
+  carrier_frequency_ghz: 30.0
+  channel_model: sionna_tr38901_uma
+  min_ue_distance_m: 35.0
+  max_ue_distance_m: 250.0
+  enable_pathloss: true
+  enable_shadow_fading: true
+  o2i_model: low
+
+topology:
+  layout: seven_site_hex
+  num_sites: 7
+  sectors_per_site: 3
+  sector_azimuths_deg: [30.0, 150.0, 270.0]
+  sector_width_deg: 120.0
+  isd_m: 500.0
+  bs_height_m: 25.0
+  ue_height_m: 1.5
+
+system:
+  run_mode: scheduling
+  subcarrier_spacing_khz: 120.0
+  tx_power_dbm: 33.0
+  num_drops: 1
+  num_tti_per_drop: 20000
+  continuous_tti:
+    enabled: true
+    duration_ms: 2500.0
+    num_tti: 20000
+    warmup_tti: 5000
+  random_seed: 20260912
+  target_bler: 0.1
+
+pdsch:
+  # 3GPP NR FR2: 100 MHz channel bandwidth with 120 kHz SCS.
+  num_prbs: 66
+  num_symbols: 12
+  dmrs_overhead_re_per_prb: 18
+  num_layers_per_ue: 1
+  slot_duration_ms: 0.125
+
+ue_drop:
+  # Total UE count = 21 cells * 10 configured UEs/cell = 210.
+  num_ut_per_sector: 10
+  distribution: uniform_in_network
+  network_hex_radius_m: null
+  indoor_probability: 0.4
+  speed_kmh: 3.0
+
+statistics:
+  cell_scope: center_site_for_seven_site
+  center_site_id: 0
+
+trp:
+  num_trps_per_sector: 1
+  num_panels_per_sector: 1
+  panel_azimuth_offsets_deg: [0.0]
+
+rf_architecture:
+  txru_connectivity: panel_polarization_subarray
+  allow_independent_polarization_beams: false
+  # Mg*Ng*Mp*Np*P = 2 physical TXRUs; the polarizations share one beam.
+  num_txru: 2
+  max_parallel_beams_per_trp: auto
+
+tx_array:
+  model: tr38901_panel
+  num_txru: 2
+  num_ae: 256
+  M: 8
+  N: 16
+  P: 2
+  Mg: 1
+  Ng: 1
+  Mp: 1
+  Np: 1
+  dH: 0.5
+  dV: 0.5
+  beam_scope: per_panel
+  sampling_mode: uniform
+  # Sweep the complete 16-by-8 DFT codebook at every TRP.
+  num_beams_h: 16
+  num_beams_v: 8
+  max_beams: 128
+  vertical_beam_mode: scan
+  fixed_v_index: null
+
+ue_array:
+  model: tr38901_panel
+  num_rxru: 1
+  num_ae: 16
+  M: 4
+  N: 4
+  P: 1
+  Mg: 1
+  Ng: 1
+  Mp: 1
+  Np: 1
+  dH: 0.5
+  dV: 0.5
+  beam_scope: joint
+  sampling_mode: uniform
+  num_beams_h: 4
+  num_beams_v: 4
+  max_beams: 16
+
+measurement:
+  num_freq_points: 24
+  compute_full_gamma: true
+  frequency_average: linear_power
+  tx_panel_index: 0
+  use_panel_channel_views: true
+  gamma_backend: auto
+  gamma_ue_batch_size: 0
+
+scheduler:
+  cluster_mode: per_site
+  static_clusters: []
+  domain_mode: per_site_joint
+  objective: proportional_fair
+  max_mu_order: auto
+  cap_mu_order_by_rf: true
+  algorithm: greedy
+  use_panel_constraint: true
+  pf_tbar_init_mbps: 1.0
+  pf_averaging_window_tti: 100
+
+link_abstraction:
+  mode: sionna_sys_precomputed_bler
+  mcs_table_index: 1
+  mcs_category: 1
+  sinr_mapping: eesm
+  eesm_beta_db: 5.0
+  olla_enabled: true
+  olla_warmup_tti: 5000
+  olla_step_db: 0.1
+  harq_enabled: true
+
+coverage_heatmap:
+  enabled: false
+
+progress:
+  enabled: true
+
+sionna:
+  enable_import_probe: true
+  fallback_to_numpy_if_unavailable: false
+  device: null
+  precision: null
+  bs_polarization: dual
+  bs_polarization_type: cross
+  bs_antenna_pattern: "38.901"
+  ut_polarization: single
+  ut_polarization_type: V
+  ut_antenna_pattern: omni

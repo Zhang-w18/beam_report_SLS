@@ -18,6 +18,7 @@ from beam_sls.topology import (
     resolve_static_scheduling_clusters,
     serving_cell_from_position,
 )
+from beam_sls.sim import resolve_statistics_cell_ids
 
 
 def _seven_site_topology(num_ues_per_cell=1):
@@ -28,18 +29,28 @@ def _seven_site_topology(num_ues_per_cell=1):
     return make_topology(cfg, np.random.default_rng(20260724))
 
 
-def test_drop_keeps_exact_count_per_geometric_cell_without_rsrp():
+def test_network_drop_keeps_total_count_and_minimum_distance_before_rsrp():
     topo = _seven_site_topology(num_ues_per_cell=2)
-    counts = {sector.cell_id: 0 for sector in topo.sectors}
-
+    assert len(topo.ues) == topo.num_cells * 2
     for ue in topo.ues:
         cell_id, site_id = serving_cell_from_position(
             ue.x_m, ue.y_m, topo.sites, topo.sectors
         )
         assert (ue.serving_cell, ue.site_id) == (cell_id, site_id)
-        counts[cell_id] += 1
+        assert min(ue.distance_to_site_2d_m(site) for site in topo.sites) >= 35.0
 
-    assert set(counts.values()) == {2}
+
+def test_v221_default_network_drop_indoor_ratio_and_center_statistics():
+    cfg = load_config("configs/v2_21_default.yaml")
+    topo = make_topology(cfg, np.random.default_rng(20260912))
+
+    assert len(topo.ues) == 21 * 10
+    assert sum(ue.is_indoor for ue in topo.ues) == 84
+    assert all(
+        min(ue.distance_to_site_2d_m(site) for site in topo.sites) >= 35.0
+        for ue in topo.ues
+    )
+    assert resolve_statistics_cell_ids(topo, cfg) == [0, 1, 2]
 
 
 def test_trp_and_site_measurement_domains_are_independent():

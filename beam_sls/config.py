@@ -60,7 +60,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         },
     },
     "pdsch": {
-        "num_prbs": 132,
+        # 3GPP NR FR2: 100 MHz channel bandwidth at 120 kHz SCS.
+        "num_prbs": 66,
         "num_symbols": 12,
         "dmrs_overhead_re_per_prb": 18,
         "num_layers_per_ue": 1,
@@ -72,8 +73,18 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "ue_drop": {
         "num_ut_per_sector": 10,
-        "distribution": "uniform_in_sector",
+        "distribution": "uniform_in_network",
+        # Passed to Sionna TR 38.901 as the per-UE in_state flag.
+        "indoor_probability": 0.4,
+        # None uses the site Voronoi hexagon radius ISD/sqrt(3).
+        "network_hex_radius_m": None,
         "speed_kmh": 3.0,
+    },
+    "statistics": {
+        # For a seven-site deployment, aggregate KPIs over the center site's
+        # three sectors. Other layouts retain all cells.
+        "cell_scope": "center_site_for_seven_site",
+        "center_site_id": None,
     },
     "trp": {
         # v2.4: one TRP per sector by default. RF architecture determines how
@@ -88,34 +99,34 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # case 2: fully_connected hybrid beamforming.
         "txru_connectivity": "panel_polarization_subarray",
         "allow_independent_polarization_beams": False,
-        "num_txru": 4,
+        "num_txru": 2,
         # auto means scheduler.max_mu_order is derived from the RF architecture.
         "max_parallel_beams_per_trp": "auto",
     },
     "tx_array": {
-        # 3GPP-style TRP antenna notation. Default is the requested TRP:
-        # 4 TXRUs, 1024 AEs, (M,N,P,Mg,Ng;Mp,Np)=(16,16,2,2,1;1,1).
+        # 3GPP-style TRP antenna notation. M/N/P define AEs per physical
+        # panel, Mg/Ng define physical panels, and Mp/Np define disjoint TXRU
+        # subarrays per panel and polarization.
         "model": "tr38901_panel",
-        "num_txru": 4,
-        "num_ae": 1024,
-        "M": 16,
+        "num_txru": 2,
+        "num_ae": 256,
+        "M": 8,
         "N": 16,
         "P": 2,
-        "Mg": 2,
+        "Mg": 1,
         "Ng": 1,
         "Mp": 1,
         "Np": 1,
         "dH": 0.5,
         "dV": 0.5,
-        # The default shared TX codebook is defined on one 16x16 physical panel:
-        # 256 full DFT directions. SLS uniformly samples 4x4=16 candidates.
+        # One 8x16 subarray is co-steered across both polarizations, so the TRP
+        # can transmit one spatial beam at a time. SLS samples 4x4 candidates.
         # tx_array.beam_scope is retained as a manual override/legacy field.
         # With rf_architecture enabled, the effective beam scope is resolved from
         # rf_architecture and measurement.tx_panel_index.
         "beam_scope": "per_panel",
-        # Codebook size is N*Ng*Np*M*Mg*Mp. num_beams_h*num_beams_v is the
-        # uniformly sampled SLS subset. In per_panel mode these counts apply
-        # to each physical panel; in joint mode they apply to the whole TRP.
+        # The joint physical array has N*Ng by M*Mg directions. A sub-connected
+        # TXRU subarray has N/Np by M/Mp directions.
         "sampling_mode": "uniform",
         "num_beams_h": 4,
         "num_beams_v": 4,
@@ -159,11 +170,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "num_freq_points": 24,
         "compute_full_gamma": True,
         "frequency_average": "linear_power",
-        # Reference physical panel used to sweep the shared single-panel TX
-        # codebook during SLS. It does not bind a codeword to a TXRU.
+        # Reference spatial TXRU subarray used during SLS. It does not bind a
+        # codeword to a particular runtime TXRU group.
         "tx_panel_index": 0,
-        # Keep only the selected panel's M*N*P TX dimensions for measurement,
-        # Gamma, and realized-link calculations.
+        # Keep only the selected subarray's (M/Mp)*(N/Np)*P TX dimensions.
         "use_panel_channel_views": True,
         # numpy: CPU (backward-compatible default); cupy: NVIDIA CUDA GPU;
         # auto: use CuPy when available, otherwise record a NumPy fallback.

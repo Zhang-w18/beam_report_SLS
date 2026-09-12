@@ -55,6 +55,66 @@ def test_requested_trp_array_config():
     assert sv.shape == (1024,)
 
 
+def test_mp_np_partition_txrus_without_adding_antenna_elements():
+    from beam_sls.codebook import panel_spatial_indices
+
+    a = ArrayConfig.from_dict({
+        "model": "tr38901_panel",
+        "num_txru": 32,
+        "num_ae": 256,
+        "M": 8,
+        "N": 16,
+        "P": 2,
+        "Mg": 1,
+        "Ng": 1,
+        "Mp": 2,
+        "Np": 8,
+    })
+
+    assert a.num_ant == 8 * 16 * 2
+    assert a.expected_ae == 256
+    assert a.num_physical_panels == 1
+    assert a.num_array_panels == 16
+    assert a.derived_num_txru == 32
+    assert (a.panel_num_v, a.panel_num_h) == (4, 2)
+    partitions = [
+        panel_spatial_indices(a, index) for index in range(a.num_array_panels)
+    ]
+    assert np.array_equal(
+        np.sort(np.concatenate(partitions)), np.arange(a.num_spatial)
+    )
+
+
+def test_mp_m_np_n_resolves_fully_digital_joint_array_limit():
+    from beam_sls.config import load_config
+    from beam_sls.rf import resolve_rf_architecture
+
+    cfg = load_config(None)
+    cfg["tx_array"].update({
+        "num_txru": 8,
+        "num_ae": 8,
+        "M": 2,
+        "N": 2,
+        "P": 2,
+        "Mg": 1,
+        "Ng": 1,
+        "Mp": 2,
+        "Np": 2,
+        "num_beams_h": 2,
+        "num_beams_v": 2,
+        "max_beams": 4,
+    })
+    tx = ArrayConfig.from_dict(cfg["tx_array"])
+    rf = resolve_rf_architecture(cfg, tx)
+
+    assert tx.num_ant == 8
+    assert tx.derived_num_txru == 8
+    assert rf.fully_digital_partition is True
+    assert rf.effective_beam_scope == "joint"
+    assert rf.max_parallel_beams_per_trp == 4
+    assert rf.compact_panel_channel is False
+
+
 def test_ue_array_can_use_same_3gpp_notation():
     cfg = {
         "model": "tr38901_panel",
@@ -132,9 +192,10 @@ def test_rf_architecture_default_and_fully_connected():
     assert rf.connectivity == "panel_polarization_subarray"
     assert rf.allow_independent_polarization_beams is False
     assert rf.dynamic_beam_assignment is True
-    assert rf.tx_units_per_trp == 2
-    assert rf.max_parallel_beams_per_trp == 2
-    assert resolved_max_mu_order(cfg, rf) == 6
+    assert rf.num_txru == 2
+    assert rf.tx_units_per_trp == 1
+    assert rf.max_parallel_beams_per_trp == 1
+    assert resolved_max_mu_order(cfg, rf) == 3
     assert len(rf.tx_units) == 1
     assert rf.tx_units[0].txru_index is None
     assert rf.tx_units[0].polarization_index is None
@@ -145,7 +206,7 @@ def test_rf_architecture_default_and_fully_connected():
     rf2 = resolve_rf_architecture(cfg, tx)
     assert rf2.connectivity == "fully_connected"
     assert rf2.effective_beam_scope == "joint"
-    assert rf2.max_parallel_beams_per_trp == 4
+    assert rf2.max_parallel_beams_per_trp == 2
     assert all(u.array_panel_index is None for u in rf2.tx_units)
 
 
@@ -166,13 +227,13 @@ def test_dynamic_trp_codebook_is_not_bound_to_txru():
         rf_architecture=rf,
     )
 
-    assert beams.shape == (3 * 16, 512)
+    assert beams.shape == (3 * 16, 256)
     assert len({beam.trp_key() for beam in beam_ids}) == 3
     assert all(beam.txru_index is None for beam in beam_ids)
     assert all(beam.polarization_index is None for beam in beam_ids)
     assert all(beam.beam_scope == "per_panel" for beam in beam_ids)
     assert all(beam.array_panel_index == 0 for beam in beam_ids)
-    assert all(beam.codebook_size == 16 * 16 for beam in beam_ids)
+    assert all(beam.codebook_size == 16 * 8 for beam in beam_ids)
 
 
 def test_shared_codebook_can_measure_on_selected_reference_panel():
@@ -181,6 +242,7 @@ def test_shared_codebook_can_measure_on_selected_reference_panel():
     from beam_sls.rf import resolve_rf_architecture
 
     cfg = load_config(None)
+    cfg["tx_array"].update({"num_txru": 4, "num_ae": 512, "Mg": 2})
     cfg["measurement"]["tx_panel_index"] = 1
     tx = ArrayConfig.from_dict(cfg["tx_array"])
     rf = resolve_rf_architecture(cfg, tx)
@@ -191,9 +253,9 @@ def test_shared_codebook_can_measure_on_selected_reference_panel():
     assert rf.measurement_panel_index == 1
     assert all(beam.array_panel_index == 1 for beam in beam_ids)
     assert all(beam.txru_index is None for beam in beam_ids)
-    assert beams.shape == (16, 512)
-    # Compact ordering retains both polarizations of the 16x16 panel.
-    assert np.all(np.count_nonzero(np.abs(beams) > 0.0, axis=1) == 512)
+    assert beams.shape == (16, 256)
+    # Compact ordering retains both polarizations of the 8x16 TXRU subarray.
+    assert np.all(np.count_nonzero(np.abs(beams) > 0.0, axis=1) == 256)
 
 
 def test_full_channel_is_retained_and_panel_view_matches_full_calculation():
@@ -213,6 +275,7 @@ def test_full_channel_is_retained_and_panel_view_matches_full_calculation():
 
     cfg = load_config(None)
     cfg["scenario"]["channel_model"] = "numpy_geometric_uma"
+    cfg["tx_array"].update({"num_txru": 4, "num_ae": 512, "Mg": 2})
     cfg["ue_drop"]["num_ut_per_sector"] = 1
     cfg["measurement"]["num_freq_points"] = 2
     cfg["measurement"]["tx_panel_index"] = 1
@@ -238,11 +301,11 @@ def test_full_channel_is_retained_and_panel_view_matches_full_calculation():
     )
     rx_beams = dft_codebook_from_array(rx, max_beams=2)
 
-    assert retained.h_freq.shape[-1] == 1024
-    assert full.h_freq.shape[-1] == 1024
+    assert retained.h_freq.shape[-1] == 512
+    assert full.h_freq.shape[-1] == 512
     assert np.allclose(retained.h_freq, full.h_freq)
     panel_view = extract_panel_tx_dimension(retained.h_freq, tx, 1)
-    assert panel_view.shape[-1] == 512
+    assert panel_view.shape[-1] == 256
     assert np.shares_memory(panel_view, retained.h_freq) is False
     assert np.allclose(panel_view, full.h_freq[..., indices])
     assert np.allclose(compact_beams, full_beams[..., indices])
@@ -364,9 +427,9 @@ def test_seven_site_three_trp_topology_and_capacity():
     assert len(topo.sites) == 7
     assert topo.num_cells == 21
     assert all(sum(sec.site_id == site.site_id for sec in topo.sectors) == 3 for site in topo.sites)
-    assert rf.max_parallel_beams_per_trp == tx.num_array_panels == 2
+    assert rf.max_parallel_beams_per_trp == tx.num_array_panels == 1
     # per_site_joint schedules three TRPs at a time.
-    assert resolved_max_mu_order(cfg, rf) == 6
+    assert resolved_max_mu_order(cfg, rf) == 3
 
 
 def test_v212_baseline_topk_config_enables_requested_comparison_modes():
@@ -402,6 +465,31 @@ def test_v212_baseline_topk_config_enables_requested_comparison_modes():
     assert tx.num_array_panels == 2
     assert rf.max_parallel_beams_per_trp == 2
     assert resolved_max_mu_order(cfg, rf) == 6
+
+
+def test_v221_default_has_requested_radio_array_and_single_beam_trp():
+    from beam_sls.config import load_config
+    from beam_sls.rf import resolve_rf_architecture, resolved_max_mu_order
+    from beam_sls.sim import resolve_tti_counts
+    from beam_sls.utils import occupied_bandwidth_hz
+
+    cfg = load_config("configs/v2_21_default.yaml")
+    tx = ArrayConfig.from_dict(cfg["tx_array"])
+    rf = resolve_rf_architecture(cfg, tx)
+
+    assert (tx.M, tx.N, tx.P, tx.Mg, tx.Ng, tx.Mp, tx.Np) == (
+        8, 16, 2, 1, 1, 1, 1,
+    )
+    assert tx.num_ant == 256
+    assert tx.derived_num_txru == 2
+    assert rf.max_parallel_beams_per_trp == 1
+    assert resolved_max_mu_order(cfg, rf) == 3
+    assert cfg["scenario"]["carrier_frequency_ghz"] == 30.0
+    assert cfg["system"]["tx_power_dbm"] == 33.0
+    assert cfg["topology"]["isd_m"] == 500.0
+    assert cfg["pdsch"]["num_prbs"] == 66
+    assert occupied_bandwidth_hz(cfg) == 95.04e6
+    assert resolve_tti_counts(cfg)[:3] == (True, 20000, 5000)
 
 
 def test_three_site_global_36ue_config_exposes_36_tx_units():

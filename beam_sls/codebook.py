@@ -30,22 +30,25 @@ class ArrayConfig:
 
         (M, N, P, Mg, Ng; Mp, Np)
 
-    with horizontal DFT dimension
+    The physical array dimensions are
 
-        H = N * Ng * Np
+        H = N * Ng
 
-    and vertical DFT dimension
+    and
 
-        V = M * Mg * Mp.
+        V = M * Mg.
 
-    Therefore the full spatial DFT codebook size is H*V, i.e.
+    ``Mp`` and ``Np`` are not additional panels or antenna elements. They are
+    the vertical and horizontal counts of disjoint TXRU subarrays inside every
+    physical panel and polarization. Therefore
 
-        N * Ng * Np * M * Mg * Mp.
+        num_AE = M * N * P * Mg * Ng
+        num_TXRU = M_g * N_g * M_p * N_p * P.
 
     The polarization count P expands the vector length but does not multiply the
-    number of DFT beam directions. For panel-independent transmission, each
-    physical panel uses its own local DFT codebook with dimensions N by M and the
-    resulting local vector is zero-padded into the full-array AE vector.
+    number of DFT beam directions. For sub-connected transmission, each TXRU
+    subarray uses a local DFT codebook with dimensions ``N/Np`` by ``M/Mp``;
+    the local vector is zero-padded into the full-array AE vector.
     """
 
     num_h: int
@@ -87,16 +90,38 @@ class ArrayConfig:
     @property
     def expected_ae(self) -> int:
         if all(v is not None for v in (self.M, self.N, self.P, self.Mg, self.Ng, self.Mp, self.Np)):
-            return int(self.M) * int(self.N) * int(self.P) * int(self.Mg) * int(self.Ng) * int(self.Mp) * int(self.Np)
+            return int(self.M) * int(self.N) * int(self.P) * int(self.Mg) * int(self.Ng)
         return self.num_ant
 
     @property
+    def derived_num_txru(self) -> int:
+        """Number of physical TXRUs, including the polarization dimension."""
+        if self.model != "tr38901_panel":
+            return int(self.num_txru or 1)
+        return int(
+            (self.Mg or 1) * (self.Ng or 1)
+            * (self.Mp or 1) * (self.Np or 1)
+            * int(self.polarization_count)
+        )
+
+    @property
+    def num_physical_panels(self) -> int:
+        """Number of physical antenna panels, ``Mg*Ng``."""
+        if self.model != "tr38901_panel":
+            return 1
+        return int((self.Mg or 1) * (self.Ng or 1))
+
+    @property
     def panel_num_h(self) -> int:
-        return int(self.N) if self.N is not None else int(self.num_h)
+        if self.model == "tr38901_panel":
+            return int(self.N or 1) // int(self.Np or 1)
+        return int(self.num_h)
 
     @property
     def panel_num_v(self) -> int:
-        return int(self.M) if self.M is not None else int(self.num_v)
+        if self.model == "tr38901_panel":
+            return int(self.M or 1) // int(self.Mp or 1)
+        return int(self.num_v)
 
     @property
     def panel_grid_h(self) -> int:
@@ -108,6 +133,11 @@ class ArrayConfig:
 
     @property
     def num_array_panels(self) -> int:
+        """Backward-compatible name for independently beamformed TXRU groups.
+
+        One group contains the co-steered TXRUs of all polarizations for the
+        same disjoint spatial subarray. It is not the physical-panel count.
+        """
         return int(self.panel_grid_h * self.panel_grid_v)
 
     @property
@@ -149,6 +179,7 @@ class ArrayConfig:
             "num_spatial": int(self.num_spatial),
             "num_ant": int(self.num_ant),
             "expected_ae": int(self.expected_ae),
+            "derived_num_txru": int(self.derived_num_txru),
             "num_txru_or_rxru": None if self.num_txru is None else int(self.num_txru),
             "num_txru": None if self.num_txru is None else int(self.num_txru),
             "num_beams_h": None if self.num_beams_h is None else int(self.num_beams_h),
@@ -175,6 +206,10 @@ class ArrayConfig:
             "panel_grid_h": int(self.panel_grid_h),
             "panel_grid_v": int(self.panel_grid_v),
             "num_array_panels": int(self.num_array_panels),
+            "num_physical_panels": int(self.num_physical_panels),
+            "txru_subarray_num_h": int(self.panel_num_h),
+            "txru_subarray_num_v": int(self.panel_num_v),
+            "num_spatial_txru_groups": int(self.num_array_panels),
             "full_codebook_size": int(self.full_codebook_size),
             "per_panel_codebook_size": int(self.per_panel_codebook_size),
         }
@@ -216,15 +251,35 @@ class ArrayConfig:
             Ng = int(cfg.get("Ng", 1))
             Mp = int(cfg.get("Mp", 1))
             Np = int(cfg.get("Np", 1))
-            num_h = int(cfg.get("num_h", N * Ng * Np))
-            num_v = int(cfg.get("num_v", M * Mg * Mp))
+            if min(M, N, P, Mg, Ng, Mp, Np) <= 0:
+                raise ValueError("M/N/P/Mg/Ng/Mp/Np must all be positive")
+            if P not in (1, 2):
+                raise ValueError("3GPP panel polarization count P must be 1 or 2")
+            if M % Mp != 0 or N % Np != 0:
+                raise ValueError(
+                    "TXRU subarrays must partition antenna elements exactly: "
+                    "M must be divisible by Mp and N must be divisible by Np"
+                )
+            num_h = int(cfg.get("num_h", N * Ng))
+            num_v = int(cfg.get("num_v", M * Mg))
+            derived_num_txru = Mg * Ng * Mp * Np * P
+            requested_num_txru = cfg.get("num_txru")
+            requested_num_rxru = cfg.get("num_rxru")
             out = cls(
                 num_h=num_h,
                 num_v=num_v,
                 d_h_lambda=float(cfg.get("d_h_lambda", cfg.get("dH", 0.5))),
                 d_v_lambda=float(cfg.get("d_v_lambda", cfg.get("dV", 0.5))),
                 polarization_count=P,
-                num_txru=None if cfg.get("num_txru", cfg.get("num_rxru")) is None else int(cfg.get("num_txru", cfg.get("num_rxru"))),
+                # Keep explicit legacy metadata visible for compatibility.
+                # RF resolution uses derived_num_txru for sub-connected TX.
+                num_txru=(
+                    int(requested_num_txru)
+                    if requested_num_txru is not None
+                    else int(requested_num_rxru)
+                    if requested_num_rxru is not None
+                    else derived_num_txru
+                ),
                 num_beams_h=None if cfg.get("num_beams_h") is None else int(cfg.get("num_beams_h")),
                 num_beams_v=None if cfg.get("num_beams_v") is None else int(cfg.get("num_beams_v")),
                 beam_scope=beam_scope,
@@ -246,7 +301,12 @@ class ArrayConfig:
             if out.num_ant != out.expected_ae:
                 raise ValueError(
                     f"Invalid TRP array config: derived num_ant={out.num_ant}, "
-                    f"but M*N*P*Mg*Ng*Mp*Np={out.expected_ae}"
+                    f"but M*N*P*Mg*Ng={out.expected_ae}"
+                )
+            if cfg.get("num_ae") is not None and int(cfg["num_ae"]) != out.expected_ae:
+                raise ValueError(
+                    f"Configured num_ae={int(cfg['num_ae'])} does not match "
+                    f"M*N*P*Mg*Ng={out.expected_ae}"
                 )
             return out
         return cls(
@@ -436,7 +496,7 @@ def _panel_padded_spatial_vector(array_cfg: ArrayConfig, panel_index: int, h_ind
 
 
 def panel_spatial_indices(array_cfg: ArrayConfig, panel_index: int) -> np.ndarray:
-    """Indices of one physical panel in the flattened full spatial grid."""
+    """Indices of one spatial TXRU subarray in the flattened array grid."""
     p = int(panel_index)
     if not 0 <= p < array_cfg.num_array_panels:
         raise ValueError(
@@ -459,7 +519,7 @@ def panel_spatial_indices(array_cfg: ArrayConfig, panel_index: int) -> np.ndarra
 
 
 def panel_ae_indices(array_cfg: ArrayConfig, panel_index: int) -> np.ndarray:
-    """Indices of one panel across all polarization blocks.
+    """Indices of one TXRU subarray across all polarization blocks.
 
     The project AE ordering is ``[pol0 full-spatial, pol1 full-spatial, ...]``.
     The returned compact ordering is ``[pol0 panel-spatial, pol1 panel-spatial, ...]``.
@@ -487,10 +547,12 @@ def sionna_panelarray_source_indices(array_cfg: ArrayConfig) -> np.ndarray:
         panel_grid_v = 1
         panel_grid_h = 1
     else:
-        panel_v = int(array_cfg.panel_num_v)
-        panel_h = int(array_cfg.panel_num_h)
-        panel_grid_v = int(array_cfg.panel_grid_v)
-        panel_grid_h = int(array_cfg.panel_grid_h)
+        # Sionna orders the *physical* M-by-N panels. Mp/Np only partition
+        # those elements into TXRU subarrays in the beamforming layer.
+        panel_v = int(array_cfg.M or array_cfg.num_v)
+        panel_h = int(array_cfg.N or array_cfg.num_h)
+        panel_grid_v = int(array_cfg.Mg or 1)
+        panel_grid_h = int(array_cfg.Ng or 1)
     num_spatial = int(array_cfg.num_spatial)
     panel_spatial = panel_v * panel_h
     source_by_local = np.empty(int(array_cfg.num_ant), dtype=int)

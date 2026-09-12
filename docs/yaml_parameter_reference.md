@@ -1,6 +1,6 @@
-# YAML 参数说明文档（v2.4，自包含）
+# YAML 参数说明文档（v2.21，自包含）
 
-本文档说明 `configs/v2_one_site_three_sector.yaml` 中主要可配置参数的含义、取值范围和注意事项。
+本文档说明 `configs/v2_21_default.yaml` 中主要可配置参数的含义、取值范围和注意事项。
 
 ---
 
@@ -12,7 +12,7 @@
 | `carrier_frequency_ghz` | 载波频率，单位 GHz | 正数，例如 `3.5`, `7`, `30` | 影响 pathloss、Sionna TR 38.901 channel 和阵列物理尺度解释。 |
 | `channel_model` | 信道 backend | `sionna_tr38901_uma`, `sionna_tr38901_umi`, `sionna_tr38901_rma`, `numpy_geometric_uma` | 优先使用 Sionna TR 38.901；若不可用且 `sionna.fallback_to_numpy_if_unavailable=true`，会 fallback 到 numpy 几何信道。 |
 | `min_ue_distance_m` | UE 与站点最小距离 | `>0` | UE drop 和覆盖图会避开过近点。 |
-| `max_ue_distance_m` | UE 与站点最大距离 | `> min_ue_distance_m` | UE drop 半径上限。 |
+| `max_ue_distance_m` | legacy sector drop 最大距离 | `> min_ue_distance_m` | 仅 `uniform_in_sector` 使用；`uniform_in_network` 默认使用站点 Voronoi 六边形。 |
 | `enable_pathloss` | 是否启用 pathloss | `true`/`false` | 对 Sionna backend 和 fallback backend 都有意义。 |
 | `enable_shadow_fading` | 是否启用阴影衰落 | `true`/`false` | 对 Sionna backend 和 fallback backend 都有意义。 |
 | `o2i_model` | UMa/UMi O2I 模型 | `low`, `high` | 传给 Sionna UMa/UMi。 |
@@ -44,7 +44,7 @@
 | 参数 | 含义 | 典型取值 / 范围 | 说明 |
 |---|---|---|---|
 | `subcarrier_spacing_khz` | SCS | `15/30/60/120` 等 | 与 `pdsch.num_prbs` 一起唯一确定有效占用带宽。 |
-| `tx_power_dbm` | 每个 TRP 的总发射功率 | dBm | 每个 TRP 独立获得该总功率，并在线性功率域均分给该 TRP 的所有物理面板；不随站点、小区或 TRP 数量增加而再次分摊。 |
+| `tx_power_dbm` | 每个 TRP 的总发射功率 | dBm | 每个 TRP 独立获得该总功率，并在线性功率域均分给 `Mg*Ng*Mp*Np` 个可独立空间波束的 TXRU 组；不随站点、小区或 TRP 数量增加而再次分摊。 |
 | `num_drops` | 随机 drop 数 | 正整数 | 越大统计越稳定，仿真越慢。 |
 | `num_tti_per_drop` | 每个 drop 的 TTI 数 | 正整数 | OLLA/HARQ 风格随机 ACK 统计使用。 |
 | `continuous_tti.enabled` | 是否启用连续 TTI 模式 | `true`/`false` | 启用后每个 drop 只实例化一次信道并进行一次测量/上报；每个 warmup 和正式 TTI 都推进小尺度衰落、重新调度并更新 PF/OLLA。 |
@@ -122,7 +122,8 @@ B_{\mathrm{occupied}} =
 \mathrm{subcarrier\_spacing\_khz}\times 10^3.
 \]
 
-例如 `132 PRB × 12 × 120 kHz = 190.08 MHz`。该值同时用于信道频率采样跨度和
+100 MHz、120 kHz SCS 对应 66 PRB；保护带之外的实际占用带宽为
+`66 PRB × 12 × 120 kHz = 95.04 MHz`。该值同时用于信道频率采样跨度和
 热噪声积分带宽，并写入 `resolved_config.yaml` 的
 `_resolved.occupied_bandwidth_mhz` 以及 `metrics/drops.csv`。
 
@@ -141,9 +142,29 @@ B_{\mathrm{occupied}} =
 
 | 参数 | 含义 | 典型取值 / 范围 | 说明 |
 |---|---|---|---|
-| `num_ut_per_sector` | 每 sector UE 数 | 正整数 | 默认 10，因此 1-site 3-sector 下总 UE 数 30。 |
-| `distribution` | UE 分布 | 当前默认 `uniform_in_sector` | 在 sector 扇形区域内均匀 drop。 |
+| `num_ut_per_sector` | 每小区 UE 数（用于确定全网总数） | 正整数 | `uniform_in_network` 下总 UE 数=`num_cells*num_ut_per_sector`，不保证每个小区最终关联数相同。 |
+| `distribution` | UE 分布 | 默认 `uniform_in_network`；兼容 `uniform_in_sector` | 新模式在全部站点 Voronoi 六边形的并集内一次性均匀撒点，再按 RSRP 关联。 |
+| `network_hex_radius_m` | 每站六边形外接圆半径 | 正数或 `null` | `null` 时使用 `ISD/sqrt(3)`；所有候选点还会对全体 BS 检查 `min_ue_distance_m`。 |
+| `indoor_probability` | 室内 UE 比例 | `[0,1]` | 每个 drop 随机选择、并保证数量为 `round(p*num_ues)`；作为 Sionna `set_topology(..., in_state=...)` 输入。默认 `0.4`。 |
 | `speed_kmh` | UE 速度 | 非负数 | 传给 Sionna topology；fallback 中影响较小。 |
+
+UE 最终服务 TRP 不由撒点时的欧氏距离决定。信道生成后，每个 TRP 遍历其 TX
+码本，并联合 UE RX 波束计算宽带平均接收功率；最大 RSRP 波束所属 TRP 成为服务
+TRP。`uniform_in_sector` 只作为旧 YAML 兼容模式保留。
+
+---
+
+## 6.1 `statistics`
+
+| 参数 | 含义 | 取值范围 | 说明 |
+|---|---|---|---|
+| `cell_scope` | 聚合 KPI 的小区范围 | `all`, `center_site`, `center_site_for_seven_site` | v2.21 默认在 7 站点时仅统计中心站 3 个扇区，其他布局统计全部小区。 |
+| `center_site_id` | 指定中心站 | 整数或 `null` | `null` 时选取距原点最近的站点。 |
+| `cell_ids` | 显式小区集合 | 整数数组或省略 | 设置后优先于 `cell_scope`。 |
+
+外围站点仍完整参与信道、RSRP 关联、调度和干扰计算。原始 `link_tti.csv`、
+`ues.csv` 等保留全网明细并带 `statistics_in_scope`；`summary`、吞吐 CDF、
+`ue_goodput.csv` 和 `system_tti_goodput.csv` 只使用统计范围内的 UE。
 
 ---
 
@@ -154,10 +175,10 @@ B_{\mathrm{occupied}} =
 | `num_trps_per_sector` | 每 sector TRP 数 | 正整数，默认 `1` | v2.4 推荐使用此字段。 |
 | `num_panels_per_sector` | 兼容旧字段 | 正整数 | 建议与 `num_trps_per_sector` 保持一致；RF 架构才决定每 TRP 有多少 TX units。 |
 | `panel_azimuth_offsets_deg` | 物理阵列面板相对 sector boresight 的方位偏置 | 数组，单位 deg | 对 sub-connected 架构，不同物理面板可给不同 offset。默认 `[0,0]`。 |
-| `panel_power_mode` | 已弃用的兼容字段 | 任意旧值 | 当前忽略该字段；`system.tx_power_dbm` 始终按“每 TRP 总功率、均分到物理面板”解释。 |
+| `panel_power_mode` | 已弃用的兼容字段 | 任意旧值 | 当前忽略；`system.tx_power_dbm` 按“每 TRP 总功率、均分到空间 TXRU 组”解释。 |
 
-例如一个 TRP 有 2 个物理面板，且 `tx_power_dbm: 40`（10 W），则每个面板
-使用 5 W（约 36.99 dBm）。网络中的每个 TRP 都采用同样的 10 W 总功率预算。
+例如 `Mg*Ng*Mp*Np=2` 且 `tx_power_dbm: 40`（10 W），则每个可独立波束的
+TXRU 组使用 5 W（约 36.99 dBm）。网络中每个 TRP 都有独立的 10 W 总预算。
 
 ---
 
@@ -169,7 +190,7 @@ v2.4 新增的关键配置块。
 |---|---|---|---|
 | `txru_connectivity` | TXRU 与 AEs 的连接结构 | `panel_polarization_subarray` 或 `fully_connected` | 情况 1 或情况 2。支持别名：`sub_connected`, `case1`, `fully_connected_hybrid`, `case2` 等。 |
 | `allow_independent_polarization_beams` | 同一物理面板的两个极化是否可用不同 beam | `true`/`false` | 仅对 `panel_polarization_subarray` 关键。默认 `false`，两个极化共用空间权值。 |
-| `num_txru` | TRP TXRU 数 | 正整数 | 默认 4。通常应与 `tx_array.num_txru` 一致。 |
+| `num_txru` | legacy/fully-connected TXRU 配置 | 正整数 | sub-connected 模式由 `Mg*Ng*Mp*Np*P` 派生；该字段不覆盖七参数定义。 |
 | `max_parallel_beams_per_trp` | 每 TRP 最大并发模拟 beam 数 | 当前建议 `auto` | 解析结果写入 `rf_architecture_summary.json`。 |
 
 ### 8.1 情况 1：`panel_polarization_subarray`
@@ -180,13 +201,13 @@ v2.4 新增的关键配置块。
 rf_architecture:
   txru_connectivity: panel_polarization_subarray
   allow_independent_polarization_beams: false
-  num_txru: 4
+  num_txru: 2
 ```
 
 默认 TRP 有：
 
 $$
-\mathrm{physical\ panels} = M_g \times N_g \times M_p \times N_p = 2
+\mathrm{physical\ panels} = M_g \times N_g
 $$
 
 $$
@@ -196,18 +217,23 @@ $$
 因此：
 
 $$
-\mathrm{max\_parallel\_beams\_per\_trp}
-= \mathrm{physical\ panels} = 2
+\mathrm{num\_TXRU}=M_gN_gM_pN_pP
+\qquad
+\mathrm{max\_parallel\_beams\_per\_trp}=M_gN_gM_pN_p
 $$
 
 $$
 \mathrm{scheduler.max\_mu\_order(auto)}
-= 2 \times \mathrm{TRPs\ in\ scheduling\ domain}
+= 1 \times \mathrm{TRPs\ in\ scheduling\ domain}
 $$
 
 波束码字属于 TRP 共享池，不在码本生成阶段绑定到特定 TXRU。调度器可从共享池选择任意
-`N` 个波束，其中 `N` 为该 TRP 的物理面板数；选中后再动态映射到空闲发射资源。
+`N` 个波束，其中 `N=Mg*Ng*Mp*Np`；选中后再动态映射到空闲 TXRU 组。
 每个波束的空间权值同时施加到两个极化。
+
+当 `Mp=M` 且 `Np=N` 时，每个 TXRU/极化只连接一个阵元，解析器自动进入该
+不相交划分模型的全数字极限：码本切换为 full-array joint DFT，最大并发空间流数为
+`Mg*Ng*M*N`。介于 `1×1` 与 `M×N` 之间的 `Mp×Np` 表达部分连接子阵架构。
 
 如果：
 
@@ -218,7 +244,7 @@ allow_independent_polarization_beams: true
 则恢复兼容模式：每个 panel-polarization/TXRU 子阵列拥有独立码本并可使用不同波束：
 
 $$
-\mathrm{max\_parallel\_beams\_per\_trp} = \mathrm{num\_txru} = 4
+\mathrm{max\_parallel\_beams\_per\_trp} = \mathrm{num\_txru} = 2
 $$
 
 ### 8.2 情况 2：`fully_connected`
@@ -250,15 +276,15 @@ $$
 | 参数 | 含义 | 取值范围 | 说明 |
 |---|---|---|---|
 | `model` | 阵列参数模式 | `tr38901_panel` | 使用 3GPP-style 参数。 |
-| `num_txru` | TXRU 数 | 正整数 | 与 `rf_architecture.num_txru` 一致。 |
-| `num_ae` | AE 数 | 正整数 | 程序校验 `M*N*P*Mg*Ng*Mp*Np`。 |
-| `M` | 每 panel 垂直单元数 | 正整数 | 默认 16。 |
-| `N` | 每 panel 水平单元数 | 正整数 | 默认 16。 |
+| `num_txru` | TXRU 数（兼容/校验元数据） | 正整数 | v2.21 sub-connected 实际值由 `Mg*Ng*Mp*Np*P` 派生。 |
+| `num_ae` | AE 数 | 正整数 | 程序校验 `M*N*P*Mg*Ng`；`Mp/Np` 不增加阵元。 |
+| `M` | 每面板、每列、每极化垂直阵元数 | 正整数 | 默认 8。 |
+| `N` | 每面板水平阵元列数 | 正整数 | 默认 16。 |
 | `P` | 极化数 | `1` 或 `2` 常用 | 默认 2。 |
-| `Mg` | 垂直方向 panel 数 | 正整数 | 默认 2。 |
+| `Mg` | 垂直方向物理面板数 | 正整数 | 默认 1。 |
 | `Ng` | 水平方向 panel 数 | 正整数 | 默认 1。 |
-| `Mp` | 每 panel group 垂直 repetition | 正整数 | 默认 1。 |
-| `Np` | 每 panel group 水平 repetition | 正整数 | 默认 1。 |
+| `Mp` | 每面板、每极化内垂直 TXRU 数 | 正整数，且整除 `M` | 默认 1。 |
+| `Np` | 每面板、每极化内水平 TXRU 数 | 正整数，且整除 `N` | 默认 1。 |
 | `dH` | 水平阵元间距 | 正数，单位 wavelength | 默认 0.5。 |
 | `dV` | 垂直阵元间距 | 正数，单位 wavelength | 默认 0.5。 |
 | `beam_scope` | legacy/manual beam scope | `joint`, `per_panel` | v2.4 主流程会由 RF architecture 解析有效 scope；该字段主要用于兼容和 UE/codebook fallback。 |
@@ -273,22 +299,22 @@ $$
 
 $$
 \mathrm{full\ array\ DFT\ spatial\ codebook}
-= N \times N_g \times N_p \times M \times M_g \times M_p
+= N \times N_g \times M \times M_g
 $$
 
 $$
-\mathrm{per\ panel\ DFT\ spatial\ codebook} = N \times M
+\mathrm{per\ TXRU\ subarray\ DFT\ spatial\ codebook}
+= (N/N_p) \times (M/M_p)
 $$
 
-默认共享码本模式下，`measurement.tx_panel_index` 指定一个参考物理面板，码本按该
-面板的 `N*M = 256` 个 DFT 方向定义；默认 SLS 均匀采样其中 `4*4=16` 个。
-如需固定该面板遍历完整码本，可配置：
+默认共享码本模式下，`measurement.tx_panel_index` 指定参考 TXRU 子阵。v2.21 默认
+`8×16`、`Mp=Np=1`，因此完整扫描 128 个 DFT 方向；默认 YAML 为：
 
 ```yaml
 tx_array:
   num_beams_h: 16
-  num_beams_v: 16
-  max_beams: 256
+  num_beams_v: 8
+  max_beams: 128
 
 measurement:
   tx_panel_index: 0
@@ -331,8 +357,8 @@ ue_array:
 |---|---|---|---|
 | `domain_mode` | 已废弃 | 忽略 | 测量域固定为 UE 所属静态调度簇。 |
 | `num_freq_points` | 频域采样点数 | 正整数 | Gamma 矩阵和 EESM 使用。越大越慢。 |
-| `tx_panel_index` | TX 波束扫描使用的参考物理面板 | `0` 到 `Mg*Ng*Mp*Np-1` | 默认 `0`。共享码本模式固定该面板遍历候选波束；它只是测量参考，不绑定 TXRU。 |
-| `use_panel_channel_views` | 是否使用单面板计算视图 | `true`/`false` | 默认 `true`。完整 TRP 信道始终保存为 1024 维；SLS 从中提取参考面板的 `M*N*P=512` 维视图，实际传输按动态分配的物理面板提取视图。旧参数 `compact_tx_panel_channel` 仅作为兼容别名。 |
+| `tx_panel_index` | TX 波束扫描使用的参考 TXRU 子阵 | `0` 到 `Mg*Ng*Mp*Np-1` | 默认 `0`；只作为同构子阵的测量参考，不把码字永久绑定到某个 TXRU。 |
+| `use_panel_channel_views` | 是否使用 TXRU 子阵计算视图 | `true`/`false` | 默认 `true`。完整 TRP 信道保存 `M*N*P*Mg*Ng` 维；计算视图为 `(M/Mp)*(N/Np)*P` 维。旧字段名保留兼容。 |
 | `compute_full_gamma` | 是否计算服务/干扰 beam Gamma | `true`/`false` | 服务维只包含 serving-cell 候选波束，干扰维为所属静态簇的全部 beam。 |
 | `frequency_average` | 频域平均方式 | 当前 `linear_power` | 预留字段。 |
 

@@ -1,24 +1,28 @@
-# Sionna SLS Beam Management Platform v2.4
+# Sionna SLS Beam Management Platform v2.21
 
-本项目是一个面向“服务波束 + 干扰波束上报”的系统级波束管理仿真原型。默认场景为 **1-site 3-sector**，默认 TRP 天线为：
+本项目是一个面向“服务波束 + 干扰波束上报”的系统级波束管理仿真原型。
+v2.21 默认 YAML 为 7-site、21-TRP、30 GHz UMa，中心站三扇区 KPI 统计。默认
+TRP 天线为：
 
-4 TXRUs, 1024 AEs：
+2 个物理 TXRU、256 AEs、双极化共用 1 个空间波束：
 
 $$
-(M, N, P, M_g, N_g; M_p, N_p) = (16, 16, 2, 2, 1; 1, 1)
+(M, N, P, M_g, N_g; M_p, N_p) = (8, 16, 2, 1, 1; 1, 1)
 $$
 
 $$
 (d_H, d_V) = (0.5, 0.5)
 $$
 
-v2.4 的核心变化是新增了 **RF architecture** 配置层，代码会自动把射频架构、波束发射方式和 MU order 关联起来：
+v2.21 按 3GPP 物理含义解析七个阵列参数：`M/N/P` 是每面板阵元，`Mg/Ng`
+是物理面板数，`Mp/Np` 是每面板、每极化内不相交 TXRU 子阵数。代码自动把
+子阵划分、波束发射方式和 MU order 关联起来：
 
 - 情况 1：`panel_polarization_subarray`，即 sub-connected / panel-polarization connected；
 - 情况 2：`fully_connected`，即 fully-connected hybrid beamforming；
-- 默认参数为情况 1，允许不同极化采用不同波束，每个物理面板/极化子阵列独立发射 DFT 波束；
+- 默认参数为情况 1，两个极化采用同一波束；
 - 默认 `scheduler.max_mu_order: auto`，会根据 RF architecture 自动解析；
-- 默认 4 TXRUs，因此默认最大同时发射模拟波束数 = 4，默认最大 MU order = 4；
+- 默认 2 个极化 TXRU 共同形成一个波束，因此每 TRP 最大并发波束数 = 1；
 - 支持 1 站点、3 站点等边三角形、7 站点六边形站群；
 - 支持 `per_site_joint` 站点域调度：同一站点的 3 个扇区一起调度，UE 只上报本服务站点 3 个扇区内的候选波束；
 - `exhaustive` 穷举调度新增站点域拆分、panel 约束剪枝、零上界剪枝和 branch-and-bound 上界剪枝；
@@ -49,8 +53,8 @@ cd sionna_sls_beam_mgmt_v2_4
 cd /path/to/sionna_sls_beam_mgmt_v2_4
 CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 \
 /home/zhangwei/anaconda3/envs/tf_sionna_rt/bin/python -m beam_sls.run \
-  --config configs/v2_one_site_three_sector.yaml \
-  --out runs/v2_4_pdsch_greedy_drop50_tti50 \
+  --config configs/v2_21_default.yaml \
+  --out runs/v2_21_default \
   --num-drops 50 \
   --num-tti 50 \
   --olla-warmup-tti 100 \
@@ -106,16 +110,16 @@ PF/OLLA。`num_tti` 可直接指定正式 TTI 总数；为 `null` 时才由
 
 ```bash
 /home/zhangwei/anaconda3/envs/tf_sionna_rt/bin/python -m beam_sls.run \
-  --config configs/v2_one_site_three_sector.yaml \
-  --out runs/v2_4_one_site_three_sector
+  --config configs/v2_21_default.yaml \
+  --out runs/v2_21_default
 ```
 
 快速调试运行，跳过覆盖热力图：
 
 ```bash
 /home/zhangwei/anaconda3/envs/tf_sionna_rt/bin/python -m beam_sls.run \
-  --config configs/v2_one_site_three_sector.yaml \
-  --out runs/v2_4_smoke \
+  --config configs/v2_21_default.yaml \
+  --out runs/v2_21_smoke \
   --num-drops 1 \
   --num-tti 1 \
   --algorithm greedy \
@@ -226,15 +230,19 @@ topology:
 
 `seven_site_hex` 生成 1 个中心站点和 6 个第一圈邻站，总小区数为 `7 * sectors_per_site`。当前实现是有限 7 站点站群，不做 wrap-around 边界复制。
 
-UE drop 仍按 sector 扇形区域生成：
+v2.21 默认在所有站点 Voronoi 六边形的并集内一次性均匀撒点：
 
 ```yaml
 ue_drop:
   num_ut_per_sector: 10
-  distribution: uniform_in_sector
+  distribution: uniform_in_network
+  indoor_probability: 0.4
 ```
 
-因此 7 站点、每站 3 扇区、每扇区 10 个 UE 时：
+这里 `num_ut_per_sector` 用于确定全网总 UE 数；不再强制每个几何小区恰好 10 个
+UE。所有点与任一 BS 的 2D 距离均不小于 `scenario.min_ue_distance_m`。信道生成后，
+每个 TRP 做宽带 TX/RX 波束扫描，并按最强 RSRP 波束所属 TRP 完成最终关联。
+因此 7 站点、每站 3 扇区、配置每小区 10 个 UE 时：
 
 $$
 \mathrm{num\_sites} = 7
@@ -257,12 +265,12 @@ $$
 ```yaml
 tx_array:
   model: tr38901_panel
-  num_txru: 4
-  num_ae: 1024
-  M: 16
+  num_txru: 2
+  num_ae: 256
+  M: 8
   N: 16
   P: 2
-  Mg: 2
+  Mg: 1
   Ng: 1
   Mp: 1
   Np: 1
@@ -275,30 +283,32 @@ AE 数校验：
 $$
 \begin{aligned}
 \mathrm{num\_ae}
-&= M \times N \times P \times M_g \times N_g \times M_p \times N_p \\
-&= 16 \times 16 \times 2 \times 2 \times 1 \times 1 \times 1 \\
-&= 1024
+&= M \times N \times P \times M_g \times N_g \\
+&= 8 \times 16 \times 2 \times 1 \times 1 \\
+&= 256
 \end{aligned}
 $$
 
-默认共享码本按一个物理面板定义，DFT 空间码本不乘极化数 `P`：
+`Mp/Np` 是每个物理面板、每种极化内的垂直/水平 TXRU 数，不增加阵元数。
+每个 TXRU 子阵包含 `(M/Mp)×(N/Np)` 个阵元。默认共享码本按一个 TXRU 子阵
+定义，DFT 空间码本不乘极化数 `P`：
 
 $$
 \begin{aligned}
-H_{\mathrm{panel}} &= N = 16 \\
-V_{\mathrm{panel}} &= M = 16 \\
-\mathrm{per\ panel\ spatial\ codebook\ size} &= H_{\mathrm{panel}} \times V_{\mathrm{panel}} = 256 \\
-\mathrm{compact\ beam/channel\ TX\ dimension} &= M \times N \times P = 512
+H_{\mathrm{subarray}} &= N/N_p = 16 \\
+V_{\mathrm{subarray}} &= M/M_p = 8 \\
+\mathrm{per\ subarray\ spatial\ codebook\ size} &= 128 \\
+\mathrm{compact\ beam/channel\ TX\ dimension} &= 8 \times 16 \times 2 = 256
 \end{aligned}
 $$
 
-默认 SLS 固定 `measurement.tx_panel_index: 0`，从 256 个方向中均匀采样：
+v2.21 默认 YAML 固定 `measurement.tx_panel_index: 0` 并扫描全部 128 个方向：
 
 ```yaml
 tx_array:
-  num_beams_h: 4
-  num_beams_v: 4
-  max_beams: 16
+  num_beams_h: 16
+  num_beams_v: 8
+  max_beams: 128
 
 measurement:
   tx_panel_index: 0
@@ -308,20 +318,18 @@ measurement:
 即每个活动码本扫描：
 
 $$
-\mathrm{num\_beams}_h \times \mathrm{num\_beams}_v = 16\ \mathrm{beams}
+\mathrm{num\_beams}_h \times \mathrm{num\_beams}_v = 128\ \mathrm{beams}
 $$
 
 ---
 
 ## 4. RF architecture 与 MU order
 
-v2.4 新增：
-
 ```yaml
 rf_architecture:
   txru_connectivity: panel_polarization_subarray
   allow_independent_polarization_beams: false
-  num_txru: 4
+  num_txru: 2
   max_parallel_beams_per_trp: auto
 
 scheduler:
@@ -337,24 +345,27 @@ scheduler:
 rf_architecture:
   txru_connectivity: panel_polarization_subarray
   allow_independent_polarization_beams: false
-  num_txru: 4
+  num_txru: 2
 
 measurement:
   tx_panel_index: 0
   use_panel_channel_views: true
 ```
 
-同一 panel 的两个极化共享空间波束。码本不绑定具体 TXRU，调度器从 TRP
-共享码本中任意选择波束。默认 TRP 有 2 个物理面板，因此：
+同一空间位置的两个极化 TXRU 共享波束。码本不绑定具体 TXRU 组，调度器从 TRP
+共享码本中选择波束。默认 `Mg*Ng*Mp*Np=1`，因此：
 
 $$
-\mathrm{max\_parallel\_beams\_per\_trp} = \mathrm{number\_of\_physical\_panels} = 2
+\mathrm{max\_parallel\_beams\_per\_trp} = M_gN_gM_pN_p = 1
 $$
 
-完整 TRP 信道始终以 1024 维保存。SLS 只从完整张量中提取
-`tx_panel_index` 对应的 `M*N*P=512` 维计算视图；实际传输则根据调度器为
-每个波束动态分配的物理面板提取对应视图。`use_panel_channel_views: false`
-仅用于改回 1024 维零填充码本做等价性对照，不会改变完整信道的保存方式。
+完整 TRP 信道以 `M*N*P*Mg*Ng=256` 维保存。SLS 提取 `tx_panel_index`
+对应的 `(M/Mp)*(N/Np)*P=256` 维 TXRU 子阵视图；实际传输按调度器分配的
+子阵提取对应视图。`use_panel_channel_views: false` 可用于全维零填充对照。
+
+`Mp×Np` 可表达从部分连接到全数字的连续划分。当 `Mp=M`、`Np=N` 时，每个
+TXRU/极化只连接一个阵元，解析器使用 full-array joint DFT 码本，并将每 TRP
+并发空间流上限设为 `Mg*Ng*M*N`。
 
 ### 4.2 兼容模式：极化独立波束
 
@@ -371,7 +382,7 @@ rf_architecture:
   num_txru: 4
 ```
 
-含义：每个 TXRU 都连接到整个 TRP 的 1024 AEs，每个 TXRU 可形成一个 full-array DFT beam。因此：
+含义：每个 TXRU 都连接到整个 TRP 阵列，每个 TXRU 可形成一个 full-array DFT beam。因此：
 
 $$
 \mathrm{max\_parallel\_beams\_per\_trp} = \mathrm{num\_txru} = 4
@@ -654,9 +665,14 @@ figures/cell0_local_nack_rate/<scheme>/drop_<drop>.png
 用于平局判定的预测值。
 
 `system.tx_power_dbm` 表示每个 TRP 的总发射功率。代码先转换到线性功率，
-再均分给该 TRP 的所有物理面板；不会除以全网小区数、站点数或 TRP 数。
-`panel_power_mode` 是已弃用兼容字段，不再改变该语义。解析后的每 TRP/每面板功率
+再均分给该 TRP 的 `Mg*Ng*Mp*Np` 个空间 TXRU 组；不会除以全网小区数、站点数
+或 TRP 数。`panel_power_mode` 是已弃用兼容字段，不再改变该语义。解析后的功率
 会写入 `resolved_config.yaml`、`array_config_summary.json` 和 `metrics/drops.csv`。
+
+7 站点默认配置的外围 18 个扇区仍参与信道、关联、调度和实际干扰计算，但
+`summary`、系统/UE 吞吐和 CDF 只纳入中心站 cells `[0,1,2]`。全网原始明细保留在
+`link_tti.csv` 与 `ues.csv`，可用 `statistics_in_scope` 区分；解析范围另写入
+`statistics_scope.json`。
 
 `summary.csv/json` 对每个方案新增 `tbler_zero_ratio`、
 `avg_scheduled_users_per_tti`、`p05_effective_sinr_db`、

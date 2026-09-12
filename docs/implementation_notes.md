@@ -63,20 +63,21 @@ $$
 
 $$
 \begin{aligned}
-\mathrm{num\_ae} &= M \times N \times P \times M_g \times N_g \times M_p \times N_p \\
-\mathrm{num\_h} &= N \times N_g \times N_p \\
-\mathrm{num\_v} &= M \times M_g \times M_p \\
+\mathrm{num\_ae} &= M \times N \times P \times M_g \times N_g \\
+\mathrm{num\_h} &= N \times N_g \\
+\mathrm{num\_v} &= M \times M_g \\
+\mathrm{num\_TXRU} &= M_gN_gM_pN_pP \\
 \mathrm{polarization\_count} &= P
 \end{aligned}
 $$
 
 The numpy fallback channel and DFT codebook use the project ordering
 `[pol0 full-spatial, pol1 full-spatial, ...]`. Every channel backend retains the
-complete TRP tensor `H[UE,TX_UNIT,FREQ,RX_AE,TX_AE]`, so the default TX dimension
-remains 1024. With `measurement.use_panel_channel_views: true`, SLS extracts the
-configured reference panel across all polarization blocks and computes with a
-temporary `M*N*P=512` array. Actual-link evaluation independently extracts the
-physical panel dynamically assigned to each scheduled beam. The full channel is
+complete TRP tensor `H[UE,TX_UNIT,FREQ,RX_AE,TX_AE]`, so the v2.21 default TX
+dimension is 256. With `measurement.use_panel_channel_views: true`, SLS extracts
+the configured reference TXRU subarray across all polarization blocks and uses
+`(M/Mp)*(N/Np)*P` dimensions. Actual-link evaluation independently extracts the
+TXRU subarray dynamically assigned to each scheduled beam. The full channel is
 never overwritten or discarded.
 
 Sionna CIR axes are consumed as

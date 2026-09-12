@@ -9,9 +9,9 @@ from .service_beam_statistics import run_service_beam_statistics
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run Phase-1 beam-domain SLS simulation.")
-    parser.add_argument("--config", type=str, default="configs/phase1_single_cell.yaml",
+    parser.add_argument("--config", type=str, default="configs/v2_21_default.yaml",
                         help="YAML config path")
-    parser.add_argument("--out", type=str, default="runs/phase1_demo",
+    parser.add_argument("--out", type=str, default="runs/v2_21_default",
                         help="Output directory")
     parser.add_argument("--num-drops", type=int, default=None,
                         help="Override system.num_drops for quick tests")

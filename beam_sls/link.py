@@ -60,7 +60,7 @@ def realized_sinr_grid(schedule: ScheduleResult,
                        tx_power_w_per_panel: float,
                        ignore_interference: bool = False,
                        tx_array: ArrayConfig | None = None) -> Dict[int, np.ndarray]:
-    """Return SINR[f] using full H and dynamically assigned physical panels."""
+    """Return SINR[f] using full H and assigned spatial TXRU subarrays."""
     out: Dict[int, np.ndarray] = {}
     links = schedule.links
     panel_by_link: Dict[Tuple[int, int], int] = {}
@@ -107,7 +107,7 @@ def realized_sinr_grid(schedule: ScheduleResult,
                     continue
                 bn = other.beam_index
                 bid_n = beam_ids[bn]
-                # The interferer's physical panel assignment is independent of
+                # The interferer's TXRU-subarray assignment is independent of
                 # the victim UE. Look it up using the scheduled other link.
                 h_int_full = h_freq[u, bid_n.tx_unit]
                 f_int = tx_beams[bn]

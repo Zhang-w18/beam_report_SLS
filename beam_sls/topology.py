@@ -49,6 +49,7 @@ class UE:
     serving_cell: int = 0
     site_id: int = 0
     scheduling_cluster: int = 0
+    is_indoor: bool = False
 
     @property
     def distance_2d_m(self) -> float:
@@ -73,6 +74,7 @@ class UE:
             "serving_cell": int(self.serving_cell),
             "site_id": int(self.site_id),
             "scheduling_cluster": int(self.scheduling_cluster),
+            "is_indoor": bool(self.is_indoor),
             "distance_2d_m": self.distance_2d_m,
             "azimuth_deg": float(np.rad2deg(self.azimuth_rad)),
         }
@@ -497,6 +499,89 @@ def drop_uniform_cell(num_ues: int,
     return accepted
 
 
+def _sample_uniform_hexagon(radius_m: float,
+                            rng: np.random.Generator) -> Tuple[float, float]:
+    """Sample a point uniformly from a Voronoi hexagon of circumradius R."""
+    radius = float(radius_m)
+    half_width = np.sqrt(3.0) * radius / 2.0
+    while True:
+        x = float(rng.uniform(-half_width, half_width))
+        y = float(rng.uniform(-radius, radius))
+        if abs(y) <= radius - abs(x) / np.sqrt(3.0):
+            return x, y
+
+
+def drop_uniform_network(num_ues: int,
+                         sites: Sequence[Site],
+                         sectors: Sequence[Sector],
+                         isd_m: float,
+                         min_bs_distance_m: float,
+                         rng: np.random.Generator,
+                         ue_height_m: float = 1.5,
+                         hex_radius_m: float | None = None) -> List[UE]:
+    """Uniformly sample the union of equal-area site Voronoi hexagons.
+
+    The total UE count is provided once for the entire deployment. Points
+    closer than ``min_bs_distance_m`` to *any* BS are rejected. The geometric
+    serving cell stored here is only an initialization value; the simulation
+    overwrites it using the long-term beam-swept RSRP association.
+    """
+    if not sites or not sectors:
+        raise ValueError("uniform network drop requires at least one site and sector")
+    radius = float(hex_radius_m) if hex_radius_m is not None else float(isd_m) / np.sqrt(3.0)
+    if radius <= 0.0:
+        raise ValueError("ue_drop.network_hex_radius_m must be positive")
+    if min_bs_distance_m < 0.0:
+        raise ValueError("scenario.min_ue_distance_m must be non-negative")
+
+    accepted: List[UE] = []
+    attempts = 0
+    max_attempts = max(1000, int(num_ues) * 10000)
+    while len(accepted) < int(num_ues):
+        attempts += 1
+        if attempts > max_attempts:
+            raise RuntimeError(
+                "Could not place all UEs in the network region; check the "
+                "hex radius and minimum BS distance"
+            )
+        site = sites[int(rng.integers(0, len(sites)))]
+        dx, dy = _sample_uniform_hexagon(radius, rng)
+        x_m = float(site.x_m + dx)
+        y_m = float(site.y_m + dy)
+        if any(
+            np.hypot(x_m - bs.x_m, y_m - bs.y_m) < float(min_bs_distance_m)
+            for bs in sites
+        ):
+            continue
+        serving_cell, site_id = serving_cell_from_position(
+            x_m, y_m, sites, sectors
+        )
+        accepted.append(UE(
+            ue_id=len(accepted),
+            x_m=x_m,
+            y_m=y_m,
+            z_m=float(ue_height_m),
+            serving_cell=serving_cell,
+            site_id=site_id,
+        ))
+    return accepted
+
+
+def assign_indoor_states(ues: Sequence[UE],
+                         indoor_probability: float,
+                         rng: np.random.Generator) -> None:
+    """Assign an exact per-drop indoor fraction, randomized across UEs."""
+    probability = float(indoor_probability)
+    if not 0.0 <= probability <= 1.0:
+        raise ValueError("ue_drop.indoor_probability must be within [0, 1]")
+    num_indoor = int(round(probability * len(ues)))
+    indoor_indices = set(
+        int(index) for index in rng.permutation(len(ues))[:num_indoor]
+    )
+    for index, ue in enumerate(ues):
+        ue.is_indoor = index in indoor_indices
+
+
 def make_topology(cfg: Dict, rng: np.random.Generator) -> Topology:
     sc = cfg["scenario"]
     topo_cfg = cfg.get("topology", {})
@@ -512,25 +597,43 @@ def make_topology(cfg: Dict, rng: np.random.Generator) -> Topology:
     sectors = build_sectors(sites, sectors_per_site, sector_az, sector_width_deg)
 
     ues: List[UE] = []
-    uid = 0
-    if ud.get("distribution", "uniform_in_sector") != "uniform_in_sector":
-        raise ValueError("v2 currently supports ue_drop.distribution=uniform_in_sector")
-    for sec in sectors:
-        site = next(s for s in sites if s.site_id == sec.site_id)
-        new_ues = drop_uniform_cell(
-            num_ues=int(ud["num_ut_per_sector"]),
-            min_radius_m=float(sc["min_ue_distance_m"]),
-            max_radius_m=float(sc["max_ue_distance_m"]),
-            sector=sec,
-            site=site,
+    distribution = str(ud.get("distribution", "uniform_in_network")).lower()
+    if distribution in ("uniform_in_network", "uniform_network", "network_uniform"):
+        ues = drop_uniform_network(
+            num_ues=int(ud["num_ut_per_sector"]) * len(sectors),
             sites=sites,
             sectors=sectors,
+            isd_m=isd_m,
+            min_bs_distance_m=float(sc["min_ue_distance_m"]),
             rng=rng,
-            start_ue_id=uid,
             ue_height_m=float(topo_cfg.get("ue_height_m", 1.5)),
+            hex_radius_m=ud.get("network_hex_radius_m"),
         )
-        ues.extend(new_ues)
-        uid += len(new_ues)
+    elif distribution == "uniform_in_sector":
+        uid = 0
+        for sec in sectors:
+            site = next(s for s in sites if s.site_id == sec.site_id)
+            new_ues = drop_uniform_cell(
+                num_ues=int(ud["num_ut_per_sector"]),
+                min_radius_m=float(sc["min_ue_distance_m"]),
+                max_radius_m=float(sc["max_ue_distance_m"]),
+                sector=sec,
+                site=site,
+                sites=sites,
+                sectors=sectors,
+                rng=rng,
+                start_ue_id=uid,
+                ue_height_m=float(topo_cfg.get("ue_height_m", 1.5)),
+            )
+            ues.extend(new_ues)
+            uid += len(new_ues)
+    else:
+        raise ValueError(
+            "ue_drop.distribution must be uniform_in_network or uniform_in_sector"
+        )
+    assign_indoor_states(
+        ues, float(ud.get("indoor_probability", 0.0)), rng
+    )
 
     first_sector = sectors[0] if sectors else Sector(0, 0, 0, 0.0, sector_width_deg)
     return Topology(ues=ues,
@@ -541,7 +644,11 @@ def make_topology(cfg: Dict, rng: np.random.Generator) -> Topology:
                     layout=layout,
                     sector_azimuth_deg=float(first_sector.azimuth_deg),
                     sector_width_deg=float(sector_width_deg),
-                    metadata={"topology_config": topo_cfg})
+                    metadata={
+                        "topology_config": topo_cfg,
+                        "ue_distribution": distribution,
+                        "indoor_probability": float(ud.get("indoor_probability", 0.0)),
+                    })
 
 
 def make_phase1_topology(cfg: Dict, rng: np.random.Generator) -> Topology:

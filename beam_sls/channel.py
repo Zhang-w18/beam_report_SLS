@@ -355,14 +355,14 @@ class SionnaTR38901Adapter:
         fc_hz = float(sc["carrier_frequency_ghz"]) * 1e9
 
         def _panel_kwargs(array_cfg: ArrayConfig, role: str) -> List[Dict]:
-            # For 3GPP-style config, use per-panel dimensions M/N and panel
-            # grid Mg/Mp by Ng/Np. For legacy config, fall back to one panel
-            # with num_v by num_h elements.
+            # M/N are physical elements per panel. Mp/Np describe TXRU
+            # partitions inside a panel and must not alter Sionna PanelArray
+            # geometry or antenna count.
             if array_cfg.model == "tr38901_panel":
                 rows_per_panel = int(array_cfg.M or array_cfg.num_v)
                 cols_per_panel = int(array_cfg.N or array_cfg.num_h)
-                rows_panels = int(array_cfg.Mg or 1) * int(array_cfg.Mp or 1)
-                cols_panels = int(array_cfg.Ng or 1) * int(array_cfg.Np or 1)
+                rows_panels = int(array_cfg.Mg or 1)
+                cols_panels = int(array_cfg.Ng or 1)
             else:
                 rows_per_panel = int(array_cfg.num_v)
                 cols_per_panel = int(array_cfg.num_h)
@@ -436,7 +436,10 @@ class SionnaTR38901Adapter:
         speed_mps = float(self.cfg.get("ue_drop", {}).get("speed_kmh", 3.0)) / 3.6
         ut_vel = np.zeros((len(topology.ues), 3), dtype=np.float32)
         ut_vel[:, 0] = speed_mps
-        in_state = np.zeros((len(topology.ues),), dtype=bool)
+        in_state = np.asarray(
+            [bool(getattr(ue, "is_indoor", False)) for ue in topology.ues],
+            dtype=bool,
+        )
 
         def T(x, dtype=None):
             if dtype is None:

@@ -84,17 +84,57 @@ def _panels_per_cell(cfg: Dict[str, Any], tx_cfg: ArrayConfig | None = None, rf_
 
 def resolve_tx_power_w_per_panel(cfg: Dict[str, Any],
                                  tx_cfg: ArrayConfig) -> float:
-    """Resolve one physical panel's power from the per-TRP YAML power.
+    """Resolve one co-steered TXRU-subarray group's power from TRP power.
 
     ``system.tx_power_dbm`` is the total power of each TRP. Every TRP receives
     that same budget, independently of the number of sites, cells, or TRPs in
-    the network. The budget is shared equally by the TRP's physical panels in
-    the linear-power domain.
+    the network. The budget is shared equally by the TRP's disjoint spatial
+    TXRU groups (``Mg*Ng*Mp*Np``) in the linear-power domain.
     """
     total_tx_power_w_per_trp = float(
         dbm_to_watt(float(cfg["system"]["tx_power_dbm"]))
     )
     return total_tx_power_w_per_trp / max(1, int(tx_cfg.num_array_panels))
+
+
+def resolve_statistics_cell_ids(topology, cfg: Dict[str, Any]) -> List[int]:
+    """Resolve cells included in aggregate KPI statistics."""
+    stats_cfg = cfg.get("statistics", {}) or {}
+    explicit = stats_cfg.get("cell_ids")
+    if explicit is not None:
+        cells = sorted({int(cell) for cell in explicit})
+    else:
+        mode = str(stats_cfg.get("cell_scope", "all")).lower()
+        if mode == "all" or (
+            mode == "center_site_for_seven_site" and len(topology.sites) != 7
+        ):
+            cells = sorted(int(sector.cell_id) for sector in topology.sectors)
+        elif mode in ("center_site", "center_site_for_seven_site"):
+            configured_site = stats_cfg.get("center_site_id")
+            if configured_site is None:
+                center_site = min(
+                    topology.sites,
+                    key=lambda site: (
+                        float(np.hypot(site.x_m, site.y_m)), int(site.site_id)
+                    ),
+                )
+                site_id = int(center_site.site_id)
+            else:
+                site_id = int(configured_site)
+            cells = sorted(
+                int(sector.cell_id)
+                for sector in topology.sectors
+                if int(sector.site_id) == site_id
+            )
+        else:
+            raise ValueError(
+                "statistics.cell_scope must be all, center_site, or "
+                "center_site_for_seven_site"
+            )
+    valid = {int(sector.cell_id) for sector in topology.sectors}
+    if not cells or not set(cells).issubset(valid):
+        raise ValueError("statistics scope must select at least one valid cell")
+    return cells
 
 
 def _progress(cfg: Dict[str, Any], msg: str) -> None:
@@ -767,17 +807,18 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
         dbm_to_watt(float(cfg["system"]["tx_power_dbm"]))
     )
     tx_power_w_per_panel = resolve_tx_power_w_per_panel(cfg, tx_cfg)
-    cfg["_resolved"]["tx_power_semantics"] = "total_per_trp_equal_physical_panels"
+    cfg["_resolved"]["tx_power_semantics"] = "total_per_trp_equal_spatial_txru_groups"
     cfg["_resolved"]["tx_power_w_per_trp"] = total_tx_power_w_per_trp
     cfg["_resolved"]["tx_power_w_per_panel"] = tx_power_w_per_panel
-    cfg["_resolved"]["num_physical_panels_per_trp"] = int(tx_cfg.num_array_panels)
+    cfg["_resolved"]["num_physical_panels_per_trp"] = int(tx_cfg.num_physical_panels)
+    cfg["_resolved"]["num_spatial_txru_groups_per_trp"] = int(tx_cfg.num_array_panels)
     save_config(out_dir / "resolved_config.yaml", cfg)
     _progress(cfg, f"[init] RF={rf_arch.connectivity}, tx_units/TRP={rf_arch.tx_units_per_trp}, max_mu_order={effective_mu_order}")
     _progress(
         cfg,
         f"[init] tx_power_dbm={float(cfg['system']['tx_power_dbm']):.3f} dBm "
-        f"per TRP, physical_panels/TRP={tx_cfg.num_array_panels}, "
-        f"power/panel={float(watt_to_dbm(tx_power_w_per_panel)):.3f} dBm",
+        f"per TRP, spatial_TXRU_groups/TRP={tx_cfg.num_array_panels}, "
+        f"power/group={float(watt_to_dbm(tx_power_w_per_panel)):.3f} dBm",
     )
     write_json(out_dir / "rf_architecture_summary.json", rf_arch.to_dict())
     write_json(out_dir / "array_config_summary.json", {
@@ -795,9 +836,11 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             if rf_arch.compact_panel_channel else tx_cfg.num_ant
         ),
         "tx_full_num_ant": tx_cfg.num_ant,
-        "tx_power_semantics": "total_per_trp_equal_physical_panels",
+        "tx_power_semantics": "total_per_trp_equal_spatial_txru_groups",
         "tx_power_per_trp_dbm": float(cfg["system"]["tx_power_dbm"]),
         "tx_power_per_panel_dbm": float(watt_to_dbm(tx_power_w_per_panel)),
+        "tx_num_physical_panels": int(tx_cfg.num_physical_panels),
+        "tx_num_spatial_txru_groups": int(tx_cfg.num_array_panels),
         "channel_storage": "full_trp",
         "ue_rx_beams": _max_beams_from_cfg(cfg["ue_array"], rx_cfg),
         "rf_architecture": rf_arch.to_dict(),
@@ -806,6 +849,22 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
 
     # Build a representative topology once to determine network cells and draw topology.
     topo0 = make_topology(cfg, np.random.default_rng(random_seed))
+    statistics_cell_ids = resolve_statistics_cell_ids(topo0, cfg)
+    statistics_site_ids = sorted({
+        int(topo0.sector_by_cell(cell).site_id) for cell in statistics_cell_ids
+    })
+    cfg["_resolved"]["statistics_cell_ids"] = statistics_cell_ids
+    cfg["_resolved"]["statistics_site_ids"] = statistics_site_ids
+    save_config(out_dir / "resolved_config.yaml", cfg)
+    write_json(out_dir / "statistics_scope.json", {
+        "configured_cell_scope": str(
+            cfg.get("statistics", {}).get("cell_scope", "all")
+        ),
+        "cell_ids": statistics_cell_ids,
+        "site_ids": statistics_site_ids,
+        "raw_detail_outputs_include_all_cells": True,
+        "aggregate_kpis_use_only_selected_cells": True,
+    })
     site_id_by_cell = [topo0.sector_by_cell(c).site_id for c in range(topo0.num_cells)]
     beam_ids, tx_beams = build_network_tx_beams(
         num_cells=topo0.num_cells,
@@ -939,6 +998,10 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             topo,
             tx_power_w_per_panel,
         )
+        statistics_ue_ids = {
+            int(ue.ue_id) for ue in topo.ues
+            if int(ue.serving_cell) in statistics_cell_ids
+        }
         if ch.pathloss_db_by_site is not None:
             for ue in topo.ues:
                 ch.pathloss_db[int(ue.ue_id)] = ch.pathloss_db_by_site[
@@ -997,6 +1060,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
                 "cluster_mode": cluster_mode,
                 "serving_cell": int(ue.serving_cell),
                 "site_id": int(ue.site_id),
+                "statistics_in_scope": int(ue.ue_id) in statistics_ue_ids,
                 "serving_average_rsrp_w": float(
                     average_rsrp_by_ue_cell[int(ue.ue_id)][int(ue.serving_cell)]
                 ),
@@ -1092,6 +1156,7 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
         for ue in topo.ues:
             d = ue.to_dict()
             d["drop"] = drop
+            d["statistics_in_scope"] = int(ue.ue_id) in statistics_ue_ids
             d["pathloss_db"] = float(ch.pathloss_db[ue.ue_id]) if ue.ue_id < len(ch.pathloss_db) else float("nan")
             d["shadow_db"] = float(ch.shadow_db[ue.ue_id]) if ue.ue_id < len(ch.shadow_db) else float("nan")
             ue_rows.append(d)
@@ -1405,6 +1470,8 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
         drop_rows.append({
             "drop": drop,
             "num_ues": len(topo.ues),
+            "num_statistics_ues": len(statistics_ue_ids),
+            "statistics_cell_ids": statistics_cell_ids,
             "num_cells": topo.num_cells,
             "num_sites": len(topo.sites),
             "num_beams": len(beam_ids),
@@ -1420,7 +1487,8 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             "occupied_bandwidth_mhz": float(noise_bw_hz / 1e6),
             "noise_dbm": float(watt_to_dbm(noise_w)),
             "tx_power_per_trp_dbm": float(cfg["system"]["tx_power_dbm"]),
-            "num_physical_panels_per_trp": int(tx_cfg.num_array_panels),
+            "num_physical_panels_per_trp": int(tx_cfg.num_physical_panels),
+            "num_spatial_txru_groups_per_trp": int(tx_cfg.num_array_panels),
             "tx_power_per_panel_dbm": float(watt_to_dbm(tx_power_w_per_panel)),
             # Retained as a compatibility alias for older post-processing.
             "tx_power_per_tx_unit_dbm": float(watt_to_dbm(tx_power_w_per_panel)),
@@ -1433,6 +1501,28 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
         })
 
     link_dict_rows = _asdict_rows(all_link_rows)
+    statistics_ue_keys = {
+        (int(row["drop"]), int(row["ue_id"]))
+        for row in ue_rows if bool(row.get("statistics_in_scope", False))
+    }
+    for row in link_dict_rows:
+        row["statistics_in_scope"] = (
+            int(row["drop"]), int(row["ue_id"])
+        ) in statistics_ue_keys
+    analysis_link_rows = [
+        row for row in link_dict_rows if bool(row["statistics_in_scope"])
+    ]
+    analysis_ue_rows = [
+        row for row in ue_rows if bool(row.get("statistics_in_scope", False))
+    ]
+    analysis_su_snr_rows = [
+        row for row in su_snr_sample_rows
+        if (int(row["drop"]), int(row["ue_id"])) in statistics_ue_keys
+    ]
+    analysis_scheduled_su_rows = [
+        row for row in scheduled_ue_su_throughput_rows
+        if (int(row["drop"]), int(row["ue_id"])) in statistics_ue_keys
+    ]
     paired_debug_cfg = cfg.get("analysis", {}).get("paired_case_debug", {}) or {}
     if bool(paired_debug_cfg.get("enabled", False)):
         configured_pairs = paired_debug_cfg.get("pairs", []) or []
@@ -1469,11 +1559,11 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     write_csv(out_dir / "metrics" / "channel_backend.csv", channel_backend_rows)
 
     ue_goodput_rows = build_ue_goodput_rows(
-        link_dict_rows, analysis_schemes, ue_rows, num_tti,
+        analysis_link_rows, analysis_schemes, analysis_ue_rows, num_tti,
     )
     write_csv(out_dir / "metrics" / "ue_goodput.csv", ue_goodput_rows)
     system_tti_goodput_rows = build_system_tti_goodput_rows(
-        link_dict_rows, analysis_schemes, num_drops, num_tti,
+        analysis_link_rows, analysis_schemes, num_drops, num_tti,
     )
     system_drop_avg_goodput_rows = build_system_drop_avg_goodput_rows(
         system_tti_goodput_rows,
@@ -1487,20 +1577,27 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
         system_drop_avg_goodput_rows,
     )
 
-    similarity_by_drop, similarity_summary = schedule_similarity_rows(scheduled_pair_sets, case_ids)
+    scoped_pair_sets = {
+        key: {
+            pair for pair in pairs
+            if (int(key[0]), int(pair[0])) in statistics_ue_keys
+        }
+        for key, pairs in scheduled_pair_sets.items()
+    }
+    similarity_by_drop, similarity_summary = schedule_similarity_rows(scoped_pair_sets, case_ids)
     write_csv(out_dir / "metrics" / "schedule_similarity_by_drop.csv", similarity_by_drop)
     write_csv(out_dir / "metrics" / "schedule_similarity.csv", similarity_summary)
 
-    su_snr_max_rows, su_snr_summary = summarize_su_snr(su_snr_sample_rows, feedback_schemes)
-    write_csv(out_dir / "metrics" / "su_snr_samples.csv", su_snr_sample_rows)
+    su_snr_max_rows, su_snr_summary = summarize_su_snr(analysis_su_snr_rows, feedback_schemes)
+    write_csv(out_dir / "metrics" / "su_snr_samples.csv", analysis_su_snr_rows)
     write_csv(out_dir / "metrics" / "su_snr_max_per_ue.csv", su_snr_max_rows)
     write_csv(out_dir / "metrics" / "su_snr_summary.csv", su_snr_summary)
     scheduled_ue_su_throughput_summary = summarize_scheduled_ue_su_throughput(
-        scheduled_ue_su_throughput_rows, case_ids,
+        analysis_scheduled_su_rows, case_ids,
     )
     write_csv(
         out_dir / "metrics" / "scheduled_ue_su_throughput.csv",
-        scheduled_ue_su_throughput_rows,
+        analysis_scheduled_su_rows,
     )
     write_csv(
         out_dir / "metrics" / "scheduled_ue_su_throughput_summary.csv",
@@ -1540,13 +1637,19 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
             )
 
     summary = summarize_results(
-        link_dict_rows, analysis_schemes, ue_goodput_rows,
+        analysis_link_rows, analysis_schemes, ue_goodput_rows,
         system_tti_goodput_rows=system_tti_goodput_rows,
         references=evaluation_plan.references, cases_by_id=cases_by_id,
     )
     summary["_backend"] = {
         "link_adaptation": link_adapter.status.__dict__,
         "channel_backends": channel_backend_rows,
+    }
+    summary["_statistics_scope"] = {
+        "cell_ids": statistics_cell_ids,
+        "site_ids": statistics_site_ids,
+        "num_ue_samples": len(analysis_ue_rows),
+        "raw_detail_outputs_include_all_cells": True,
     }
     summary["_schedule_similarity"] = similarity_summary
     summary["_su_snr"] = su_snr_summary
@@ -1578,13 +1681,13 @@ def run_simulation(cfg: Dict[str, Any], out_dir: str | Path) -> Dict[str, Any]:
     write_csv(out_dir / "metrics" / "summary.csv", [{"scheme": k, **v} for k, v in summary.items() if isinstance(v, dict) and not k.startswith("_")])
 
     make_plots(
-        out_dir, link_dict_rows, summary, analysis_schemes,
+        out_dir, analysis_link_rows, summary, analysis_schemes,
         ue_goodput_rows=ue_goodput_rows,
         system_tti_goodput_rows=system_tti_goodput_rows,
         system_drop_avg_goodput_rows=system_drop_avg_goodput_rows,
-        su_snr_samples=su_snr_sample_rows,
+        su_snr_samples=analysis_su_snr_rows,
         su_snr_max_rows=su_snr_max_rows,
-        scheduled_ue_su_throughput_rows=scheduled_ue_su_throughput_rows,
+        scheduled_ue_su_throughput_rows=analysis_scheduled_su_rows,
         feedback_schemes=feedback_schemes,
     )
 

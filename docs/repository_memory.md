@@ -1,6 +1,6 @@
 # 仓库记忆：Sionna SLS Beam Management Platform
 
-最后更新：2026-08-21
+最后更新：2026-09-12（v2.21）
 
 本文件是供后续代码分析和修改任务快速建立上下文的稳定摘要。先看这里，再按函数
 和配置键定向读取源码。若本文与代码或测试冲突，以代码和测试为准，并在架构改动后
@@ -61,9 +61,11 @@ YAML / DEFAULT_CONFIG
 resolve RF + array + codebook
         ↓
 for each drop:
-  topology / UE positions
+  全网区域均匀 UE positions + indoor/outdoor state
         ↓
   channel H + fixed large-scale state
+        ↓
+  全 TRP TX/RX beam sweep RSRP association
         ↓
   Gamma measurement + selected RX beams
         ↓
@@ -102,11 +104,32 @@ ACK/NACK、TBLER、吞吐或 `run_tti_loop` 的调度链路。窗口内只统计
 复用该测量、report 和 schedule，仅推进小尺度信道并执行真实链路评估、
 HARQ 风格 ACK/NACK 和 OLLA 更新。
 
+v2.21 默认 `ue_drop.distribution=uniform_in_network`：总 UE 数仍为
+`num_cells*num_ut_per_sector`，但在全部站点 Voronoi 六边形并集内统一撒点，不再
+固定每 cell 数量；每个点到任一 BS 的 2D 距离均不小于 35 m。室内状态按
+`ue_drop.indoor_probability` 随机分配并传给 Sionna `in_state`。最终 serving TRP
+由每 TRP 完整 TX/RX beam sweep 的宽带平均 RSRP 最大值决定，不使用欧氏距离。
+
+`statistics.cell_scope=center_site_for_seven_site` 在 7 站点时令聚合 KPI、吞吐和
+CDF 只统计中心站 3 个 cell；外围站仍参与信道、关联、调度和实际干扰。原始
+`link_tti.csv`、`ues.csv` 保留全网明细并含 `statistics_in_scope`，解析范围写入
+`statistics_scope.json`。
+
 启用 `parameter_sweep` 时，入口按值创建独立子运行；除被遍历键外配置完全复制，
 因此不同参数值使用相同 `system.random_seed`。扫描根目录保存跨参数 KPI 汇总及合并
 CDF，当前要求每个扫描配置只解析出一个 evaluation case。
 
 ## 4. 核心数组和索引约定
+
+### 4.0 v2.21 的 3GPP 阵列定义
+
+`(M,N,P,Mg,Ng;Mp,Np)` 中，`M/N/P` 是每物理面板的垂直阵元、水平列数和
+极化数，`Mg/Ng` 是物理面板行列数，`Mp/Np` 是每面板、每极化内的 TXRU
+子阵行列数。物理阵元数为 `M*N*P*Mg*Ng`，物理 TXRU 数为
+`Mg*Ng*Mp*Np*P`。`Mp/Np` 不增加物理阵元或面板。双极化共波束时每 TRP
+最大并发空间波束数为 `Mg*Ng*Mp*Np`；默认 `(8,16,2,1,1;1,1)` 因而是
+256 AEs、2 TXRUs、1 个并发波束。`Mp=M,Np=N` 是一阵元一 TXRU 的全数字
+极限，解析为 joint full-array 码本和 `Mg*Ng*M*N` 个最大并发空间流。
 
 ### 4.1 信道
 
@@ -234,8 +257,8 @@ g[t+1] = rho*g[t] + sqrt(1-rho^2)*z[t]
 - `measurement.tx_panel_index` 和 compact panel view。
 
 `system.tx_power_dbm` 固定表示每个 TRP 的总功率，在线性功率域除以
-`tx_array.num_array_panels` 得到每物理面板功率；它不除以网络小区数、站点数、
-TRP 数或 TXRU 数。旧 `trp.panel_power_mode` 仅作为被忽略的兼容输入保留。
+`Mg*Ng*Mp*Np` 得到每个空间 TXRU 组的功率；它不除以网络小区数、站点数或
+TRP 数。旧 `trp.panel_power_mode` 仅作为被忽略的兼容输入保留。
 
 `scheduler.max_mu_order: auto` 由 RF architecture 和调度域解析。修改阵列或 RF 逻辑时，
 至少检查：
